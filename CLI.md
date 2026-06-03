@@ -3,6 +3,7 @@
 This project is now terminal-first. The application entrypoints are:
 
 ```bash
+python cli.py
 python cli.py --help
 python app.py --help
 bash app.sh --help
@@ -230,11 +231,10 @@ python cli.py explain extra epl-2018 epl-dnn --plot attention --output outputs/a
 Start an interactive terminal agent on top of the existing CLI. This is a CLI-only assistant: it does not call an LLM, and it works through slash commands, disk skills, session memory and safe tools.
 
 ```bash
-python cli.py agent
-python cli.py chat
+python cli.py
 ```
 
-The normal CLI remains unchanged. Agent slash commands delegate to the same handlers used by commands such as `python cli.py league list --catalog`.
+Traditional CLI subcommands remain available, and the default `python cli.py` entrypoint opens the agent. Agent slash commands delegate to the same handlers used by commands such as `python cli.py league list --catalog`.
 
 Useful commands inside the agent:
 

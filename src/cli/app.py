@@ -146,6 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Professional terminal interface for ProphitBet-v2. Runs without PyQt or a graphical display.",
     )
     parser.add_argument("--debug", action="store_true", help="Show full tracebacks for unexpected errors.")
+    parser.set_defaults(handler=cmd_agent, session=None)
     subparsers = parser.add_subparsers(dest="command")
 
     _build_league_parser(subparsers)

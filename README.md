@@ -36,6 +36,12 @@ Comprobar que el CLI carga:
 python cli.py --help
 ```
 
+Abrir el agente interactivo:
+
+```bash
+python cli.py
+```
+
 `python app.py --help` tambien funciona, pero `cli.py` es el entrypoint recomendado.
 
 ## Agent Mode
@@ -43,8 +49,7 @@ python cli.py --help
 Ademas de los comandos tradicionales, el proyecto incluye un agente interactivo de terminal. No usa un modelo LLM: funciona como shell CLI con slash commands, skills en disco, memoria de sesion y ejemplos guiados.
 
 ```bash
-python cli.py agent
-python cli.py chat
+python cli.py
 ```
 
 Dentro del agente puedes usar slash commands que delegan al CLI existente:

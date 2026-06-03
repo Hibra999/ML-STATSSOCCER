@@ -2,6 +2,7 @@ from argparse import Namespace
 
 import pytest
 
+from src.cli import app as cli_app
 from src.cli.common import CLIError, parse_eval_odd_range, parse_odd_range, validate_identifier
 from src.cli.model_specs import build_model_params
 from src.preprocessing.utils.target import TargetType
@@ -24,6 +25,18 @@ def test_parse_eval_odd_range():
 def test_validate_identifier_rejects_spaces():
     with pytest.raises(CLIError):
         validate_identifier("bad id", "model id")
+
+
+def test_run_without_args_starts_agent(monkeypatch):
+    calls = []
+
+    def fake_cmd_agent(args):
+        calls.append(args.session)
+
+    monkeypatch.setattr(cli_app, "cmd_agent", fake_cmd_agent)
+
+    assert cli_app.run([]) == 0
+    assert calls == [None]
 
 
 def test_build_dnn_params_omits_calibration():
@@ -78,4 +91,3 @@ def test_build_dnn_params_omits_calibration():
     assert "calibrate_probabilities" not in params
     assert params["hidden_layers"] == 2
     assert params["vsn"] is False
-
