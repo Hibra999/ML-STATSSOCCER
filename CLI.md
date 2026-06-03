@@ -257,6 +257,8 @@ Useful commands inside the agent:
 
 Type `/` in the agent prompt to autocomplete slash commands and direct skill shortcuts. Use `/skill <name>` for the full skill instructions, or call simple shortcuts such as `/downloadleague`, `/loadleague`, `/trainmodel`, `/predictfixtures`, and `/debug`.
 
+Simple shortcuts automatically show current options before the instructions: `/downloadleague` prints the downloadable league catalog, `/loadleague` prints saved leagues, `/trainmodel` prints model types, and model-based skills show saved models when a league id is provided.
+
 Agent context shortcuts:
 
 ```text

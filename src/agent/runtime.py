@@ -14,6 +14,29 @@ from src.agent.skills import SkillRegistry
 from src.agent.slash_router import SlashRouter
 from src.agent.tools import ToolRuntime
 
+ANALYSIS_TYPES = [
+    "descriptive",
+    "distributions",
+    "variance",
+    "correlation",
+    "boruta",
+    "coefficients",
+    "impurity",
+    "rules",
+]
+MODEL_TYPES = [
+    "logistic",
+    "discriminant",
+    "decision-tree",
+    "random-forest",
+    "xgboost",
+    "knn",
+    "naive-bayes",
+    "svm",
+    "dnn",
+]
+EXPLAIN_TYPES = ["boundary", "pdp", "waterfall", "shap", "extra"]
+
 
 class AgentRuntime:
     """Coordinates slash commands, skills, tools, context and session memory."""
@@ -121,11 +144,71 @@ class AgentRuntime:
             lines.append("")
             lines.append("Examples:")
             lines.extend(f"- {example}" for example in skill.examples)
+        preview = self._skill_preview(skill.display_name, args)
+        if preview:
+            lines.append("")
+            lines.append(preview)
         lines.append("")
         lines.append(skill.body)
         response = RuntimeResponse("\n".join(lines).strip())
         self.session.add_message("assistant", response.message)
         return response
+
+    def _skill_preview(self, skill_name: str, args: List[str]) -> str:
+        if skill_name in {"downloadleague", "league"}:
+            return "\n\n".join([
+                self._cli_preview("Catalogo de ligas descargables", ["league", "list", "--catalog"]),
+                self._cli_preview("Ligas guardadas", ["league", "list"]),
+            ])
+
+        if skill_name == "loadleague":
+            if args:
+                return self._cli_preview(f'Liga "{args[0]}"', ["league", "show", args[0], "--rows", "20"])
+            return self._cli_preview("Ligas guardadas", ["league", "list"])
+
+        if skill_name == "train":
+            sections = [self._static_preview("Tipos de modelo disponibles", MODEL_TYPES)]
+            if args:
+                sections.append(self._cli_preview(f'Modelos guardados para "{args[0]}"', ["model", "list", args[0]]))
+            else:
+                sections.append(self._cli_preview("Ligas guardadas", ["league", "list"]))
+            return "\n\n".join(sections)
+
+        if skill_name in {"evaluate", "explain", "predict", "fixtures"}:
+            sections = []
+            if skill_name == "explain":
+                sections.append(self._static_preview("Graficas disponibles", EXPLAIN_TYPES))
+            if skill_name == "fixtures":
+                sections.append("Opciones de fixtures:\n- Desde archivo: /predict fixtures <league_id> --model <model_id> --input fixtures.csv\n- Desde FootyStats: /predict fixtures <league_id> --model <model_id> --date YYYY-MM-DD --headless")
+            if args:
+                sections.append(self._cli_preview(f'Modelos guardados para "{args[0]}"', ["model", "list", args[0]]))
+            else:
+                sections.append(self._cli_preview("Ligas guardadas", ["league", "list"]))
+            return "\n\n".join(sections)
+
+        if skill_name == "analysis":
+            sections = [self._static_preview("Analisis disponibles", ANALYSIS_TYPES)]
+            if args:
+                sections.append(self._cli_preview(f'Liga "{args[0]}"', ["league", "show", args[0], "--rows", "5"]))
+            else:
+                sections.append(self._cli_preview("Ligas guardadas", ["league", "list"]))
+            return "\n\n".join(sections)
+
+        if skill_name == "install":
+            return "Comprobaciones utiles:\n- python --version\n- python -c \"import prompt_toolkit; print(prompt_toolkit.__version__)\"\n- pip install -r requirements.txt"
+
+        if skill_name == "troubleshoot":
+            return self._cli_preview("Configuracion del navegador", ["config", "browser", "show"])
+
+        return ""
+
+    def _cli_preview(self, title: str, argv: List[str]) -> str:
+        result = self.tools.run_cli(argv)
+        self.session.add_command(result.command, result.exit_code, tool=result.tool)
+        return f"{title}:\n{result.render_text()}"
+
+    def _static_preview(self, title: str, values: List[str]) -> str:
+        return f"{title}:\n" + "\n".join(f"- {value}" for value in values)
 
     def skills_text(self) -> str:
         skills = self.skills.list_user_invocable()

@@ -69,6 +69,8 @@ Dentro del agente puedes usar slash commands que delegan al CLI existente:
 
 El agente carga skills desde `skills/*/SKILL.md` y tambien desde `.mlstatssoccer/skills/*/SKILL.md` si existen. Escribe `/` para autocompletar comandos y shortcuts directos de skills. `/skills` muestra las skills, aliases y ejemplos de comandos listos para usar. La memoria de sesion vive en `.mlstatssoccer/sessions/` y no requiere interfaz grafica.
 
+Las shortcuts simples muestran opciones reales automaticamente. Por ejemplo, `/downloadleague` lista el catalogo descargable, `/loadleague` lista ligas guardadas, `/trainmodel` muestra tipos de modelo, y `/fixtures epl-2018` muestra modelos disponibles para esa liga.
+
 ## Comandos Principales
 
 Listar ligas disponibles para descargar:
