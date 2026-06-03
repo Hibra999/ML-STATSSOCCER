@@ -9,24 +9,26 @@ def completion_texts(completer: AgentCommandCompleter, line: str):
 
 
 def test_slash_completion_lists_all_root_options():
-    completer = AgentCommandCompleter(["/help", "/skills", "/status"], ["train"])
+    completer = AgentCommandCompleter(["/help", "/skill", "/skills", "/status"], ["train"])
 
     texts = completion_texts(completer, "/")
 
     assert "/help" in texts
+    assert "/skill" in texts
     assert "/skills" in texts
     assert "/status" in texts
-    assert "/skill train" in texts
+    assert "/skill train" not in texts
 
 
 def test_slash_completion_filters_as_user_types():
-    completer = AgentCommandCompleter(["/help", "/skills", "/status", "/model"], ["train"])
+    completer = AgentCommandCompleter(["/help", "/skill", "/skills", "/status", "/model"], ["train"])
 
     texts = completion_texts(completer, "/s")
 
     assert "/skills" in texts
+    assert "/skill" in texts
     assert "/status" in texts
-    assert "/skill train" in texts
+    assert "/skill train" not in texts
     assert "/help" not in texts
     assert "/model" not in texts
 

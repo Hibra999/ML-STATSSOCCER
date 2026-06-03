@@ -37,17 +37,11 @@ class AgentCommandCompleter(Completer):
             yield Completion(text, start_position=start_position, display=text, display_meta=display_meta)
 
     def _complete_slash_command(self, prefix: str) -> List[Tuple[str, int, str]]:
-        candidates: List[Tuple[str, int, str]] = []
-        for command in self.slash_commands:
-            if _matches_prefix(command, prefix):
-                candidates.append((command, -len(prefix), "command"))
-
-        for skill_name in self.skill_names:
-            command = f"/skill {skill_name}"
-            if _matches_prefix(command, prefix):
-                candidates.append((command, -len(prefix), "skill"))
-
-        return candidates
+        return [
+            (command, -len(prefix), "command")
+            for command in self.slash_commands
+            if _matches_prefix(command, prefix)
+        ]
 
     def _complete_skill_name(self, command_line: str) -> List[Tuple[str, int, str]]:
         prefix = command_line[len("/skill "):]

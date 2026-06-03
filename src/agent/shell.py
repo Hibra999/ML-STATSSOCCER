@@ -10,9 +10,13 @@ from src.agent.runtime import AgentRuntime
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.shortcuts import CompleteStyle
 except ImportError:  # pragma: no cover - exercised only on minimal environments.
+    CompleteStyle = None
     PromptSession = None
     FileHistory = None
+    KeyBindings = None
 
 try:
     from rich.console import Console
@@ -54,12 +58,32 @@ class AgentShell:
         history_path = self.repo_root / ".mlstatssoccer" / "agent_history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
         completer = AgentCommandCompleter(self.runtime.slash_commands, self.runtime.skill_names)
-        return PromptSession(
-            history=FileHistory(str(history_path)),
-            completer=completer,
-            complete_while_typing=True,
-            reserve_space_for_menu=8,
-        )
+        session_options = {
+            "history": FileHistory(str(history_path)),
+            "completer": completer,
+            "complete_while_typing": True,
+            "reserve_space_for_menu": 8,
+            "key_bindings": self._build_key_bindings(),
+        }
+        if CompleteStyle is not None:
+            session_options["complete_style"] = CompleteStyle.COLUMN
+        return PromptSession(**session_options)
+
+    def _build_key_bindings(self):
+        if KeyBindings is None:
+            return None
+
+        bindings = KeyBindings()
+
+        @bindings.add("/")
+        def _(event):
+            buffer = event.current_buffer
+            buffer.insert_text("/")
+            line = buffer.document.current_line_before_cursor.lstrip()
+            if line.startswith("/"):
+                buffer.start_completion(select_first=False)
+
+        return bindings
 
     def _read_message(self) -> str:
         if self._session is None:
