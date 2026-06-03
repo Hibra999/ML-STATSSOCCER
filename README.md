@@ -1,285 +1,194 @@
-# New Version (Release 03-17-2026)
+# ML-STATSSOCCER CLI
 
-Once again, thank you for your support and your valuable feedback. The new release includes the following updates:
+Aplicacion de prediccion de futbol con Machine Learning, ahora enfocada 100% en terminal. No requiere interfaz grafica y puede ejecutarse en local o en un VPS.
 
-* Fixed several during model evaluation.
-* Fixed a bug where footystats parser would fail to parse upcoming fixtures.
-* Added Excel support into the pipeline. To use it, you will need to install `openpyxl` by opening the command line (cmd) and typinh: `pip install openpyxl`. If you installed the app in a custom environment, then you should first activate that environment.
-* Table store no longer replaces the metrics/predictions. Instead, it tries to append the new metrics or predictions into the existing file (works both in csv and excel format).
-* Added analytical evaluation metrics per season.
-* Added a "Delete Filter" button to remove unwanted filters.
+El CLI permite:
 
-# Version (Release 01-17-2026)
+- Crear, listar, actualizar y eliminar ligas.
+- Inspeccionar, buscar y exportar datasets.
+- Entrenar, evaluar y administrar modelos.
+- Predecir partidos manuales y fixtures.
+- Aplicar filtros por odds y percentiles.
+- Exportar resultados a CSV/XLSX.
+- Ejecutar analisis estadistico.
+- Generar graficos de interpretabilidad.
+- Usar scraping en modo headless.
 
-Thank you for your support, feedback and most importantly, the donations! We constantly try to update ProphitBet and add more features, with the help of your feedback. The next patch is expected to drastically improve your experience!
+La documentacion completa de comandos esta en [CLI.md](CLI.md).
 
-* Fixed several bugs which would cause the app to crash.
-* Added a new evaluation metric *"Profit Balance"*. If profit balance is lower than accuracy, then the selected matches are mathematically profitable!
+## Instalacion Con Conda
 
-# Version (Release 13-11-2025)
+```bash
+git clone git@github.com-hibra999:Hibra999/ML-STATSSOCCER.git
+cd ML-STATSSOCCER
 
-The old version of ProphitBet is deprecated and has been moved to branch `ProphitBet-v1` (You can access it by selecting it from top-left combobox). The new version, ProphitBet-v2 has now been released! The new version features:
+conda create -n prophitbet python=3.11 -y
+conda activate prophitbet
 
-* Easier/Faster Installation.
-* New, Prettier User Interface (UI).
-* Better Documentation.
-* Cleaner & Faster Code.
-* More Statistics.
-* More Analysis Tools.
-* More Training/Evaluation Tools.
-* More Training Options
-* Explainable Models.
+pip install -r requirements.txt
+```
 
-# ProphitBet-v2
-
-ProphitBet (Prophet/Profit + Bet) is an **Open Source** Machine Learning (ML) Soccer Bet prediction application, which allows you to download historical soccer data, analyze the form of teams using advanced ML methods, compute several team statistics, create statistical graph visualizations, and predict the outcomes of a matches. This app extracts soccer data (requires Internet Connection) for **every** league included in *football-data*(https://www.football-data.co.uk/). Additionally, it can parse upcoming fixtures from *Footystats*(https://footystats.org/) and predict the upcoming matches of a league, which can be organized and saved into an Excel file. Finally, it utilizes advanced model training & validation techniques, such as Cross-Validation and Holdout, which are automatically employed during the model's training, to ensure robust training of the models with low probability of generating over-fitted models. 
-
-ML is a sub-field of Artificial Intelligence (AI), which allows users to construct models that automatically extract patterns between multiple variables and predict the outcome of an event. You can learn more about ML methods here: 
-
-* https://www.ibm.com/think/topics/machine-learning
-* https://www.geeksforgeeks.org/machine-learning/machine-learning/
-
-# Terminal CLI
-
-ProphitBet is now a CLI-first application. It can run on local machines and VPS servers without a graphical desktop:
+Comprobar que el CLI carga:
 
 ```bash
 python cli.py --help
-python app.py --help
-bash app.sh --help
 ```
 
-The CLI replaces the former PyQt workflow with commands for league creation/update, dataset inspection, model training/evaluation, manual and fixture prediction, statistical analysis, interpretability, exports, and browser configuration. See [CLI.md](CLI.md) for the full command map and examples.
+`python app.py --help` tambien funciona, pero `cli.py` es el entrypoint recomendado.
 
-# Installation (New)
+## Comandos Principales
 
-## Step 1 - Python Installation
-
-If you are a new user to Python, it is recommended that you previously uninstall everything **(including previous Python versions)!**
-
-The first step to install ProphitBet-v2 is to install **Python 3.11**. Although other Python versions can also be used (Python 3.10, 3.12, 3.13, 3.14, etc.), it has only been tested in 3.10 and 3.11. Download it from here: https://www.python.org/downloads/release/python-3119/
-
-During installation, make sure the *"Add Python to Path"* is selected. If you are not sure how to install it, watch this tutorial here: (https://www.youtube.com/watch?v=yivyNCtVVDk)
-
-[![YouTube Video](https://img.youtube.com/vi/yivyNCtVVDk/0.jpg)](https://www.youtube.com/watch?v=yivyNCtVVDk)
-
-## Step 2 - Installation of Microsoft Visual C++ Redistributable (Windows Only)
-
-If you are a **Windows** user, you need to install the Microsoft Visual C++ Redistributable (x64 or x86), which can be found here: https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/mvsredistributable.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/mvsredistributable.png)
-
-If you need help for the installation, watch this 3-minute guide: 
-
-[![YouTube Video](https://img.youtube.com/vi/vDpT_CCSNP8/0.jpg)](https://www.youtube.com/watch?v=vDpT_CCSNP8)
-
-## Step 3 - Download Code
-
-Download the code from the github repository other by clicking on the green "Code" button above selecting Download zip or by copying this address: https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/archive/refs/heads/main.zip
-After the download, unzip the files into your preferred directory (e.g. *Downloads/ProphitBet*)
-
-## Step 4 - Install Python Libraries
-
-ProphitBet requires several Python libraries **(with specific versions)** to run, which are analytically described in `requirements.txt` file. If you are a new Python user, skip ignore the following instruction. If you are an advanced Python user, you can use this file to manually install the requirements in whichever environment you like or by typing `pip install -r requirements.txt`.
-
-If you are a new user, you can use the `install.py` script to automatically download the required libraries. Open the Command Line (CMD) (or Terminal in Linux). In Windows, you can open the cmd by typing *cmd* or *Command Prompt* in the Windows search bar or by pressing the keys *Win+R* and typing *cmd* there. Then, navigate to the created folder (e.g., *cd Downloads/ProphitBet*). Finally, type `python install.py` and press ENTER to initiate the installation. These libraries will be automatically installed to the default Python version. If you are an advanced user and would like to install the libraries in a specific environment, you can also use `python install.py --venv "C:\Users\You\python\envs\myenv"`. If everything runs perfectly, you will notice an *Installation complete!* message and the installation details below, otherwise it will display an error.
-
-## Step 5 - Run Application
-
-To open ProphitBet, navigate the terminal to the project folder and type `python cli.py --help` or `python app.py --help`. You can also run the terminal launcher with `app.bat` on Windows or `bash app.sh --help` on Linux/macOS.
-
-# Installation Help
-
-If you would like an additional installation help or an error occurs, please open a github issue, so that me or any user can further assist you.
-
-# Professional Terminal Interface (CLI)
-
-The application no longer requires a desktop GUI. The terminal interface provides guided prompts, structured commands, validation, confirmations, progress states, Rich tables, CSV/XLSX exports, saved matplotlib outputs, and headless browser scraping for VPS usage.
-
-Run `python cli.py --help` for the command tree or read [CLI.md](CLI.md).
-
-# Creating Leagues
-
-To create a league, run `python cli.py league create`. You can work interactively or pass flags such as `--league-index`, `--id`, `--start-year`, `--stats`, and odds filters. Created leagues are stored locally and can be listed, inspected, updated, exported, or deleted from the terminal.
-
-# Terminal Data Tools
-
-The CLI replaces the table window with terminal and export operations:
-
-1. Hide missing rows: `python cli.py data show <league-id> --hide-missing`
-2. Search/find: `python cli.py data search <league-id> Arsenal --column Home`
-3. Export/copy to files: `python cli.py data export <league-id> --output exports/data.csv`
-
-## Tips
-
-* Select a recent historical change (e.g. 2015 or after). Although old seasons can be downloaded, they do not often yield the best training results.
-* Use the filters to select a desired odd range.
-* Use the analysis tools to eliminate bad statistical features (variables).
-
-# Extended Data Analysis
-
-The app includes a variety of data analysis tools that you can work with. Use them mainly to analyze the collected matches, filter noisy statistical features and visualize the quality of each variable.
-
-## Descriptive Statistics
-
-Calculate basic statistics for each variable, such as mean, variance, standard deviation, median, min and vax values.
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_descriptive.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_descriptive.png)
-
-## Distributions
-
-Visualize the distribution of each variable to extract useful information about the quality of each variable. For instance:
-
-* Visualize the target distribution to detect imbalanced target classes (Imbalanced classes can lead to extreme bias of the model towards specific classes. In such cases, you can employ data sampling techniques and class weights.)
-* Normal distributions are usually desirable.
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_destribution.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_destribution.png)
-
-## Variance
-
-Visualize the variance of each variable. Typically, low-variance variables contain little to no information and can be eliminated.
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_variance.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_variance.png)
-
-## Correlation
-
-Use the correlation analysis tool as follows:
-
-1. Detect variables that are highly correlated to the target variables (such variables help the models to make better predictions).
-2. Detect correlations between two variables. If your goal is to create explainable/interpretable models, then only one of the two variables should be kept. 
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_variance.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_variance.png)
-
-## Boruta Algorithm (New)
-
-The boruta algorithm is a feature (variable) selection algorithm. It trains multiple times (iterations) a Random Forest to predict the outcome of the matches, but at each iteration, it replaces a feature with random values and examines the performance of the model. Finally, it ranks each feature based on the Random Forest's performance. 
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_boruta.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_boruta.png)
-
-## Logistic Regression Coefficients
-
-This tool trains a logistic regression model to predict the outcomes of the matches and analyzes its coefficients. The coefficients can display how much a statistical variable affects the outcome of a match. Be aware that the logistic regression assumes linear relationship between the target variables and the input.
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_coefficients.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_coefficients.png)
-
-## Impurity Analyzer
-
-Impurity is a statistical metric of tree-based models. This tools trains a decision tree and displays the impurity metric for each variable. It is important to note that a decision tree does not assume linear relationship between inputs and outputs, so the importances of each variable could be different than the logistic regression ones.
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_impurity.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_impurity.png)
-
-## Rules Extractor (New)
-
-You can now extract rules by training and explaining a decision tree. Specifically, the decision tree forms "IF-ELSE" rules.
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_rules.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/analysis_rules.png)
-
-# Training Models
-
-The CLI allows you to train and tune models from terminal. It supports both sliding cross-validation and k-fold cross validation methods to evaluate the trained models. Below is a list of the supported models:
-
-1. **Logistic Regression**: Linear model taht assumes linear relationship between inputs $x$ and targets $y$.
-2. **Discriminant Analysis Classifier (LDA/QDA) (New)**: Encodes the inputs $x$ into a 2D space and then computes targets in a linear/quadratic manner.
-3. **Decision Tree**: Tree classifier that forms "if-else" rules.
-4. **Random Forest**: Multiple decision trees trained in different subsets of data. The decisions of all trees are then averaged to calculate $y$.
-5. **Extreme Boosting (XGBoost)**: Classifier that trains consecutive decision trees that rectify the mistakes of the previous trees.
-6. **K-Nearest Neighbors (KNN)**: Laze classifier that computes y based on the $k$ closest (most identical) samples (matches).
-7. **Naive Bayes**: Statistical learning algorithm that uses Bayes rules to compute the probability of each target.
-8. **Support Vector Machine (SVM)**: Advanced statistical learning algorithm that utilizes support vectors to separate targets in the best possible manner.
-9. **Deep Neural Network (DNN) (New)**: Current State-Of-The-Art algorithm (used by Chat-GPT). Added support for *Attention* mechanism and *Variable Selection (VNS)*.
-
-**Two training modes are currently available**:
-
-1. Result (1/X/2)
-2. (U/O) 2.5
-
-Other result types can be added in the future.
-
-## Tips:
-
-* Tuning is typically a slow procedure, but usually finds the best possible parameters.
-* You don't have to tune all parameters, but if you are not sure about specific model's parameters, you can choose to tune them instead.
-* Use the sliding cross-validation and k-fold cross validation methods to evaluate your models. This might increase the training time, but produces more reliable models.
-* When the targets are imbalanced, use data-sampling techniques and class weight option (if available)!
-* The standard scaling algorithm usually works well with most of the algorithms.
-
-Example:
+Listar ligas disponibles para descargar:
 
 ```bash
-python cli.py model train <league-id> random-forest --id rf-result --target result --normalizer standard
+python cli.py league list --catalog
 ```
 
-# Evaluating Models
-
-The main purpose of model evaluation is to understand the strengths and weaknesses of your models (to understand in which cases/matches your model performs best). To achieve this, several tools are provided:
-
-1. Dataset Evaluation: Εvaluate how your model fits in the train (known/seen) data, as well as how your model performs in (unknown/unseen) data that are used for evaluation purposes. The correct matches are automatically highlighted.
-2. Range filters: Filter the performance of the models based on the specified odd range (.e.g., odd 1 from 1.0 to 1.30).
-3. Percentiles: Filter the performance of the models based on their output probabilities (e.g., $prob(1) > 0.3, prob(X) > 0.5, prob(2) > 0.4$, etc.).
-
-You also have the option to store the filters and utilize them during the prediction of the fixtures. Keep in mind that the filters are calculated on the specified dataset separately (All/Train/Eval).
-
-Example:
+Crear una liga:
 
 ```bash
-python cli.py model evaluate <league-id> --model rf-result --dataset eval --odd-filter "1:1.31:1.60" --p1 70 --store-filter
+python cli.py league create \
+  --league-index 6 \
+  --id epl-2018 \
+  --start-year 2018 \
+  --history-window 3 \
+  --goal-margin 2 \
+  --stats all \
+  --yes
 ```
 
-# Predict Offline
-
-You can predict any possible combination of matches you can think of (without requiring internet connection). Specify Home, Away teams, odds, and model id:
+Ver o actualizar una liga:
 
 ```bash
-python cli.py predict manual <league-id> --model rf-result --home Arsenal --away Chelsea --odd-1 2.10 --odd-x 3.40 --odd-2 3.10
+python cli.py league show epl-2018 --rows 20
+python cli.py league update epl-2018
 ```
 
-# Predict Fixtures
-
-This mode enables you to predict the outcomes of upcoming league fixtures. It can scrape FootyStats in headless mode or read a local CSV/XLSX fixture file. Stored evaluation filters can be applied during export.
+Explorar datos:
 
 ```bash
-python cli.py predict fixtures <league-id> --model rf-result --date 2026-08-15 --headless --filters all
-python cli.py predict fixtures <league-id> --model rf-result --input fixtures.csv --output exports/fixtures.csv
+python cli.py data show epl-2018 --rows 30 --hide-missing
+python cli.py data search epl-2018 Arsenal --column Home
+python cli.py data export epl-2018 --output exports/epl.csv --hide-missing
 ```
 
-# How to Submit Issue
+Entrenar un modelo:
 
-You can use the issue tab to submit a new issue (or open the url via the app). When submitting an issue, please describe clearly the following:
-
-1. What the issue is.
-2. What the application is expected to do
-3. What the application does instead.
-4. Any error/crash messages appeared in the command line.
-5. Reproduction step.
-
-An example of submitted issues that enabled me to quickly detect and resolve the issue can be found here: https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/issues/111
-
-# Contribution
-
-If you liked the app and would like to contribute, You are allowed to make changes to the code and make a pull request! Usually, it takes 1-3 days for me to
-review the changes and accept them or reply to you if there is something wrong. Keep in mind that i am only a single person working on my free time on this project, so please be patient!
-
-# Donation
-
-If you liked the app, you can buy me a coffee via Paypal:
-
-![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.com/donate/?hosted_button_id=AK3SEFDGVAWFE)
-
-or you can scan the QR-Code below:
-
-![Donation](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/ProphitBet-v1/screenshots/QR%20Code.png)
-# Citation
-
-If you are writing an academic paper, please cite us!
-
+```bash
+python cli.py model train epl-2018 random-forest \
+  --id rf-result \
+  --target result \
+  --normalizer standard
 ```
-@software{prophitBet2024,
-  author = {Vasileos Kochliaridis},
-  orcid = {0000-0001-9431-6679},
-  month = {1},
-  title = {{ProphitBet - An Open Source Soccer Prediction App}},
-  url = {https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor},
-  version = {2.0.0},
-  year = {2024}
+
+Evaluar un modelo y guardar filtros:
+
+```bash
+python cli.py model evaluate epl-2018 \
+  --model rf-result \
+  --dataset eval \
+  --odd-filter "1:1.31:1.60" \
+  --p1 70 \
+  --store-filter
+```
+
+Prediccion manual:
+
+```bash
+python cli.py predict manual epl-2018 \
+  --model rf-result \
+  --home Arsenal \
+  --away Chelsea \
+  --odd-1 2.10 \
+  --odd-x 3.40 \
+  --odd-2 3.10
+```
+
+Prediccion de fixtures desde archivo:
+
+```bash
+python cli.py predict fixtures epl-2018 \
+  --model rf-result \
+  --input fixtures.csv \
+  --filters all \
+  --output exports/fixtures.csv
+```
+
+Prediccion de fixtures con scraping headless:
+
+```bash
+python cli.py predict fixtures epl-2018 \
+  --model rf-result \
+  --date 2026-08-15 \
+  --headless \
+  --filters all
+```
+
+## Modelos Soportados
+
+```text
+logistic
+discriminant
+decision-tree
+random-forest
+xgboost
+knn
+naive-bayes
+svm
+dnn
+```
+
+Targets soportados:
+
+```text
+result       -> 1/X/2
+over-under   -> U/O 2.5
+```
+
+## Analisis E Interpretabilidad
+
+Ejemplos:
+
+```bash
+python cli.py analysis variance epl-2018 --output outputs/variance.png
+python cli.py analysis correlation epl-2018 --method spearman --output outputs/correlation.png
+python cli.py analysis rules epl-2018 --target result --depth 4 --output outputs/rules.png
+
+python cli.py explain shap epl-2018 rf-result --target H --output outputs/shap.png
+python cli.py explain extra epl-2018 rf-result --plot impurity --output outputs/impurity.png
+```
+
+## Configuracion De Scraping
+
+El navegador se configura en `storage/network/browser.json`. Por defecto usa Chrome en modo headless:
+
+```json
+{
+  "application": "chrome",
+  "headless": true
 }
 ```
+
+Comandos:
+
+```bash
+python cli.py config browser show
+python cli.py config browser set --application chrome --headless
+python cli.py config browser set --application firefox --no-headless
+```
+
+Para scraping en VPS necesitas tener instalado el navegador elegido y su driver compatible para Selenium.
+
+## Checks
+
+```bash
+python -m compileall app.py cli.py install.py src
+python -m pytest tests -q
+```
+
+## Notas
+
+- No se deben commitear entornos virtuales, modelos privados, cookies, perfiles de navegador ni datos descargados sensibles.
+- Las operaciones destructivas, como eliminar ligas o modelos, piden confirmacion salvo que uses `--yes`.
+- Para una guia mas completa de comandos y opciones, revisa [CLI.md](CLI.md).
+
