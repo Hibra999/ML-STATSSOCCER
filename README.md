@@ -28,6 +28,8 @@ conda activate prophitbet
 pip install -r requirements.txt
 ```
 
+Usa Python 3.11 para este entorno. TensorFlow y sus paquetes auxiliares son sensibles a la version de Python.
+
 Comprobar que el CLI carga:
 
 ```bash
@@ -191,4 +193,3 @@ python -m pytest tests -q
 - No se deben commitear entornos virtuales, modelos privados, cookies, perfiles de navegador ni datos descargados sensibles.
 - Las operaciones destructivas, como eliminar ligas o modelos, piden confirmacion salvo que uses `--yes`.
 - Para una guia mas completa de comandos y opciones, revisa [CLI.md](CLI.md).
-
