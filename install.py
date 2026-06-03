@@ -1,4 +1,4 @@
-"""
+r"""
 !! --- IMPORTANT NOTES --- !!
 This installer detects (optionally) a provided virtual environment and installs the required libraries.
 These libraries (see requirements.txt) are needed for Prophitbet-v2 to run.
@@ -17,7 +17,7 @@ python install.py --venv "/home/you/python/envs/myenv"         (Linux/macOS)
 If installation succeeds, launcher scripts are created:
 - run_app.bat (Windows)
 - run_app.sh  (Linux/macOS)
-These will activate the venv (if provided) and run app.py.
+These will activate the venv (if provided) and run cli.py.
 """
 
 import argparse
@@ -83,7 +83,7 @@ def get_requirements(file_path: str = "requirements.txt") -> List[str]:
 
 
 def make_run_bat(project_dir: str, venv_path: Optional[str]) -> None:
-    """ Create run_app.bat that runs app.py, optionally activating venv. """
+    """ Create run_app.bat that runs cli.py, optionally activating venv. """
 
     lines = [
         "@echo off",
@@ -99,8 +99,8 @@ def make_run_bat(project_dir: str, venv_path: Optional[str]) -> None:
             "",
         ]
     lines += [
-        "REM Open cmd in the current project directory and run app.py",
-        'cmd /k "python app.py"',
+        "REM Open cmd in the current project directory and run the CLI",
+        'cmd /k "python cli.py"',
         "",
     ]
     path = os.path.join(project_dir, "run_app.bat")
@@ -110,7 +110,7 @@ def make_run_bat(project_dir: str, venv_path: Optional[str]) -> None:
 
 
 def make_run_sh(project_dir: str, venv_path: Optional[str]) -> None:
-    """Create run_app.sh that runs app.py, optionally activating venv."""
+    """Create run_app.sh that runs cli.py, optionally activating venv."""
     lines = [
         "#!/bin/bash",
         '# Navigate to the directory of the script',
@@ -125,8 +125,8 @@ def make_run_sh(project_dir: str, venv_path: Optional[str]) -> None:
             "",
         ]
     lines += [
-        "# Run app.py",
-        "python3 app.py",
+        "# Run the CLI",
+        "python3 cli.py",
         "",
     ]
     path = os.path.join(project_dir, "run_app.sh")

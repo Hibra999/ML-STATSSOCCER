@@ -14,27 +14,45 @@ from src.network.netutils import check_internet_connection
 class FootyStatsScraper:
     """ FootyStats scraper, which opens FootyStats webpage via a web browser and parses the fixture table. """
 
-    def __init__(self):
+    def __init__(self, headless: Optional[bool] = None):
         self._page_load_timeout = 5.0
         self._poll_frequency = 0.5
 
         with open('storage/network/browser.json', mode='r') as jsonfile:
-            browser = json.load(jsonfile)['application']
+            browser_cfg = json.load(jsonfile)
+
+        browser = browser_cfg['application']
+        if headless is None:
+            headless = browser_cfg.get('headless', True)
 
         if browser == 'chrome':
             options = ChromeOptions()
             options.add_argument('--incognito')
             options.add_argument('--lang=en-US')
+            if headless:
+                options.add_argument('--headless=new')
+                options.add_argument('--no-sandbox')
+                options.add_argument('--disable-dev-shm-usage')
+                options.add_argument('--disable-gpu')
+                options.add_argument('--window-size=1920,1080')
             self._web_driver = Chrome(options=options)
         elif browser == 'firefox':
             options = FirefoxOptions()
             options.add_argument('--incognito')
             options.set_preference('intl.accept_languages', 'en-US, en')
+            if headless:
+                options.add_argument('--headless')
             self._web_driver = Firefox(options=options)
         elif browser == 'edge':
             options = EdgeOptions()
             options.add_argument('--incognito')
             options.add_argument('--lang=en-US')
+            if headless:
+                options.add_argument('--headless=new')
+                options.add_argument('--no-sandbox')
+                options.add_argument('--disable-dev-shm-usage')
+                options.add_argument('--disable-gpu')
+                options.add_argument('--window-size=1920,1080')
             self._web_driver = Edge(options=options)
         else:
             raise NotImplementedError(

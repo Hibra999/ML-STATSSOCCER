@@ -39,6 +39,18 @@ ML is a sub-field of Artificial Intelligence (AI), which allows users to constru
 * https://www.ibm.com/think/topics/machine-learning
 * https://www.geeksforgeeks.org/machine-learning/machine-learning/
 
+# Terminal CLI
+
+ProphitBet is now a CLI-first application. It can run on local machines and VPS servers without a graphical desktop:
+
+```bash
+python cli.py --help
+python app.py --help
+bash app.sh --help
+```
+
+The CLI replaces the former PyQt workflow with commands for league creation/update, dataset inspection, model training/evaluation, manual and fixture prediction, statistical analysis, interpretability, exports, and browser configuration. See [CLI.md](CLI.md) for the full command map and examples.
+
 # Installation (New)
 
 ## Step 1 - Python Installation
@@ -70,44 +82,33 @@ After the download, unzip the files into your preferred directory (e.g. *Downloa
 
 ProphitBet requires several Python libraries **(with specific versions)** to run, which are analytically described in `requirements.txt` file. If you are a new Python user, skip ignore the following instruction. If you are an advanced Python user, you can use this file to manually install the requirements in whichever environment you like or by typing `pip install -r requirements.txt`.
 
-If you are a new user, you can use the `install.py` script to automatically download the required libraries. Open the Command Line (CMD) (or Trminal in Linux). In windows, you can open the cmd by typing *cmd* or *Command Prompt* in the windows search bar or by pressing the keys *Win+R* and typing *cmd* there. Then, nagivate on the created folder (e.g., *cd Downloads/ProphitBet*. Finally, type: `python install.py` and press ENTER to initiate the installation. These libraries will be automatically installed to the default Python version. If you are an advanced user and would like to install the libraries in a specific envrionment, you can also use *python install.py --venv "C:\Users\You\python\envs\myenv"*. If everything runs perfectly, you will notice an *Installation complete!* message and the installation details below, otherwise it will display an error.
+If you are a new user, you can use the `install.py` script to automatically download the required libraries. Open the Command Line (CMD) (or Terminal in Linux). In Windows, you can open the cmd by typing *cmd* or *Command Prompt* in the Windows search bar or by pressing the keys *Win+R* and typing *cmd* there. Then, navigate to the created folder (e.g., *cd Downloads/ProphitBet*). Finally, type `python install.py` and press ENTER to initiate the installation. These libraries will be automatically installed to the default Python version. If you are an advanced user and would like to install the libraries in a specific environment, you can also use `python install.py --venv "C:\Users\You\python\envs\myenv"`. If everything runs perfectly, you will notice an *Installation complete!* message and the installation details below, otherwise it will display an error.
 
 ## Step 5 - Run Application
 
-To open ProphitBet, you can navigate the CMD to the folder and type `python app.py`. You can also run the application by double-clicking the *app.bat* file (In linux, you can use the *app.sh* respectively). If you have an anti-virus enabled, it is possible that it slows down the initialization of the app.
+To open ProphitBet, navigate the terminal to the project folder and type `python cli.py --help` or `python app.py --help`. You can also run the terminal launcher with `app.bat` on Windows or `bash app.sh --help` on Linux/macOS.
 
 # Installation Help
 
 If you would like an additional installation help or an error occurs, please open a github issue, so that me or any user can further assist you.
 
-# Improved Graphical User Interface (GUI)
+# Professional Terminal Interface (CLI)
 
-The new GUI is more lightweight and prettier. It comes with two themes:
+The application no longer requires a desktop GUI. The terminal interface provides guided prompts, structured commands, validation, confirmations, progress states, Rich tables, CSV/XLSX exports, saved matplotlib outputs, and headless browser scraping for VPS usage.
 
-1. Light
-2. Dark
-
-Additionally, it supports several key shortcuts to create, open and delete leagues to enable faster workflow.
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/gui.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/gui.png)
+Run `python cli.py --help` for the command tree or read [CLI.md](CLI.md).
 
 # Creating Leagues
 
-To create a league, press `CTRL+N` or navigate to `File/New League`. Then select a league and provide a unique identifier (id). The id is used to save the league and restore it when you re-open the application. Then, you can choose a variety of statistics that you would like to import, along with the historical data range and create the league.
+To create a league, run `python cli.py league create`. You can work interactively or pass flags such as `--league-index`, `--id`, `--start-year`, `--stats`, and odds filters. Created leagues are stored locally and can be listed, inspected, updated, exported, or deleted from the terminal.
 
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/newleague.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/newleague.png)
+# Terminal Data Tools
 
-You created leagues are automatically stored in your computer and you can restore them anytime using the open window (or by pressign `CTRL+O`). 
+The CLI replaces the table window with terminal and export operations:
 
-# Excel-Like Table
-
-The new match table looks like the excel table and includes several advanced functions, such as:
-
-1. Hide Matches (hides matches with missing values that are ommited during training).
-2. Search/Find (searches and selects all rows that contain a specific keyword).
-3. Copy (copies matches to clipboard using a table-like format. The copied matches can be pasted directly into excel as well).
-
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/table.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/table.png)
+1. Hide missing rows: `python cli.py data show <league-id> --hide-missing`
+2. Search/find: `python cli.py data search <league-id> Arsenal --column Home`
+3. Export/copy to files: `python cli.py data export <league-id> --output exports/data.csv`
 
 ## Tips
 
@@ -175,7 +176,7 @@ You can now extract rules by training and explaining a decision tree. Specifical
 
 # Training Models
 
-The new training window allows you to train/tune a model more easily. Also, it supports both sliding cross-validation and k-fold cross validation methods to evaluate the trained models. Below is a list of the supported models:
+The CLI allows you to train and tune models from terminal. It supports both sliding cross-validation and k-fold cross validation methods to evaluate the trained models. Below is a list of the supported models:
 
 1. **Logistic Regression**: Linear model taht assumes linear relationship between inputs $x$ and targets $y$.
 2. **Discriminant Analysis Classifier (LDA/QDA) (New)**: Encodes the inputs $x$ into a 2D space and then computes targets in a linear/quadratic manner.
@@ -202,7 +203,11 @@ Other result types can be added in the future.
 * When the targets are imbalanced, use data-sampling techniques and class weight option (if available)!
 * The standard scaling algorithm usually works well with most of the algorithms.
 
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/training.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/training.png)
+Example:
+
+```bash
+python cli.py model train <league-id> random-forest --id rf-result --target result --normalizer standard
+```
 
 # Evaluating Models
 
@@ -214,20 +219,28 @@ The main purpose of model evaluation is to understand the strengths and weakness
 
 You also have the option to store the filters and utilize them during the prediction of the fixtures. Keep in mind that the filters are calculated on the specified dataset separately (All/Train/Eval).
 
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/evaluate.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/evaluate.png)
+Example:
+
+```bash
+python cli.py model evaluate <league-id> --model rf-result --dataset eval --odd-filter "1:1.31:1.60" --p1 70 --store-filter
+```
 
 # Predict Offline
 
-You can predict any possible combination of matches you can think of (without requiring internet connection). Simply specify Home, Away teams and their odds, and select a model to predict the outcome.
+You can predict any possible combination of matches you can think of (without requiring internet connection). Specify Home, Away teams, odds, and model id:
 
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/predict.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/predict.png)
+```bash
+python cli.py predict manual <league-id> --model rf-result --home Arsenal --away Chelsea --odd-1 2.10 --odd-x 3.40 --odd-2 3.10
+```
 
 # Predict Fixtures
 
-This mode enables you to predict the outcomes of the upcoming league fixture (**requires internet connection and the Google Chrome installed**). You just have to specify the fixture date and the parsing will start automatically. 
-Then, you can select a model and generate the predictions. By default, all predictions are selected (highlighted) for export. However, you can also specify the evaluation filters to filter specific odd ranges and probabilities.
+This mode enables you to predict the outcomes of upcoming league fixtures. It can scrape FootyStats in headless mode or read a local CSV/XLSX fixture file. Stored evaluation filters can be applied during export.
 
-![https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/fixtures.png](https://github.com/kochlisGit/ProphitBet-Soccer-Bets-Predictor/blob/main/screenshots/fixtures.png)
+```bash
+python cli.py predict fixtures <league-id> --model rf-result --date 2026-08-15 --headless --filters all
+python cli.py predict fixtures <league-id> --model rf-result --input fixtures.csv --output exports/fixtures.csv
+```
 
 # How to Submit Issue
 
