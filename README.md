@@ -38,6 +38,30 @@ python cli.py --help
 
 `python app.py --help` tambien funciona, pero `cli.py` es el entrypoint recomendado.
 
+## Agent Mode
+
+Ademas de los comandos tradicionales, el proyecto incluye un agente interactivo de terminal. No usa un modelo LLM: funciona como shell CLI con slash commands, skills en disco, memoria de sesion y ejemplos guiados.
+
+```bash
+python cli.py agent
+python cli.py chat
+```
+
+Dentro del agente puedes usar slash commands que delegan al CLI existente:
+
+```text
+/help
+/skills
+/skill train epl-2018 random-forest
+/league list --catalog
+/model list epl-2018
+/predict fixtures epl-2018 --model rf-result --input fixtures.csv
+/status
+/exit
+```
+
+El agente carga skills desde `skills/*/SKILL.md` y tambien desde `.mlstatssoccer/skills/*/SKILL.md` si existen. `/skills` muestra las skills con ejemplos de comandos listos para usar. La memoria de sesion vive en `.mlstatssoccer/sessions/` y no requiere interfaz grafica.
+
 ## Comandos Principales
 
 Listar ligas disponibles para descargar:

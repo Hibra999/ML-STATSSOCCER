@@ -225,6 +225,46 @@ python cli.py explain extra epl-2018 epl-logistic --plot model --feature "1" --o
 python cli.py explain extra epl-2018 epl-dnn --plot attention --output outputs/attention.png
 ```
 
+## Agent Mode
+
+Start an interactive terminal agent on top of the existing CLI. This is a CLI-only assistant: it does not call an LLM, and it works through slash commands, disk skills, session memory and safe tools.
+
+```bash
+python cli.py agent
+python cli.py chat
+```
+
+The normal CLI remains unchanged. Agent slash commands delegate to the same handlers used by commands such as `python cli.py league list --catalog`.
+
+Useful commands inside the agent:
+
+```text
+/help
+/skills
+/skill train epl-2018 random-forest
+/league list --catalog
+/league show epl-2018
+/model list epl-2018
+/predict manual epl-2018 --model rf-result --home Arsenal --away Chelsea --odd-1 2.10 --odd-x 3.40 --odd-2 3.10
+/predict fixtures epl-2018 --model rf-result --input fixtures.csv
+/analysis variance epl-2018 --output outputs/variance.png
+/explain shap epl-2018 rf-result --target H --output outputs/shap.png
+/status
+/exit
+```
+
+Agent context shortcuts:
+
+```text
+@CLI.md resume los comandos principales
+!git status
+/run league list --catalog
+```
+
+Skills are loaded from `skills/*/SKILL.md` and optional local skills from `.mlstatssoccer/skills/*/SKILL.md`. Use `/skills` to list available skills with examples, and `/skill <name>` to show the full instructions and command examples. Session history and compact summaries are stored under `.mlstatssoccer/sessions/`.
+
+Risky operations such as `rm`, `git reset`, `git checkout`, `league delete` and `model delete` require explicit confirmation in agent mode.
+
 ## Browser Configuration
 
 The scraper reads `storage/network/browser.json`. Headless mode is enabled by default.
@@ -250,4 +290,3 @@ Unit tests:
 ```bash
 python -m pytest tests -q
 ```
-

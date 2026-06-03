@@ -13,6 +13,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/mlstatssoccer-matplotlib")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 from src.analysis import (
     BorutaAnalyzer,
@@ -153,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     _build_analysis_parser(subparsers)
     _build_explain_parser(subparsers)
     _build_config_parser(subparsers)
+    _build_agent_parser(subparsers)
 
     resources = subparsers.add_parser("resources", help="Show learning, update, bug-report and donation links.")
     resources.set_defaults(handler=cmd_resources)
@@ -425,6 +428,16 @@ def _build_config_parser(subparsers):
     browser.add_argument("--application", choices=["chrome", "firefox", "edge"])
     browser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
     browser.set_defaults(handler=cmd_config_browser)
+
+
+def _build_agent_parser(subparsers):
+    agent = subparsers.add_parser("agent", help="Start the interactive terminal agent.")
+    agent.add_argument("--session", help="Resume or create a named agent session.")
+    agent.set_defaults(handler=cmd_agent)
+
+    chat = subparsers.add_parser("chat", help="Alias for `agent`.")
+    chat.add_argument("--session", help="Resume or create a named agent session.")
+    chat.set_defaults(handler=cmd_agent)
 
 
 def cmd_league_list(args):
@@ -1061,6 +1074,14 @@ def cmd_config_browser(args):
         json.dump(data, file, indent=2)
         file.write("\n")
     render_mapping("Browser Config Updated", data)
+
+
+def cmd_agent(args):
+    from src.agent import AgentRuntime, AgentShell
+
+    runtime = AgentRuntime(repo_root=Path.cwd(), session_id=args.session)
+    shell = AgentShell(repo_root=Path.cwd(), runtime=runtime)
+    shell.run()
 
 
 def cmd_resources(args):

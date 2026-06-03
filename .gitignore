@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mlstatssoccer/sessions/
+.mlstatssoccer/agent_history
+outputs/
+exports/
