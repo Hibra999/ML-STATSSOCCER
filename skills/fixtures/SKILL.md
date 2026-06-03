@@ -1,6 +1,9 @@
 ---
 name: fixtures
 description: Predice fixtures futuros desde archivo local o scraping headless.
+aliases:
+  - predictfixtures
+  - fixturepredict
 when_to_use:
   - cuando el usuario quiera predecir fixtures calendario proximos partidos o FootyStats
   - cuando mencione input csv xlsx scraping headless filters selected

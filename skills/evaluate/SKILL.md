@@ -1,6 +1,9 @@
 ---
 name: evaluate
 description: Evalua modelos entrenados y administra filtros de odds y percentiles.
+aliases:
+  - evaluatemodel
+  - metrics
 when_to_use:
   - cuando el usuario quiera evaluar rendimiento precision recall f1 accuracy o balance
   - cuando mencione odds filtros percentiles store-filter delete-filter dataset train eval

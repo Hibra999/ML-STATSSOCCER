@@ -57,6 +57,8 @@ Dentro del agente puedes usar slash commands que delegan al CLI existente:
 ```text
 /help
 /skills
+/downloadleague
+/loadleague epl-2018
 /skill train epl-2018 random-forest
 /league list --catalog
 /model list epl-2018
@@ -65,7 +67,7 @@ Dentro del agente puedes usar slash commands que delegan al CLI existente:
 /exit
 ```
 
-El agente carga skills desde `skills/*/SKILL.md` y tambien desde `.mlstatssoccer/skills/*/SKILL.md` si existen. `/skills` muestra las skills con ejemplos de comandos listos para usar. La memoria de sesion vive en `.mlstatssoccer/sessions/` y no requiere interfaz grafica.
+El agente carga skills desde `skills/*/SKILL.md` y tambien desde `.mlstatssoccer/skills/*/SKILL.md` si existen. Escribe `/` para autocompletar comandos y shortcuts directos de skills. `/skills` muestra las skills, aliases y ejemplos de comandos listos para usar. La memoria de sesion vive en `.mlstatssoccer/sessions/` y no requiere interfaz grafica.
 
 ## Comandos Principales
 

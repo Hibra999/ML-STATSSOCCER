@@ -1,6 +1,9 @@
 ---
 name: troubleshoot
 description: Diagnostica errores de CLI, datos, modelos, scraping y entorno.
+aliases:
+  - debug
+  - fix
 when_to_use:
   - cuando el usuario reporte errores excepciones fallos de importacion o problemas de Selenium
   - cuando mencione debug compileall pytest browser headless datos faltantes o modelo no existe

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -40,7 +41,7 @@ class AgentRuntime:
 
     @property
     def skill_names(self) -> List[str]:
-        return [skill.display_name for skill in self.skills.list_user_invocable()]
+        return self.skills.invocation_names()
 
     def handle_message(self, message: str) -> RuntimeResponse:
         message = message.rstrip()
@@ -96,9 +97,12 @@ class AgentRuntime:
         skill = self.skills.get(name)
         if skill is None:
             matches = self.skills.match(name)
-            suffix = ""
-            if matches:
-                suffix = "\nDid you mean: " + ", ".join(skill.display_name for skill, _ in matches)
+            suggestions = [skill.display_name for skill, _ in matches]
+            suggestions.extend(get_close_matches(name, self.skill_names, n=5, cutoff=0.55))
+            suggestions = list(dict.fromkeys(suggestions))
+            suffix = "\nType /skill <name> and use Tab/autocomplete to see available skills."
+            if suggestions:
+                suffix = "\nDid you mean: " + ", ".join(suggestions)
             return RuntimeResponse(f'Unknown skill "{name}". Use /skills.{suffix}')
 
         self.session.add_active_skill(skill.display_name)
@@ -131,6 +135,11 @@ class AgentRuntime:
         for index, skill in enumerate(skills):
             args = f" ({', '.join(skill.arguments)})" if skill.arguments else ""
             lines.append(f"/skill {skill.display_name}{args}")
+            shortcuts = [f"/skill {skill.display_name}"]
+            direct_names = [skill.display_name, *skill.aliases]
+            shortcuts.extend(f"/{name}" for name in direct_names if f"/{name}" not in self.slash_commands)
+            if shortcuts:
+                lines.append("  Shortcuts: " + ", ".join(shortcuts))
             if skill.description:
                 lines.append(f"  {skill.description}")
             if skill.examples:

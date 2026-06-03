@@ -241,6 +241,8 @@ Useful commands inside the agent:
 ```text
 /help
 /skills
+/downloadleague
+/loadleague epl-2018
 /skill train epl-2018 random-forest
 /league list --catalog
 /league show epl-2018
@@ -252,6 +254,8 @@ Useful commands inside the agent:
 /status
 /exit
 ```
+
+Type `/` in the agent prompt to autocomplete slash commands and direct skill shortcuts. Use `/skill <name>` for the full skill instructions, or call simple shortcuts such as `/downloadleague`, `/loadleague`, `/trainmodel`, `/predictfixtures`, and `/debug`.
 
 Agent context shortcuts:
 

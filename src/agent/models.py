@@ -12,6 +12,7 @@ class Skill:
     key: str
     name: str
     description: str
+    aliases: List[str]
     when_to_use: List[str]
     arguments: List[str]
     examples: List[str]
@@ -28,7 +29,14 @@ class Skill:
 
     @property
     def searchable_text(self) -> str:
-        parts = [self.key, self.name, self.description, " ".join(self.when_to_use), " ".join(self.arguments)]
+        parts = [
+            self.key,
+            self.name,
+            " ".join(self.aliases),
+            self.description,
+            " ".join(self.when_to_use),
+            " ".join(self.arguments),
+        ]
         return " ".join(part for part in parts if part).lower()
 
 

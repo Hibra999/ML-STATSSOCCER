@@ -1,6 +1,9 @@
 ---
 name: analysis
 description: Ejecuta analisis estadistico y exporta graficos o tablas.
+aliases:
+  - analyzeleague
+  - stats
 when_to_use:
   - cuando el usuario quiera estadisticas distribuciones varianza correlacion boruta coeficientes impurity reglas
   - cuando mencione feature importance heatmap descriptive analysis

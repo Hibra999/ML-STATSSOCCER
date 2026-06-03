@@ -1,6 +1,9 @@
 ---
 name: explain
 description: Genera graficos de interpretabilidad para modelos entrenados.
+aliases:
+  - explainmodel
+  - interpret
 when_to_use:
   - cuando el usuario quiera explicar un modelo shap pdp waterfall boundary decision boundary
   - cuando mencione coeficientes arbol impurity attention interpretabilidad

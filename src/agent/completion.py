@@ -37,9 +37,12 @@ class AgentCommandCompleter(Completer):
             yield Completion(text, start_position=start_position, display=text, display_meta=display_meta)
 
     def _complete_slash_command(self, prefix: str) -> List[Tuple[str, int, str]]:
+        candidates = [(command, "command") for command in self.slash_commands]
+        candidates.extend((f"/{skill_name}", "skill") for skill_name in self.skill_names)
+
         return [
-            (command, -len(prefix), "command")
-            for command in self.slash_commands
+            (command, -len(prefix), display_meta)
+            for command, display_meta in _unique_pairs(candidates)
             if _matches_prefix(command, prefix)
         ]
 
@@ -63,6 +66,17 @@ def _unique(values: Iterable[str]) -> List[str]:
             continue
         seen.add(value)
         result.append(value)
+    return result
+
+
+def _unique_pairs(values: Iterable[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    seen = set()
+    result = []
+    for value, label in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append((value, label))
     return result
 
 

@@ -1,6 +1,9 @@
 ---
 name: predict
 description: Genera predicciones manuales para partidos individuales.
+aliases:
+  - predictmatch
+  - manualpredict
 when_to_use:
   - cuando el usuario quiera predecir Arsenal Chelsea local visitante cuota odd
   - cuando mencione partido manual home away probabilidades

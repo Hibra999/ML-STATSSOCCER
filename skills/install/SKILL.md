@@ -1,6 +1,9 @@
 ---
 name: install
 description: Prepara el entorno Python y verifica dependencias del CLI.
+aliases:
+  - setup
+  - dependencies
 when_to_use:
   - cuando el usuario quiera instalar configurar entorno venv conda requirements
   - cuando mencione Python 3.11 TensorFlow dependencias VPS o app.sh

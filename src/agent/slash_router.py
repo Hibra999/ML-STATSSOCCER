@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import get_close_matches
 import shlex
 from typing import Callable, Dict, List
 
@@ -69,8 +70,26 @@ class SlashRouter:
             return self.runtime.run_cli([command] + args)
         handler = self._handlers.get(command)
         if handler is None:
-            return RuntimeResponse(f"Unknown slash command: /{command}. Use /help.")
+            skill = self.runtime.skills.get(command)
+            if skill is not None:
+                return self.runtime.invoke_skill(command, args)
+            return self._unknown(command)
         return handler(args)
+
+    def _unknown(self, command: str) -> RuntimeResponse:
+        names = [slash_command.lstrip("/") for slash_command in SLASH_COMMANDS]
+        names.extend(self.runtime.skill_names)
+        names = list(dict.fromkeys(names))
+        suggestions = get_close_matches(command, names, n=5, cutoff=0.55)
+        if suggestions:
+            return RuntimeResponse(
+                f"Unknown slash command: /{command}.\n"
+                "Did you mean: " + ", ".join(f"/{suggestion}" for suggestion in suggestions)
+            )
+        return RuntimeResponse(
+            f"Unknown slash command: /{command}.\n"
+            "Type / to see available commands, /skill <name> to autocomplete skills, or /skills to list them."
+        )
 
     def _help(self, args: List[str]) -> RuntimeResponse:
         return RuntimeResponse(HELP_TEXT)

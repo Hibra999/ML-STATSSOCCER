@@ -34,7 +34,9 @@ class SkillRegistry:
                 continue
             for path in sorted(root.glob("*/SKILL.md")):
                 skill = load_skill(path)
-                for key in {skill.key, normalize_skill_key(skill.name)}:
+                keys = {skill.key, normalize_skill_key(skill.name)}
+                keys.update(normalize_skill_key(alias) for alias in skill.aliases)
+                for key in keys:
                     if key:
                         loaded[key] = skill
         self.skills = loaded
@@ -42,6 +44,13 @@ class SkillRegistry:
     def list_user_invocable(self) -> List[Skill]:
         unique = {skill.path: skill for skill in self.skills.values()}
         return sorted(unique.values(), key=lambda skill: skill.display_name)
+
+    def invocation_names(self) -> List[str]:
+        names = set()
+        for skill in self.list_user_invocable():
+            names.add(skill.display_name)
+            names.update(skill.aliases)
+        return sorted((name for name in names if name), key=str.lower)
 
     def get(self, name: str) -> Optional[Skill]:
         return self.skills.get(normalize_skill_key(name))
@@ -71,6 +80,7 @@ def load_skill(path: Path) -> Skill:
         key=key,
         name=str(metadata.get("name") or path.parent.name),
         description=str(metadata.get("description") or ""),
+        aliases=as_list(metadata.get("aliases")),
         when_to_use=as_list(metadata.get("when_to_use")),
         arguments=as_list(metadata.get("arguments")),
         examples=as_list(metadata.get("examples")),

@@ -1,6 +1,9 @@
 ---
 name: league
 description: Gestiona ligas guardadas y catalogo de ligas descargables.
+aliases:
+  - leagues
+  - manageleague
 when_to_use:
   - cuando el usuario quiera crear listar actualizar mostrar o eliminar ligas
   - cuando mencione catalogo pais liga temporada dataset historico o league_id

@@ -1,6 +1,9 @@
 ---
 name: train
 description: Entrena modelos ML para una liga usando el CLI existente.
+aliases:
+  - trainmodel
+  - fitmodel
 when_to_use:
   - cuando el usuario quiera entrenar un modelo
   - cuando mencione random forest xgboost svm dnn optuna cross validation calibracion sampler normalizer

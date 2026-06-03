@@ -17,6 +17,7 @@ def test_slash_completion_lists_all_root_options():
     assert "/skill" in texts
     assert "/skills" in texts
     assert "/status" in texts
+    assert "/train" in texts
     assert "/skill train" not in texts
 
 
@@ -39,6 +40,14 @@ def test_skill_argument_completion_filters_skill_names():
     texts = completion_texts(completer, "/skill tr")
 
     assert texts == ["train", "troubleshoot"]
+
+
+def test_direct_skill_completion_filters_as_user_types():
+    completer = AgentCommandCompleter(["/help", "/skill", "/skills"], ["downloadleague", "loadleague"])
+
+    texts = completion_texts(completer, "/d")
+
+    assert texts == ["/downloadleague"]
 
 
 def test_completion_ignores_non_slash_text_and_command_arguments():
@@ -71,4 +80,6 @@ user_invocable: true
 
     assert "/skill predict" in text
     assert "/skill train" in text
+    assert "Shortcuts: /skill predict" in text
+    assert "Shortcuts: /skill train, /train" in text
     assert "\n\n/skill train" in text

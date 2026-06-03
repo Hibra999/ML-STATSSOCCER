@@ -1,6 +1,8 @@
 HELP_TEXT = """\
 Available slash commands:
 
+Type / to autocomplete commands and direct skill shortcuts.
+
 /help                         Show this help
 /exit, /quit                  Leave agent mode
 /clear                        Clear the terminal
