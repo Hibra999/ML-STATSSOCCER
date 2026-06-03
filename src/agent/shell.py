@@ -3,16 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from src.agent.completion import AgentCommandCompleter
 from src.agent.prompts import WELCOME_TEXT
 from src.agent.runtime import AgentRuntime
 
 try:
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.history import FileHistory
 except ImportError:  # pragma: no cover - exercised only on minimal environments.
     PromptSession = None
-    WordCompleter = None
     FileHistory = None
 
 try:
@@ -54,9 +53,13 @@ class AgentShell:
             return None
         history_path = self.repo_root / ".mlstatssoccer" / "agent_history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
-        words = self.runtime.slash_commands + [f"/skill {name}" for name in self.runtime.skill_names]
-        completer = WordCompleter(words, ignore_case=True, sentence=True)
-        return PromptSession(history=FileHistory(str(history_path)), completer=completer)
+        completer = AgentCommandCompleter(self.runtime.slash_commands, self.runtime.skill_names)
+        return PromptSession(
+            history=FileHistory(str(history_path)),
+            completer=completer,
+            complete_while_typing=True,
+            reserve_space_for_menu=8,
+        )
 
     def _read_message(self) -> str:
         if self._session is None:

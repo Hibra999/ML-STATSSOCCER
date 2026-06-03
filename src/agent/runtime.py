@@ -127,12 +127,16 @@ class AgentRuntime:
         skills = self.skills.list_user_invocable()
         if not skills:
             return "No skills found. Expected skills under skills/*/SKILL.md."
-        lines = ["Discovered skills:"]
-        for skill in skills:
+        lines = ["Discovered skills:", ""]
+        for index, skill in enumerate(skills):
             args = f" ({', '.join(skill.arguments)})" if skill.arguments else ""
-            lines.append(f"- {skill.display_name}{args}: {skill.description}")
+            lines.append(f"/skill {skill.display_name}{args}")
+            if skill.description:
+                lines.append(f"  {skill.description}")
             if skill.examples:
                 lines.append(f"  Example: {skill.examples[0]}")
+            if index < len(skills) - 1:
+                lines.append("")
         return "\n".join(lines)
 
     def status_text(self) -> str:
