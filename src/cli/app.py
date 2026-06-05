@@ -143,10 +143,10 @@ def run(argv: Optional[List[str]] = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="prophitbet",
-        description="Professional terminal interface for ProphitBet-v2. Runs without PyQt or a graphical display.",
+        description="Companion CLI for ML-STATSSOCCER. Run `python app.py` for the local web interface.",
     )
     parser.add_argument("--debug", action="store_true", help="Show full tracebacks for unexpected errors.")
-    parser.set_defaults(handler=cmd_agent, session=None)
+    parser.set_defaults(handler=cmd_root_help, parser=parser)
     subparsers = parser.add_subparsers(dest="command")
 
     _build_league_parser(subparsers)
@@ -156,7 +156,6 @@ def build_parser() -> argparse.ArgumentParser:
     _build_analysis_parser(subparsers)
     _build_explain_parser(subparsers)
     _build_config_parser(subparsers)
-    _build_agent_parser(subparsers)
 
     resources = subparsers.add_parser("resources", help="Show learning, update, bug-report and donation links.")
     resources.set_defaults(handler=cmd_resources)
@@ -429,16 +428,6 @@ def _build_config_parser(subparsers):
     browser.add_argument("--application", choices=["chrome", "firefox", "edge"])
     browser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
     browser.set_defaults(handler=cmd_config_browser)
-
-
-def _build_agent_parser(subparsers):
-    agent = subparsers.add_parser("agent", help="Start the interactive terminal agent.")
-    agent.add_argument("--session", help="Resume or create a named agent session.")
-    agent.set_defaults(handler=cmd_agent)
-
-    chat = subparsers.add_parser("chat", help="Alias for `agent`.")
-    chat.add_argument("--session", help="Resume or create a named agent session.")
-    chat.set_defaults(handler=cmd_agent)
 
 
 def cmd_league_list(args):
@@ -1077,12 +1066,9 @@ def cmd_config_browser(args):
     render_mapping("Browser Config Updated", data)
 
 
-def cmd_agent(args):
-    from src.agent import AgentRuntime, AgentShell
-
-    runtime = AgentRuntime(repo_root=Path.cwd(), session_id=args.session)
-    shell = AgentShell(repo_root=Path.cwd(), runtime=runtime)
-    shell.run()
+def cmd_root_help(args):
+    print_warning("The local web interface is now the primary app. Run `python app.py` and open http://127.0.0.1:5050.")
+    args.parser.print_help()
 
 
 def cmd_resources(args):

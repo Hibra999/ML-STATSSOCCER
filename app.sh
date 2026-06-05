@@ -5,5 +5,5 @@ cd "$(dirname "$0")"
 # (Optional) Activate your virtual environment first:
 # source "$HOME/python/envs/myenv/bin/activate"
 
-# Run the terminal application and pass any provided arguments.
-python3 cli.py "$@"
+# Run the local web application and pass any provided arguments.
+python3 app.py "$@"

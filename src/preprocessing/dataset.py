@@ -17,7 +17,7 @@ class DatasetPreprocessor:
      """
 
     def __init__(self, drop_week: bool = True):
-        """ Whether to drop week column. It is required to train the DRL agents. """
+        """ Whether to drop week column. It is required to train DRL models. """
 
         self._non_trainable_columns = ['Date', 'Season', 'Home', 'Away', 'HG', 'AG', 'Result', 'Result-U/O', 'HST', 'AST', 'HC', 'AC']
 

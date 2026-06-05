@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ML-STATSSOCCER</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">MS</div>
+        <div><strong>ML-STATSSOCCER</strong><span>Local Web</span></div>
+      </div>
+      <nav>
+        <button class="nav-button active" data-view="dashboard">Inicio</button>
+        <button class="nav-button" data-view="leagues">Ligas</button>
+        <button class="nav-button" data-view="data">Datos</button>
+        <button class="nav-button" data-view="models">Modelos</button>
+        <button class="nav-button" data-view="evaluate">Evaluar</button>
+        <button class="nav-button" data-view="predict">Predecir</button>
+        <button class="nav-button" data-view="analysis">Analisis</button>
+        <button class="nav-button" data-view="config">Config</button>
+      </nav>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <h1 id="view-title">Inicio</h1>
+          <p id="view-meta">http://127.0.0.1:5050</p>
+        </div>
+        <button id="refresh-btn" class="icon-button" title="Actualizar">R</button>
+      </header>
+
+      <section id="alert" class="alert hidden"></section>
+
+      <section id="dashboard" class="view active">
+        <div class="metric-grid">
+          <div class="metric"><span>Ligas</span><strong id="metric-leagues">0</strong></div>
+          <div class="metric"><span>Modelos</span><strong id="metric-models">0</strong></div>
+          <div class="metric"><span>Servidor</span><strong>Local</strong></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><h2>Jobs</h2></div>
+          <div id="jobs-list" class="jobs"></div>
+        </div>
+      </section>
+
+      <section id="leagues" class="view">
+        <div class="grid two">
+          <form id="league-create-form" class="panel form-panel">
+            <div class="panel-header"><h2>Nueva liga</h2></div>
+            <label>Catalogo<select name="league_index" id="catalog-select"></select></label>
+            <label>ID<input name="league_id" placeholder="epl-2018" required></label>
+            <div class="row three">
+              <label>Inicio<input name="start_year" type="number" min="2000"></label>
+              <label>Historial<input name="history_window" type="number" min="2" max="5" value="3"></label>
+              <label>Margen<input name="goal_margin" type="number" min="2" max="5" value="2"></label>
+            </div>
+            <label>Stats<select name="stats"><option>all</option><option>basic</option><option>extended</option><option>none</option></select></label>
+            <div class="row three">
+              <label>Odd 1<input name="odd_1" placeholder="1.30:2.50"></label>
+              <label>Odd X<input name="odd_x" placeholder="2.00:4.00"></label>
+              <label>Odd 2<input name="odd_2" placeholder="1.30:2.50"></label>
+            </div>
+            <button type="submit" class="primary">+ Crear</button>
+          </form>
+          <div class="panel">
+            <div class="panel-header"><h2>Ligas guardadas</h2></div>
+            <div id="saved-leagues"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="data" class="view">
+        <div class="panel">
+          <div class="toolbar">
+            <select id="data-league"></select>
+            <input id="data-query" placeholder="Buscar">
+            <input id="data-column" placeholder="Columna">
+            <label class="check"><input id="data-missing" type="checkbox"> Sin missing</label>
+            <button id="data-load">R</button>
+            <button id="data-export">CSV</button>
+          </div>
+          <div id="data-table"></div>
+        </div>
+      </section>
+
+      <section id="models" class="view">
+        <div class="grid two">
+          <form id="train-form" class="panel form-panel">
+            <div class="panel-header"><h2>Entrenar</h2></div>
+            <label>Liga<select name="league_id" id="train-league"></select></label>
+            <label>Modelo<select name="model_type" id="model-type"></select></label>
+            <label>ID<input name="model_id" placeholder="rf-result"></label>
+            <div class="row three">
+              <label>Target<select name="target"><option value="result">result</option><option value="over-under">over-under</option></select></label>
+              <label>Normalizador<select name="normalizer"><option>none</option><option>standard</option><option>min-max</option><option>max-abs</option></select></label>
+              <label>Sampler<select name="sampler"><option>none</option><option>svm-smote</option><option>nearmiss</option><option>hardness-threshold</option></select></label>
+            </div>
+            <div class="row three">
+              <label>Eval %<input name="eval_size" type="number" min="5" max="30" value="20"></label>
+              <label>Trials<input name="trials" type="number" min="1" value="25"></label>
+              <label>Tune<input name="tune" placeholder="none, all o params"></label>
+            </div>
+            <div class="row two-inline">
+              <label class="check"><input name="cv" type="checkbox" checked> CV</label>
+              <label class="check"><input name="sliding_cv" type="checkbox" checked> Sliding CV</label>
+            </div>
+            <button type="submit" class="primary">Entrenar</button>
+          </form>
+          <div class="panel">
+            <div class="toolbar"><select id="models-league"></select><button id="models-load">R</button></div>
+            <div id="models-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="evaluate" class="view">
+        <form id="evaluate-form" class="panel form-panel">
+          <div class="row three">
+            <label>Liga<select name="league_id" id="eval-league"></select></label>
+            <label>Modelo<select name="model_id" id="eval-model"></select></label>
+            <label>Dataset<select name="dataset"><option>eval</option><option>all</option><option>train</option></select></label>
+          </div>
+          <div class="row five">
+            <label>Odd filtro<input name="odd_filter" placeholder="1:1.31:1.60"></label>
+            <label>P1<input name="p1" type="number" value="0"></label>
+            <label>PX<input name="px" type="number" value="0"></label>
+            <label>P2<input name="p2" type="number" value="0"></label>
+            <label class="check"><input name="store_filter" type="checkbox"> Guardar</label>
+          </div>
+          <button type="submit" class="primary">Evaluar</button>
+        </form>
+        <div id="evaluate-output" class="panel output"></div>
+      </section>
+
+      <section id="predict" class="view">
+        <div class="grid two">
+          <form id="manual-form" class="panel form-panel">
+            <div class="panel-header"><h2>Manual</h2></div>
+            <label>Liga<select name="league_id" id="manual-league"></select></label>
+            <label>Modelo<select name="model_id" id="manual-model"></select></label>
+            <div class="row two">
+              <label>Local<input name="home" required></label>
+              <label>Visitante<input name="away" required></label>
+            </div>
+            <div class="row three">
+              <label>1<input name="odd_1" type="number" step="0.01" value="2.00"></label>
+              <label>X<input name="odd_x" type="number" step="0.01" value="3.00"></label>
+              <label>2<input name="odd_2" type="number" step="0.01" value="2.50"></label>
+            </div>
+            <button type="submit" class="primary">Predecir</button>
+          </form>
+          <form id="fixtures-form" class="panel form-panel">
+            <div class="panel-header"><h2>Fixtures</h2></div>
+            <label>Liga<select name="league_id" id="fixtures-league"></select></label>
+            <label>Modelo<select name="model_id" id="fixtures-model"></select></label>
+            <label>Fecha<input name="date" type="date"></label>
+            <label>Archivo<input name="file" type="file" accept=".csv,.xlsx,.xls"></label>
+            <label>Filtros<input name="filters" placeholder="all, none o filtro"></label>
+            <label class="check"><input name="include_all" type="checkbox"> Exportar todo</label>
+            <button type="submit" class="primary">Predecir fixtures</button>
+          </form>
+        </div>
+        <div id="predict-output" class="panel output"></div>
+      </section>
+
+      <section id="analysis" class="view">
+        <form id="analysis-form" class="panel form-panel">
+          <div class="row four">
+            <label>Liga<select name="league_id" id="analysis-league"></select></label>
+            <label>Tipo<select name="analysis_type">
+              <option>descriptive</option><option>distributions</option><option>variance</option><option>correlation</option>
+              <option>boruta</option><option>coefficients</option><option>impurity</option><option>rules</option>
+            </select></label>
+            <label>Columna<input name="column" placeholder="Result"></label>
+            <label>Target<select name="target"><option>result</option><option>over-under</option></select></label>
+          </div>
+          <button type="submit" class="primary">Generar</button>
+        </form>
+        <div id="analysis-output" class="panel output"></div>
+      </section>
+
+      <section id="config" class="view">
+        <form id="config-form" class="panel form-panel narrow">
+          <label>Navegador<select name="application"><option>chrome</option><option>firefox</option><option>edge</option></select></label>
+          <label class="check"><input name="headless" type="checkbox"> Headless</label>
+          <button type="submit" class="primary">Guardar</button>
+        </form>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -27,16 +27,11 @@ def test_validate_identifier_rejects_spaces():
         validate_identifier("bad id", "model id")
 
 
-def test_run_without_args_starts_agent(monkeypatch):
-    calls = []
-
-    def fake_cmd_agent(args):
-        calls.append(args.session)
-
-    monkeypatch.setattr(cli_app, "cmd_agent", fake_cmd_agent)
-
+def test_run_without_args_shows_web_help(capsys):
     assert cli_app.run([]) == 0
-    assert calls == [None]
+    captured = capsys.readouterr()
+    assert "python app.py" in captured.out
+    assert "chat" not in captured.out.lower()
 
 
 def test_build_dnn_params_omits_calibration():

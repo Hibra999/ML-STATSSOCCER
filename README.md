@@ -1,133 +1,85 @@
-# ML-STATSSOCCER CLI
+# ML-STATSSOCCER
 
-Aplicacion de prediccion de futbol con Machine Learning, ahora enfocada 100% en terminal. No requiere interfaz grafica y puede ejecutarse en local o en un VPS.
+ML-STATSSOCCER es una aplicacion local para analisis y prediccion de partidos de futbol con modelos de Machine Learning. La interfaz principal es una aplicacion web que se ejecuta solo en `localhost`.
 
-El CLI permite:
+## Caracteristicas
 
-- Crear, listar, actualizar y eliminar ligas.
-- Inspeccionar, buscar y exportar datasets.
-- Entrenar, evaluar y administrar modelos.
-- Predecir partidos manuales y fixtures.
-- Aplicar filtros por odds y percentiles.
-- Exportar resultados a CSV/XLSX.
-- Ejecutar analisis estadistico.
-- Generar graficos de interpretabilidad.
-- Usar scraping en modo headless.
+- Gestion de ligas historicas.
+- Exploracion y exportacion de datasets.
+- Entrenamiento y evaluacion de modelos.
+- Prediccion manual de partidos.
+- Prediccion de fixtures desde archivo o scraping.
+- Analisis estadistico e interpretabilidad.
+- Configuracion local del navegador para scraping.
 
-La documentacion completa de comandos esta en [CLI.md](CLI.md).
+## Requisitos
 
-## Instalacion Con Conda
+- Python 3.11.
+- Navegador compatible para scraping, si se usa esa funcion.
+- Driver compatible con Selenium, si el navegador lo requiere.
+
+TensorFlow y sus dependencias son sensibles a la version de Python. Se recomienda usar un entorno virtual dedicado.
+
+## Instalacion
 
 ```bash
-git clone git@github.com-hibra999:Hibra999/ML-STATSSOCCER.git
-cd ML-STATSSOCCER
-
-conda create -n prophitbet python=3.11 -y
-conda activate prophitbet
-
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Usa Python 3.11 para este entorno. TensorFlow y sus paquetes auxiliares son sensibles a la version de Python.
+En Windows:
 
-Comprobar que el CLI carga:
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+## Ejecucion
+
+Iniciar la aplicacion web:
+
+```bash
+python app.py
+```
+
+Abrir en el navegador:
+
+```text
+http://127.0.0.1:5050
+```
+
+Para usar otro puerto:
+
+```bash
+python app.py --port 5051
+```
+
+La aplicacion se enlaza a `127.0.0.1`. No esta pensada para exponerse publicamente.
+
+## Uso Basico
+
+1. Crear o cargar una liga desde la seccion **Ligas**.
+2. Revisar el dataset desde **Datos**.
+3. Entrenar un modelo desde **Modelos**.
+4. Evaluar el rendimiento desde **Evaluar**.
+5. Generar predicciones desde **Predecir**.
+6. Crear graficos desde **Analisis**.
+
+Los procesos largos, como descargas, entrenamientos y graficos pesados, se ejecutan como jobs locales.
+
+## CLI Secundaria
+
+La CLI sigue disponible para automatizacion y tareas puntuales:
 
 ```bash
 python cli.py --help
-```
-
-Abrir el agente interactivo:
-
-```bash
-python cli.py
-```
-
-`python app.py --help` tambien funciona, pero `cli.py` es el entrypoint recomendado.
-
-## Agent Mode
-
-Ademas de los comandos tradicionales, el proyecto incluye un agente interactivo de terminal. No usa un modelo LLM: funciona como shell CLI con slash commands, skills en disco, memoria de sesion y ejemplos guiados.
-
-```bash
-python cli.py
-```
-
-Dentro del agente puedes usar slash commands que delegan al CLI existente:
-
-```text
-/help
-/skills
-/downloadleague
-/loadleague epl-2018
-/skill train epl-2018 random-forest
-/league list --catalog
-/model list epl-2018
-/predict fixtures epl-2018 --model rf-result --input fixtures.csv
-/status
-/exit
-```
-
-El agente carga skills desde `skills/*/SKILL.md` y tambien desde `.mlstatssoccer/skills/*/SKILL.md` si existen. Escribe `/` para autocompletar comandos y shortcuts directos de skills. `/skills` muestra las skills, aliases y ejemplos de comandos listos para usar. La memoria de sesion vive en `.mlstatssoccer/sessions/` y no requiere interfaz grafica.
-
-Las shortcuts simples muestran opciones reales automaticamente. Por ejemplo, `/downloadleague` lista el catalogo descargable, `/loadleague` lista ligas guardadas, `/trainmodel` muestra tipos de modelo, y `/fixtures epl-2018` muestra modelos disponibles para esa liga.
-
-## Comandos Principales
-
-Listar ligas disponibles para descargar:
-
-```bash
 python cli.py league list --catalog
+python cli.py model list epl-2018
 ```
 
-Crear una liga:
-
-```bash
-python cli.py league create \
-  --league-index 6 \
-  --id epl-2018 \
-  --start-year 2018 \
-  --history-window 3 \
-  --goal-margin 2 \
-  --stats all \
-  --yes
-```
-
-Ver o actualizar una liga:
-
-```bash
-python cli.py league show epl-2018 --rows 20
-python cli.py league update epl-2018
-```
-
-Explorar datos:
-
-```bash
-python cli.py data show epl-2018 --rows 30 --hide-missing
-python cli.py data search epl-2018 Arsenal --column Home
-python cli.py data export epl-2018 --output exports/epl.csv --hide-missing
-```
-
-Entrenar un modelo:
-
-```bash
-python cli.py model train epl-2018 random-forest \
-  --id rf-result \
-  --target result \
-  --normalizer standard
-```
-
-Evaluar un modelo y guardar filtros:
-
-```bash
-python cli.py model evaluate epl-2018 \
-  --model rf-result \
-  --dataset eval \
-  --odd-filter "1:1.31:1.60" \
-  --p1 70 \
-  --store-filter
-```
-
-Prediccion manual:
+Ejemplo de prediccion manual:
 
 ```bash
 python cli.py predict manual epl-2018 \
@@ -139,63 +91,32 @@ python cli.py predict manual epl-2018 \
   --odd-2 3.10
 ```
 
-Prediccion de fixtures desde archivo:
-
-```bash
-python cli.py predict fixtures epl-2018 \
-  --model rf-result \
-  --input fixtures.csv \
-  --filters all \
-  --output exports/fixtures.csv
-```
-
-Prediccion de fixtures con scraping headless:
-
-```bash
-python cli.py predict fixtures epl-2018 \
-  --model rf-result \
-  --date 2026-08-15 \
-  --headless \
-  --filters all
-```
-
 ## Modelos Soportados
 
-```text
-logistic
-discriminant
-decision-tree
-random-forest
-xgboost
-knn
-naive-bayes
-svm
-dnn
-```
+- Logistic Regression.
+- Discriminant Analysis.
+- Decision Tree.
+- Random Forest.
+- XGBoost.
+- KNN.
+- Naive Bayes.
+- SVM.
+- Deep Neural Network.
 
-Targets soportados:
+Targets disponibles:
 
-```text
-result       -> 1/X/2
-over-under   -> U/O 2.5
-```
-
-## Analisis E Interpretabilidad
-
-Ejemplos:
-
-```bash
-python cli.py analysis variance epl-2018 --output outputs/variance.png
-python cli.py analysis correlation epl-2018 --method spearman --output outputs/correlation.png
-python cli.py analysis rules epl-2018 --target result --depth 4 --output outputs/rules.png
-
-python cli.py explain shap epl-2018 rf-result --target H --output outputs/shap.png
-python cli.py explain extra epl-2018 rf-result --plot impurity --output outputs/impurity.png
-```
+- `result`: resultado 1/X/2.
+- `over-under`: U/O 2.5.
 
 ## Configuracion De Scraping
 
-El navegador se configura en `storage/network/browser.json`. Por defecto usa Chrome en modo headless:
+La configuracion del navegador se encuentra en:
+
+```text
+storage/network/browser.json
+```
+
+Ejemplo:
 
 ```json
 {
@@ -204,25 +125,18 @@ El navegador se configura en `storage/network/browser.json`. Por defecto usa Chr
 }
 ```
 
-Comandos:
+Tambien puede editarse desde la seccion **Config** de la interfaz web.
 
-```bash
-python cli.py config browser show
-python cli.py config browser set --application chrome --headless
-python cli.py config browser set --application firefox --no-headless
-```
-
-Para scraping en VPS necesitas tener instalado el navegador elegido y su driver compatible para Selenium.
-
-## Checks
+## Verificacion
 
 ```bash
 python -m compileall app.py cli.py install.py src
 python -m pytest tests -q
 ```
 
-## Notas
+## Notas De Seguridad
 
-- No se deben commitear entornos virtuales, modelos privados, cookies, perfiles de navegador ni datos descargados sensibles.
-- Las operaciones destructivas, como eliminar ligas o modelos, piden confirmacion salvo que uses `--yes`.
-- Para una guia mas completa de comandos y opciones, revisa [CLI.md](CLI.md).
+- No commitear entornos virtuales.
+- No commitear modelos privados, datasets sensibles, cookies ni perfiles de navegador.
+- La aplicacion es local y monousuario.
+- Los jobs en memoria se pierden al reiniciar el servidor; los archivos ya guardados permanecen en disco.
