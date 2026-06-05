@@ -1,4 +1,4 @@
-const state = { catalog: [], leagues: [], models: {}, specs: [], jobs: new Map() };
+const state = { catalog: [], leagues: [], models: {}, specs: [], jobs: new Map(), predictionFixtures: [] };
 const titles = {
   dashboard: "Inicio",
   leagues: "Ligas",
@@ -39,6 +39,7 @@ function switchView(view) {
   document.querySelectorAll(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
   document.querySelectorAll(".view").forEach((panel) => panel.classList.toggle("active", panel.id === view));
   document.getElementById("view-title").textContent = titles[view] || view;
+  if (view === "predict" && !state.predictionFixtures.length) loadUpcomingFixtures();
 }
 
 async function refreshAll() {
@@ -59,13 +60,38 @@ async function refreshAll() {
     fillModelSpecs(specs);
     renderLeagues(leagues);
     fillConfig(config);
+    renderDashboardFixtures(null);
     if (leagues.length) {
       await refreshModelSelects();
       await loadData();
+      loadDashboardFixtures();
+    } else {
+      renderDashboardFixtures({ fixtures: { columns: [], rows: [], total: 0 }, notes: ["No hay ligas guardadas"], days: 7, limit: 5 });
     }
   } catch (error) {
     showError(error.message);
   }
+}
+
+async function loadDashboardFixtures() {
+  try {
+    const result = await api("/api/dashboard/fixtures?limit=5&days=7");
+    renderDashboardFixtures(result);
+  } catch (error) {
+    document.getElementById("dashboard-fixtures").innerHTML = `<div class="item"><div>${escapeHtml(error.message)}</div></div>`;
+  }
+}
+
+function renderDashboardFixtures(result) {
+  const target = document.getElementById("dashboard-fixtures");
+  const notes = document.getElementById("dashboard-fixture-notes");
+  if (!result) {
+    target.innerHTML = `<div class="item"><div>Cargando partidos futuros...</div></div>`;
+    notes.innerHTML = "";
+    return;
+  }
+  target.innerHTML = tableHtml(result.fixtures);
+  notes.innerHTML = (result.notes || []).slice(0, 4).map((note) => `<small>${escapeHtml(note)}</small>`).join("");
 }
 
 function bindForms() {
@@ -93,11 +119,13 @@ function bindForms() {
     delete payload.league_id;
     await submitJson(`/api/leagues/${leagueId}/models/train`, payload, true);
   });
-  ["eval-league", "manual-league", "fixtures-league"].forEach((id) => {
-    document.getElementById(id).addEventListener("change", refreshModelSelects);
+  document.getElementById("eval-league").addEventListener("change", refreshModelSelects);
+  document.getElementById("fixtures-league").addEventListener("change", async () => {
+    await refreshModelSelects();
+    await loadUpcomingFixtures();
   });
   document.getElementById("evaluate-form").addEventListener("submit", evaluateModel);
-  document.getElementById("manual-form").addEventListener("submit", manualPredict);
+  document.getElementById("fixtures-load").addEventListener("click", loadUpcomingFixtures);
   document.getElementById("fixtures-form").addEventListener("submit", fixturesPredict);
   document.getElementById("analysis-form").addEventListener("submit", analysisPlot);
   document.getElementById("config-form").addEventListener("submit", saveConfig);
@@ -173,7 +201,7 @@ function updateCatalogDefaults() {
 
 function fillLeagueSelects(leagues) {
   const html = leagues.map((league) => `<option value="${escapeAttr(league.league_id)}">${escapeHtml(league.league_id)} - ${escapeHtml(league.display_name)}</option>`).join("");
-  ["data-league", "train-league", "models-league", "eval-league", "manual-league", "fixtures-league", "analysis-league"].forEach((id) => {
+  ["data-league", "train-league", "models-league", "eval-league", "fixtures-league", "analysis-league"].forEach((id) => {
     document.getElementById(id).innerHTML = html;
   });
   updateTrainingDefaults();
@@ -272,13 +300,11 @@ async function exportData() {
 async function refreshModelSelects() {
   const leagueIds = [...new Set([
     document.getElementById("eval-league").value,
-    document.getElementById("manual-league").value,
     document.getElementById("fixtures-league").value,
     document.getElementById("models-league").value,
   ].filter(Boolean))];
   await Promise.all(leagueIds.map(loadModelsForLeague));
   fillModelSelect("eval-model", document.getElementById("eval-league").value);
-  fillModelSelect("manual-model", document.getElementById("manual-league").value);
   fillModelSelect("fixtures-model", document.getElementById("fixtures-league").value);
   await loadModelsList();
 }
@@ -328,20 +354,13 @@ async function evaluateModel(event) {
   delete payload.model_id;
   try {
     const result = await api(`/api/leagues/${league}/models/${model}/evaluate`, jsonOptions(payload));
-    document.getElementById("evaluate-output").innerHTML = tableHtml(result.metrics) + tableHtml(result.rows);
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function manualPredict(event) {
-  event.preventDefault();
-  const payload = formJson(event.target);
-  const league = payload.league_id;
-  delete payload.league_id;
-  try {
-    const result = await api(`/api/leagues/${league}/predict/manual`, jsonOptions(payload));
-    renderTable("predict-output", result.prediction);
+    document.getElementById("evaluate-output").innerHTML = `
+      <h3>Metricas</h3>
+      ${tableHtml(result.metrics)}
+      <h3>Matriz de confusion</h3>
+      ${tableHtml(result.confusion_matrix)}
+      <h3>Filas evaluadas</h3>
+      ${tableHtml(result.rows)}`;
   } catch (error) {
     showError(error.message);
   }
@@ -349,16 +368,94 @@ async function manualPredict(event) {
 
 async function fixturesPredict(event) {
   event.preventDefault();
-  const form = event.target;
-  const data = new FormData(form);
-  const league = data.get("league_id");
-  data.delete("league_id");
+  const payload = formJson(event.target);
+  const league = payload.league_id;
+  delete payload.league_id;
+  delete payload.application;
+  delete payload.headless;
+  payload.fixtures = selectedFixtureRows();
+  if (!payload.fixtures.length) {
+    showError("Selecciona al menos un partido futuro");
+    return;
+  }
   try {
-    const result = await api(`/api/leagues/${league}/predict/fixtures`, { method: "POST", body: data });
+    const result = await api(`/api/leagues/${league}/predict/fixtures`, jsonOptions(payload));
     trackJob(result);
   } catch (error) {
     showError(error.message);
   }
+}
+
+async function loadUpcomingFixtures() {
+  const form = document.getElementById("fixtures-form");
+  const league = form.elements.league_id.value;
+  if (!league) return;
+  clearAlert();
+  document.getElementById("fixtures-picker").innerHTML = `<div class="item"><div>Cargando partidos futuros...</div></div>`;
+  try {
+    await savePredictionBrowserConfig();
+    const result = await api(`/api/leagues/${league}/fixtures/upcoming`, jsonOptions({
+      days: 7,
+      limit: 100,
+      headless: form.elements.headless.checked,
+    }));
+    state.predictionFixtures = result.fixtures.rows || [];
+    renderFixturesPicker();
+  } catch (error) {
+    state.predictionFixtures = [];
+    document.getElementById("fixtures-picker").innerHTML = "";
+    showError(error.message);
+  }
+}
+
+async function savePredictionBrowserConfig() {
+  const form = document.getElementById("fixtures-form");
+  await api("/api/config/browser", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      application: form.elements.application.value,
+      headless: form.elements.headless.checked,
+    }),
+  });
+}
+
+function renderFixturesPicker() {
+  const target = document.getElementById("fixtures-picker");
+  if (!state.predictionFixtures.length) {
+    target.innerHTML = `<div class="item"><div>No se encontraron partidos futuros en los proximos 7 dias</div></div>`;
+    return;
+  }
+  const rows = state.predictionFixtures.map((fixture, index) => `
+    <tr>
+      <td><input type="checkbox" data-fixture-selected data-index="${escapeAttr(index)}" checked></td>
+      <td>${escapeHtml(fixture.Date)}</td>
+      <td>${escapeHtml(fixture["Hora MX"])}</td>
+      <td>${escapeHtml(fixture.Home)}</td>
+      <td>${escapeHtml(fixture.Away)}</td>
+      <td><input class="odd-input" data-fixture-odd="1" data-index="${escapeAttr(index)}" type="number" step="0.01" value="${escapeAttr(fixture["1"])}"></td>
+      <td><input class="odd-input" data-fixture-odd="X" data-index="${escapeAttr(index)}" type="number" step="0.01" value="${escapeAttr(fixture.X)}"></td>
+      <td><input class="odd-input" data-fixture-odd="2" data-index="${escapeAttr(index)}" type="number" step="0.01" value="${escapeAttr(fixture["2"])}"></td>
+    </tr>`).join("");
+  target.innerHTML = `<div class="table-wrap"><table>
+    <thead><tr><th></th><th>Fecha</th><th>Hora MX</th><th>Local</th><th>Visitante</th><th>1</th><th>X</th><th>2</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div><small>${escapeHtml(state.predictionFixtures.length)} partidos</small>`;
+}
+
+function selectedFixtureRows() {
+  const selected = [];
+  document.querySelectorAll("[data-fixture-selected]").forEach((checkbox) => {
+    if (!checkbox.checked) return;
+    const index = Number(checkbox.dataset.index);
+    const fixture = { ...state.predictionFixtures[index] };
+    ["1", "X", "2"].forEach((odd) => {
+      const input = document.querySelector(`[data-fixture-odd="${odd}"][data-index="${index}"]`);
+      fixture[odd] = input ? Number(input.value) : fixture[odd];
+    });
+    selected.push(fixture);
+  });
+  return selected;
 }
 
 async function analysisPlot(event) {
@@ -386,6 +483,9 @@ function fillConfig(config) {
   form.elements.application.value = config.application;
   form.elements.brave_binary.value = config.brave_binary || "";
   form.elements.headless.checked = Boolean(config.headless);
+  const fixturesForm = document.getElementById("fixtures-form");
+  fixturesForm.elements.application.value = config.application;
+  fixturesForm.elements.headless.checked = Boolean(config.headless);
 }
 
 async function pollJobs() {
@@ -603,6 +703,4 @@ function formatNumber(value) {
 }
 
 function setDefaultDates() {
-  const dateInput = document.querySelector("#fixtures-form input[name=date]");
-  if (dateInput && !dateInput.value) dateInput.value = new Date().toISOString().slice(0, 10);
 }

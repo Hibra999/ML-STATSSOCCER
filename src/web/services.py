@@ -4,7 +4,7 @@ import json
 import math
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,7 +76,7 @@ from src.models.tuner import Tuner
 from src.network.fixtures.footystats.scraper import FootyStatsScraper
 from src.network.fixtures.utils import match_fixture_teams
 from src.preprocessing.selection import train_test_split
-from src.preprocessing.utils.inputs import construct_inputs_by_fixture, construct_inputs_by_teams
+from src.preprocessing.utils.inputs import construct_inputs_by_fixture
 from src.preprocessing.utils.target import TargetType, construct_targets
 
 
@@ -88,6 +88,10 @@ DEFAULT_BROWSER_CONFIG = {
     "headless": True,
     "brave_binary": "",
 }
+UPCOMING_FIXTURE_DAYS = 7
+DASHBOARD_FIXTURE_LIMIT = 5
+PREDICT_FIXTURE_COLUMNS = ["Date", "Hora MX", "Home", "Away", "1", "X", "2"]
+DASHBOARD_FIXTURE_COLUMNS = ["Liga", "Pais", *PREDICT_FIXTURE_COLUMNS]
 MODEL_LABELS_ES = {
     "ngboost": "NGBoost",
     "catboost": "CatBoost",
@@ -150,6 +154,53 @@ def dashboard() -> Dict[str, Any]:
         "leagues": len(leagues),
         "models": sum(item["models"] for item in leagues),
         "model_specs": model_specs(),
+    }
+
+
+def dashboard_fixtures(limit: int = DASHBOARD_FIXTURE_LIMIT, days: int = UPCOMING_FIXTURE_DAYS) -> Dict[str, Any]:
+    db = LeagueDatabase()
+    limit = min(max(int(limit or DASHBOARD_FIXTURE_LIMIT), 1), 25)
+    days = min(max(int(days or UPCOMING_FIXTURE_DAYS), 1), 30)
+    rows = []
+    notes = []
+
+    for league_id in db.get_league_ids():
+        if len(rows) >= limit:
+            break
+        league = db.index[league_id]
+        if not league.fixture:
+            continue
+        league_df = db.load_league(league_id)
+        if league_df is None:
+            notes.append(f"{league_id}: datos locales no disponibles")
+            continue
+        try:
+            fixture_df = scrape_upcoming_fixtures(
+                league=league,
+                league_df=league_df,
+                days=days,
+                limit=limit - len(rows),
+                headless=None,
+                match_teams=True,
+            )
+        except Exception as exc:
+            notes.append(f"{league_id}: {clean_error_text(exc)}")
+            continue
+        if fixture_df.empty:
+            continue
+        fixture_df = fixture_df.copy()
+        fixture_df.insert(0, "Pais", league.country)
+        fixture_df.insert(0, "Liga", league_id)
+        rows.extend(fixture_df[DASHBOARD_FIXTURE_COLUMNS].to_dict(orient="records"))
+
+    output_df = pd.DataFrame(rows, columns=DASHBOARD_FIXTURE_COLUMNS)
+    if not output_df.empty:
+        output_df = output_df.sort_values(["Date", "Hora MX", "Liga"], kind="stable").head(limit).reset_index(drop=True)
+    return {
+        "fixtures": table_payload(output_df, page=1, page_size=limit),
+        "notes": notes,
+        "days": days,
+        "limit": limit,
     }
 
 
@@ -451,11 +502,13 @@ def evaluate_model(league_id: str, model_id: str, payload: Dict[str, Any]) -> Di
     metrics["Correct"] = int((y_true[filter_mask] == y_pred[filter_mask]).sum())
     metrics["Total"] = int(filter_mask.sum())
     metrics["Prof. Balance"] = _profit_balance(df=df, y_pred=y_pred[filter_mask], filter_mask=filter_mask, target_type=target_type)
+    confusion_df = confusion_matrix_dataframe(target_type=target_type, y_true=y_true[filter_mask], y_pred=y_pred[filter_mask])
 
     output_df = prediction_output_dataframe(df=df, target_type=target_type, y_pred=y_pred, y_prob=y_prob)
     output_df = output_df[filter_mask].reset_index(drop=True)
     result = {
         "metrics": table_payload(metrics, page=1, page_size=10),
+        "confusion_matrix": table_payload(confusion_df, page=1, page_size=10),
         "rows": table_payload(output_df, page=int(payload.get("page", 1)), page_size=int(payload.get("page_size", 50))),
         "percentiles": jsonable(prob_percentiles),
     }
@@ -477,36 +530,24 @@ def delete_model(league_id: str, model_id: str) -> Dict[str, str]:
     return {"deleted": model_id}
 
 
-def manual_prediction(league_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    _, _, df = load_league(league_id)
-    model_db = ModelDatabase(league_id=league_id)
-    model, config = load_model(model_db, payload.get("model_id") or payload.get("model"))
-
-    home = payload.get("home")
-    away = payload.get("away")
-    home_teams = sorted(df["Home"].dropna().unique().tolist())
-    away_teams = sorted(df["Away"].dropna().unique().tolist())
-    if home not in home_teams:
-        raise CLIError(f'Equipo local desconocido: "{home}".')
-    if away not in away_teams:
-        raise CLIError(f'Equipo visitante desconocido: "{away}".')
-    if home == away:
-        raise CLIError("El equipo local y visitante deben ser diferentes.")
-
-    match_df = pd.DataFrame({
-        "Date": [date.today().strftime("%Y-%m-%d")],
-        "Home": [home],
-        "Away": [away],
-        "1": [_valid_odd(payload.get("odd_1"))],
-        "X": [_valid_odd(payload.get("odd_x"))],
-        "2": [_valid_odd(payload.get("odd_2"))],
-    })
-    prepared_df = construct_inputs_by_teams(df=df, match_df=match_df)
-    y_prob = model.predict_proba(df=prepared_df).round(2)
-    y_pred = y_prob.argmax(axis=1)
-    output_df = prepared_df[["Date", "Season", "Week", "Home", "Away", "1", "X", "2"]].copy()
-    output_df = _append_prediction_columns(output_df, target_type=config["target_type"], y_pred=y_pred, y_prob=y_prob)
-    return {"prediction": table_payload(output_df, page=1, page_size=5)}
+def upcoming_fixtures(league_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    _, league, df = load_league(league_id)
+    days = min(max(int(payload.get("days") or UPCOMING_FIXTURE_DAYS), 1), 30)
+    limit = min(max(int(payload.get("limit") or 100), 1), 500)
+    fixture_df = scrape_upcoming_fixtures(
+        league=league,
+        league_df=df,
+        days=days,
+        limit=limit,
+        headless=payload.get("headless"),
+        match_teams=True,
+    )
+    return {
+        "fixtures": table_payload(fixture_df[PREDICT_FIXTURE_COLUMNS], page=1, page_size=limit),
+        "days": days,
+        "limit": limit,
+    }
 
 
 def fixture_prediction(league_id: str, payload: Dict[str, Any], fixture_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
@@ -515,9 +556,12 @@ def fixture_prediction(league_id: str, payload: Dict[str, Any], fixture_df: Opti
     model, config = load_model(model_db, payload.get("model_id") or payload.get("model"))
 
     if fixture_df is None:
-        if not payload.get("date"):
-            raise CLIError("La fecha es obligatoria si no se sube un archivo de partidos.")
-        fixture_df = scrape_fixtures(league, str(payload.get("date")), payload.get("headless"))
+        if payload.get("fixtures"):
+            fixture_df = fixture_rows_from_payload(payload.get("fixtures"))
+        elif payload.get("date"):
+            fixture_df = scrape_fixtures(league, str(payload.get("date")), payload.get("headless"))
+        else:
+            raise CLIError("Selecciona al menos un partido futuro para predecir.")
 
     fixture_df = _validate_fixture_rows(fixture_df, df)
     odd_mask = _league_odd_mask(league=league, fixture_df=fixture_df)
@@ -525,7 +569,8 @@ def fixture_prediction(league_id: str, payload: Dict[str, Any], fixture_df: Opti
     y_prob = model.predict_proba(df=prepared_df).round(2)
     y_pred = y_prob.argmax(axis=1)
 
-    output_df = fixture_df[["Home", "Away", "1", "X", "2"]].copy()
+    output_columns = [column for column in PREDICT_FIXTURE_COLUMNS if column in fixture_df.columns]
+    output_df = fixture_df[output_columns].copy()
     output_df = _append_prediction_columns(output_df, target_type=config["target_type"], y_pred=y_pred, y_prob=y_prob)
     selected_mask = _fixture_selected_mask(
         output_df=output_df,
@@ -679,6 +724,19 @@ def read_fixture_upload(filename: str, content: bytes) -> pd.DataFrame:
     return df[["Home", "Away", "1", "X", "2"]].copy()
 
 
+def fixture_rows_from_payload(rows: Any) -> pd.DataFrame:
+    if not isinstance(rows, list) or not rows:
+        raise CLIError("Selecciona al menos un partido futuro para predecir.")
+    df = pd.DataFrame(rows)
+    load_required_columns(df, ["Home", "Away", "1", "X", "2"], "Fixture input")
+    for column in ["1", "X", "2"]:
+        df[column] = df[column].apply(_valid_odd)
+    for column in ["Date", "Hora MX"]:
+        if column not in df.columns:
+            df[column] = ""
+    return df[PREDICT_FIXTURE_COLUMNS].copy()
+
+
 def scrape_fixtures(league, date_text: str, headless: Optional[bool]) -> pd.DataFrame:
     try:
         selected_date = datetime.strptime(date_text, "%Y-%m-%d").date()
@@ -696,7 +754,64 @@ def scrape_fixtures(league, date_text: str, headless: Optional[bool]) -> pd.Data
         scraper.quit()
     if parsed is None or parsed.empty:
         raise CLIError(f"No se encontraron partidos para {date_text}.")
+    parsed = parsed.copy()
+    parsed.insert(0, "Date", selected_date.isoformat())
+    if "Hora MX" not in parsed.columns:
+        parsed["Hora MX"] = "No disponible"
     return match_fixture_teams(parsed_teams_df=parsed, league_df=load_league(league.league_id)[2])
+
+
+def scrape_upcoming_fixtures(
+        league,
+        league_df: pd.DataFrame,
+        days: int = UPCOMING_FIXTURE_DAYS,
+        limit: Optional[int] = None,
+        headless: Optional[bool] = None,
+        match_teams: bool = True,
+) -> pd.DataFrame:
+    if not league.fixture:
+        return pd.DataFrame(columns=PREDICT_FIXTURE_COLUMNS)
+
+    target_dates = [date.today() + timedelta(days=offset) for offset in range(max(int(days or 1), 1))]
+    footystats_dates = {
+        target_date.strftime("%b %d").replace(" 0", " "): target_date
+        for target_date in target_dates
+    }
+
+    scraper = FootyStatsScraper(headless=headless)
+    try:
+        loaded = scraper.load_page(league.fixture)
+        if not loaded:
+            raise CLIError("No se pudo cargar FootyStats. Revisa internet, driver del navegador y URL de fixtures.")
+        parsed_by_date = scraper.parse_fixture_tables(date_strs=list(footystats_dates.keys()))
+    finally:
+        scraper.quit()
+
+    frames = []
+    for footystats_date, target_date in footystats_dates.items():
+        parsed = parsed_by_date.get(footystats_date)
+        if parsed is None or parsed.empty:
+            continue
+        parsed = parsed.copy()
+        parsed.insert(0, "Date", target_date.isoformat())
+        if "Hora MX" not in parsed.columns:
+            parsed["Hora MX"] = "No disponible"
+        frames.append(parsed)
+
+    if not frames:
+        return pd.DataFrame(columns=PREDICT_FIXTURE_COLUMNS)
+
+    fixture_df = pd.concat(frames, ignore_index=True)
+    if match_teams:
+        fixture_df = match_fixture_teams(parsed_teams_df=fixture_df, league_df=league_df)
+
+    for column in ["1", "X", "2"]:
+        fixture_df[column] = pd.to_numeric(fixture_df[column], errors="coerce")
+    fixture_df = fixture_df.dropna(subset=["Home", "Away", "1", "X", "2"]).reset_index(drop=True)
+    fixture_df = fixture_df[PREDICT_FIXTURE_COLUMNS]
+    if limit is not None:
+        fixture_df = fixture_df.head(max(int(limit), 0))
+    return fixture_df
 
 
 def load_explainer(league_id: str, model_id: str, compute_shap: bool):
@@ -729,6 +844,24 @@ def validate_target_label(target_type: TargetType, target: Optional[str]):
     allowed = ["H", "D", "A"] if target_type == TargetType.RESULT else ["U", "O"]
     if target not in allowed:
         raise CLIError(f'Objetivo invalido "{target}". Objetivos validos para {target_label(target_type)}: {", ".join(allowed)}.')
+
+
+def confusion_matrix_dataframe(target_type: TargetType, y_true: np.ndarray, y_pred: np.ndarray) -> pd.DataFrame:
+    if target_type == TargetType.RESULT:
+        labels = [(0, "H"), (1, "D"), (2, "A")]
+    elif target_type == TargetType.OVER_UNDER:
+        labels = [(0, "U"), (1, "O")]
+    else:
+        raise TypeError(f'Not supported target type: "{type(target_type)}"')
+
+    rows = []
+    for actual_value, actual_label in labels:
+        row = {"Real": actual_label}
+        actual_mask = y_true == actual_value
+        for predicted_value, predicted_label in labels:
+            row[f"Pred {predicted_label}"] = int((actual_mask & (y_pred == predicted_value)).sum())
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def catalog_template(db: LeagueDatabase, payload: Dict[str, Any]):
@@ -847,6 +980,10 @@ def normalize_optuna_choice(value: Any, allowed: set[str], label: str) -> str:
     if key not in allowed:
         raise CLIError(f'Optuna {label} invalido: "{value}".')
     return key
+
+
+def clean_error_text(exc: Exception) -> str:
+    return re.sub(r"^(CLIError|ValueError|RuntimeError|NotImplementedError):\s*", "", f"{exc.__class__.__name__}: {exc}")
 
 
 def emit_training_progress(callback, stage: str, current: int, total: int, message: str, **extra):

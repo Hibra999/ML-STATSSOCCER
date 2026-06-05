@@ -262,6 +262,24 @@ button.primary {
   min-width: 170px;
 }
 
+.actions-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.fixture-notes {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  color: var(--muted);
+}
+
+.odd-input {
+  min-width: 82px;
+}
+
 .table-wrap {
   overflow: auto;
   border: 1px solid var(--line);

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional
 
-from fastapi import Body, FastAPI, File, Form, Request, UploadFile
+from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -46,6 +46,10 @@ def create_app() -> FastAPI:
     @app.get("/api/dashboard")
     def dashboard():
         return _wrap(services.dashboard)
+
+    @app.get("/api/dashboard/fixtures")
+    def dashboard_fixtures(limit: int = 5, days: int = 7):
+        return _wrap(services.dashboard_fixtures, limit, days)
 
     @app.get("/api/model-specs")
     def model_specs():
@@ -116,28 +120,13 @@ def create_app() -> FastAPI:
     def delete_model(league_id: str, model_id: str):
         return _wrap(services.delete_model, league_id, model_id)
 
-    @app.post("/api/leagues/{league_id}/predict/manual")
-    def manual_prediction(league_id: str, payload: Dict[str, Any] = Body(...)):
-        return _wrap(services.manual_prediction, league_id, payload)
+    @app.post("/api/leagues/{league_id}/fixtures/upcoming")
+    def upcoming_fixtures(league_id: str, payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.upcoming_fixtures, league_id, payload)
 
     @app.post("/api/leagues/{league_id}/predict/fixtures")
-    async def fixture_prediction(
-            league_id: str,
-            model_id: str = Form(...),
-            date: Optional[str] = Form(None),
-            filters: Optional[str] = Form(None),
-            include_all: bool = Form(False),
-            headless: Optional[bool] = Form(None),
-            file: Optional[UploadFile] = File(None),
-    ):
-        payload = {"model_id": model_id, "date": date, "filters": filters, "include_all": include_all, "headless": headless}
-        fixture_df = None
-        if file is not None:
-            try:
-                fixture_df = services.read_fixture_upload(file.filename or "fixtures.csv", await file.read())
-            except Exception as exc:
-                return _error(exc)
-        return _submit(f"Prediciendo partidos para {league_id}", services.fixture_prediction, league_id, payload, fixture_df)
+    def fixture_prediction(league_id: str, payload: Dict[str, Any] = Body(...)):
+        return _submit(f"Prediciendo partidos para {league_id}", services.fixture_prediction, league_id, payload)
 
     @app.post("/api/leagues/{league_id}/analysis/{analysis_type}")
     def analysis_plot(league_id: str, analysis_type: str, payload: Dict[str, Any] = Body(default={})):

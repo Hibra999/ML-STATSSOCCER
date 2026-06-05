@@ -1,10 +1,11 @@
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import pandas as pd
-from typing import Optional
+from typing import Dict, List, Optional
 from lxml import html
 from selenium.webdriver import Chrome, Firefox, Edge, ChromeOptions, FirefoxOptions, EdgeOptions
 from selenium.webdriver.common.by import By
@@ -145,6 +146,11 @@ class FootyStatsScraper:
 
             return text.replace('\n', '').replace('\t', '') if text is not None else '1.0'
 
+        def get_match_time(ul) -> str:
+            text = ' '.join(ul.text_content().split())
+            matches = re.findall(r'\b(?:[01]?\d|2[0-3]):[0-5]\d\b', text)
+            return matches[0] if matches else 'No disponible'
+
         tree = html.fromstring(self._web_driver.page_source)
         table_elements = tree.xpath('//div[contains(@class, "full-matches-table mt1e")]')
 
@@ -175,10 +181,12 @@ class FootyStatsScraper:
         odds_1 = []
         odds_x = []
         odds_2 = []
+        times_mx = []
         for ul in requested_table.findall('.//ul')[1:]:
             # Parsing teams.
             home_teams.append(ul.findall('.//a')[0].find('.//span').text)
             away_teams.append(ul.findall('.//a')[2].find('.//span').text)
+            times_mx.append(get_match_time(ul))
 
             # Parsing odds.
             odd_spans = ul.findall('li')[-1].xpath('.//span[contains(@class, "hover-modal-parent")]')
@@ -193,11 +201,20 @@ class FootyStatsScraper:
         df = pd.DataFrame({
             'Home': home_teams,
             'Away': away_teams,
+            'Hora MX': times_mx,
             '1': odds_1,
             'X': odds_x,
             '2': odds_2
         })
         return df
+
+    def parse_fixture_tables(self, date_strs: List[str]) -> Dict[str, pd.DataFrame]:
+        fixtures = {}
+        for date_str in date_strs:
+            parsed = self.parse_fixture_table(date_str=date_str)
+            if parsed is not None and not parsed.empty:
+                fixtures[date_str] = parsed
+        return fixtures
 
     def quit(self):
         self._web_driver.quit()

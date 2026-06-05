@@ -43,6 +43,11 @@
           <div class="metric"><span>Servidor</span><strong>Local</strong></div>
         </div>
         <div class="panel">
+          <div class="panel-header"><h2>Proximos 5 partidos</h2></div>
+          <div id="dashboard-fixtures" class="output"></div>
+          <div id="dashboard-fixture-notes" class="fixture-notes"></div>
+        </div>
+        <div class="panel">
           <div class="panel-header"><h2>Procesos</h2></div>
           <div id="jobs-list" class="jobs"></div>
         </div>
@@ -157,32 +162,26 @@
       </section>
 
       <section id="predict" class="view">
-        <div class="grid two">
-          <form id="manual-form" class="panel form-panel">
-            <div class="panel-header"><h2>Manual</h2></div>
-            <label>Liga<select name="league_id" id="manual-league"></select></label>
-            <label>Modelo<select name="model_id" id="manual-model"></select></label>
-            <div class="row two">
-              <label>Local<input name="home" required></label>
-              <label>Visitante<input name="away" required></label>
-            </div>
-            <div class="row three">
-              <label>1<input name="odd_1" type="number" step="0.01" value="2.00"></label>
-              <label>X<input name="odd_x" type="number" step="0.01" value="3.00"></label>
-              <label>2<input name="odd_2" type="number" step="0.01" value="2.50"></label>
-            </div>
-            <button type="submit" class="primary">Predecir</button>
-          </form>
-          <form id="fixtures-form" class="panel form-panel">
-            <div class="panel-header"><h2>Partidos</h2></div>
+        <form id="fixtures-form" class="panel form-panel">
+          <div class="panel-header"><h2>Partidos futuros</h2></div>
+          <div class="row three">
             <label>Liga<select name="league_id" id="fixtures-league"></select></label>
             <label>Modelo<select name="model_id" id="fixtures-model"></select></label>
-            <label>Fecha<input name="date" type="date"></label>
-            <label>Archivo<input name="file" type="file" accept=".csv,.xlsx,.xls"></label>
+            <label>Navegador<select name="application" id="fixtures-browser"><option>chrome</option><option>firefox</option><option>edge</option><option>brave</option></select></label>
+          </div>
+          <div class="row three">
             <label>Filtros<input name="filters" value="none" placeholder="all, none o filtro"></label>
             <label class="check"><input name="include_all" type="checkbox"> Exportar todo</label>
-            <button type="submit" class="primary">Predecir partidos</button>
-          </form>
+            <label class="check"><input name="headless" id="fixtures-headless" type="checkbox"> Sin ventana</label>
+          </div>
+          <div class="actions-row">
+            <button id="fixtures-load" type="button">Cargar futuros</button>
+            <button type="submit" class="primary">Predecir seleccionados</button>
+          </div>
+        </form>
+        <div class="panel">
+          <div class="panel-header"><h2>Seleccionar partidos</h2></div>
+          <div id="fixtures-picker" class="output"></div>
         </div>
         <div id="predict-output" class="panel output"></div>
       </section>
