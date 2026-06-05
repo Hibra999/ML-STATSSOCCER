@@ -2,12 +2,13 @@ from argparse import Namespace
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from src.cli import app as cli_app
 from src.cli.common import CLIError, parse_eval_odd_range, parse_odd_range, validate_identifier
 from src.cli.model_specs import MODEL_SPECS, build_model_params, normalize_model_key
-from src.preprocessing.utils.target import TargetType
+from src.preprocessing.utils.target import TargetType, construct_targets
 from src.models.tuner import Tuner
 from src.models.classifiers.boosting import _filter_ngboost_categorical_warning, sanitize_probabilities
 
@@ -151,3 +152,105 @@ def test_tuner_emits_progress_payloads():
     assert progress[1]["total"] == 2
     assert progress[1]["percent"] == 50
     assert progress[1]["best_value"] == 0.75
+
+
+def test_construct_targets_result_without_warnings():
+    df = pd.DataFrame({"Result": ["H", "D", "A"]})
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        targets = construct_targets(df=df, target_type=TargetType.RESULT)
+
+    assert targets.tolist() == [0, 1, 2]
+
+
+def test_construct_targets_over_under_without_warnings():
+    df = pd.DataFrame({"HG": [1, 2, 0], "AG": [0, 1, 3]})
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        targets = construct_targets(df=df, target_type=TargetType.OVER_UNDER)
+
+    assert targets.tolist() == [0, 1, 1]
+
+
+def test_construct_targets_rejects_unknown_result():
+    df = pd.DataFrame({"Result": ["H", "W"]})
+
+    with pytest.raises(ValueError, match="Expected"):
+        construct_targets(df=df, target_type=TargetType.RESULT)
+
+
+@pytest.mark.parametrize("model_key", ["ngboost", "catboost", "lightgbm", "xgboost"])
+def test_three_optuna_trials_per_boosting_model_without_warnings(model_key):
+    spec = MODEL_SPECS[model_key]
+    params = _small_model_params(model_key)
+    progress = []
+    tuner = Tuner(
+        model_cls=spec.model_cls,
+        fixed_params=params,
+        tunable_params={"learning_rate": [params["learning_rate"], params["learning_rate"] * 1.5]},
+        df=_warning_free_training_df(),
+        metric="Accuracy",
+        sampler="random",
+        pruner="none",
+        progress_callback=progress.append,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        study = tuner.tune(trials=3)
+
+    assert len(study.trials) == 3
+    assert progress[-1]["current"] == 3
+    assert progress[-1]["percent"] == 100
+
+
+def _warning_free_training_df() -> pd.DataFrame:
+    rows = []
+    labels = ["H", "D", "A"]
+    for index in range(60):
+        label = labels[index % len(labels)]
+        home_goals = {"H": 2, "D": 1, "A": 0}[label]
+        away_goals = {"H": 0, "D": 1, "A": 2}[label]
+        rows.append({
+            "Date": f"2024-01-{(index % 28) + 1:02d}",
+            "Season": 2024,
+            "Week": index + 1,
+            "Home": f"Home {index % 6}",
+            "Away": f"Away {index % 6}",
+            "HG": home_goals,
+            "AG": away_goals,
+            "Result": label,
+            "Result-U/O": "O" if home_goals + away_goals >= 3 else "U",
+            "HST": 0,
+            "AST": 0,
+            "HC": 0,
+            "AC": 0,
+            "1": 1.4 + (index % 5) * 0.08,
+            "X": 2.8 + (index % 4) * 0.12,
+            "2": 1.7 + (index % 6) * 0.09,
+            "home_form": float(index % 3),
+            "away_form": float((index + 1) % 3),
+        })
+    return pd.DataFrame(rows)
+
+
+def _small_model_params(model_key: str):
+    params = {
+        "league_id": "warning-test",
+        "model_id": f"{model_key}-warning-test",
+        "target_type": TargetType.RESULT,
+        "normalizer": None,
+        "sampler": None,
+        **MODEL_SPECS[model_key].defaults,
+    }
+    if MODEL_SPECS[model_key].supports_calibration:
+        params["calibrate_probabilities"] = False
+    params["n_estimators"] = 5
+    params["max_depth"] = 2
+    params["learning_rate"] = 0.02 if model_key == "ngboost" else 0.05
+    if model_key == "lightgbm":
+        params["num_leaves"] = 7
+        params["min_child_samples"] = 1
+    return params

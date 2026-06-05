@@ -14,6 +14,11 @@ from src.preprocessing.utils.target import TargetType
 
 PROBABILITY_EPSILON = 1e-12
 
+try:
+    from lightgbm import LGBMClassifier
+except ImportError:
+    LGBMClassifier = None
+
 
 def sanitize_probabilities(probabilities: np.ndarray, epsilon: float = PROBABILITY_EPSILON) -> np.ndarray:
     probs = np.asarray(probabilities, dtype=float)
@@ -47,6 +52,33 @@ def _estimator_feature_importances(estimator) -> np.ndarray:
     if hasattr(estimator, "get_feature_importance"):
         return np.asarray(estimator.get_feature_importance())
     raise ValueError("Este modelo no expone importancias de variables.")
+
+
+if LGBMClassifier is not None:
+    class WarningFreeLGBMClassifier(LGBMClassifier):
+        def fit(self, X, y, *args, **kwargs):
+            return super().fit(self._warning_free_frame(X, reset=True), y, *args, **kwargs)
+
+        def predict(self, X, *args, **kwargs):
+            return super().predict(self._warning_free_frame(X), *args, **kwargs)
+
+        def predict_proba(self, X, *args, **kwargs):
+            return super().predict_proba(self._warning_free_frame(X), *args, **kwargs)
+
+        def _warning_free_frame(self, X, reset: bool = False) -> pd.DataFrame:
+            if isinstance(X, pd.DataFrame):
+                if reset:
+                    self._warning_free_feature_names = X.columns.tolist()
+                return X
+
+            values = np.asarray(X)
+            if values.ndim == 1:
+                values = values.reshape(1, -1)
+            if reset or not hasattr(self, "_warning_free_feature_names"):
+                self._warning_free_feature_names = [f"feature_{idx}" for idx in range(values.shape[1])]
+            return pd.DataFrame(values, columns=self._warning_free_feature_names)
+else:
+    WarningFreeLGBMClassifier = None
 
 
 class ProbabilitySanitizingModel(ClassificationModel):
@@ -261,12 +293,10 @@ class LightGBM(ProbabilitySanitizingModel):
         )
 
     def build_classifier(self, input_size: int, num_classes: int) -> BaseEstimator:
-        try:
-            from lightgbm import LGBMClassifier
-        except ImportError as exc:
-            raise RuntimeError("LightGBM no esta instalado. Ejecuta pip install -r requirements.txt.") from exc
+        if WarningFreeLGBMClassifier is None:
+            raise RuntimeError("LightGBM no esta instalado. Ejecuta pip install -r requirements.txt.")
 
-        return LGBMClassifier(
+        return WarningFreeLGBMClassifier(
             objective="multiclass" if num_classes > 2 else "binary",
             n_estimators=self._n_estimators,
             num_leaves=self._num_leaves,

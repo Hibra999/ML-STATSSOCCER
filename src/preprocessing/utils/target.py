@@ -15,9 +15,13 @@ def construct_targets(df: pd.DataFrame, target_type: TargetType) -> np.ndarray:
     """ Constructs the dataset targets based on the selected classification task """
 
     if target_type == TargetType.RESULT:
-        y = df['Result'].replace({'H': 0, 'D': 1, 'A': 2}).to_numpy(dtype=np.int32)
+        y = df['Result'].map({'H': 0, 'D': 1, 'A': 2})
+        if y.isna().any():
+            invalid = sorted(df.loc[y.isna(), 'Result'].dropna().unique().tolist())
+            raise ValueError(f'Expected "Result" values to be one of <H, D, A>, got {invalid}')
+        y = y.astype(np.int32).to_numpy()
     elif target_type == TargetType.OVER_UNDER:
-        y = ((df['HG'] + df['AG']).ge(2.5)).replace({False: 0, True: 1}).to_numpy(dtype=np.int32)
+        y = (df['HG'] + df['AG']).ge(2.5).astype(np.int32).to_numpy()
     else:
         raise TypeError(f'Undefiend target type: "{target_type.name}"')
 

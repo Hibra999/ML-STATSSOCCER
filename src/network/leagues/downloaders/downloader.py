@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
 from src.network.leagues.league import League
@@ -94,7 +95,7 @@ class FootballDataDownloader(ABC):
 
         # Add Result-U/O column.
         result_uo_index = df.columns.tolist().index('Result') + 1
-        result_uo = (df['HG'] + df['AG']).ge(2.5).replace({True: 'O', False: 'U'})
+        result_uo = np.where((df['HG'] + df['AG']).ge(2.5), 'O', 'U')
         df.insert(loc=result_uo_index, column='Result-U/O', value=result_uo)
 
         # Compute game of week.
