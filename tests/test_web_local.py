@@ -28,3 +28,25 @@ def test_fastapi_app_imports_when_dependency_available():
     assert "/" in paths
     assert "/api/health" in paths
     assert "/api/leagues" in paths
+    assert "/assets" in paths
+
+
+def test_web_catalog_has_flags_and_defaults():
+    from src.web import services
+
+    catalog = services.catalog_leagues()
+
+    assert catalog
+    assert all(item["flag_url"].startswith("/assets/graphics/countries/") for item in catalog)
+    assert all(item["default_league_id"] for item in catalog)
+    assert all(value is not None for item in catalog for value in item.values())
+
+
+def test_web_browser_config_supports_brave():
+    from src.web import services
+
+    config = services.browser_config()
+
+    assert "brave" in services.SUPPORTED_BROWSERS
+    assert "brave_binary" in config
+    assert config["brave_binary"] is not None

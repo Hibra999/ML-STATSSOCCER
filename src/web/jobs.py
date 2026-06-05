@@ -3,7 +3,7 @@ from __future__ import annotations
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Callable, Dict, Optional
@@ -16,9 +16,9 @@ class Job:
     message: str
     created_at: str
     updated_at: str
-    result: Optional[Any] = None
-    error: Optional[str] = None
-    traceback: Optional[str] = None
+    result: Any = field(default_factory=dict)
+    error: str = ""
+    traceback: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {

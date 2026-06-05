@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -80,6 +81,24 @@ from src.preprocessing.utils.target import TargetType, construct_targets
 
 
 OUTPUT_ROOT = Path("outputs") / "web"
+COUNTRY_FLAGS_ROOT = Path("storage") / "graphics" / "countries"
+SUPPORTED_BROWSERS = ("chrome", "firefox", "edge", "brave")
+DEFAULT_BROWSER_CONFIG = {
+    "application": "chrome",
+    "headless": True,
+    "brave_binary": "",
+}
+MODEL_LABELS_ES = {
+    "logistic": "Regresion logistica",
+    "discriminant": "Analisis discriminante",
+    "decision-tree": "Arbol de decision",
+    "random-forest": "Random Forest",
+    "xgboost": "XGBoost",
+    "knn": "KNN",
+    "naive-bayes": "Naive Bayes",
+    "svm": "SVM",
+    "dnn": "Red neuronal profunda",
+}
 
 
 def jsonable(value: Any) -> Any:
@@ -104,10 +123,10 @@ def jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [jsonable(item) for item in value]
     if value is None:
-        return None
+        return ""
     try:
         if pd.isna(value):
-            return None
+            return ""
     except (TypeError, ValueError):
         pass
     return value
@@ -119,7 +138,7 @@ def table_payload(df: pd.DataFrame, page: int = 1, page_size: int = 50) -> Dict[
     total = int(df.shape[0])
     start = (page - 1) * page_size
     page_df = df.iloc[start:start + page_size].copy()
-    page_df = page_df.astype(object).where(pd.notna(page_df), None)
+    page_df = page_df.astype(object).where(pd.notna(page_df), "")
     return {
         "columns": [str(column) for column in page_df.columns],
         "rows": jsonable(page_df.to_dict(orient="records")),
@@ -143,9 +162,9 @@ def model_specs() -> List[Dict[str, Any]]:
     return [
         {
             "key": spec.key,
-            "label": spec.label,
+            "label": MODEL_LABELS_ES.get(spec.key, spec.label),
             "supports_calibration": spec.supports_calibration,
-            "defaults": jsonable(spec.defaults),
+            "defaults": display_defaults(spec.defaults),
         }
         for spec in MODEL_SPECS.values()
     ]
@@ -158,9 +177,15 @@ def catalog_leagues() -> List[Dict[str, Any]]:
             "index": idx,
             "country": league.country,
             "name": league.name,
-            "category": league.category,
-            "start_year": league.start_year,
-            "fixture": league.fixture,
+            "display_name": league_display_name(league),
+            "default_league_id": default_league_id(league),
+            "category": category_label(league.category),
+            "start_year": int(league.start_year),
+            "history_window": 3,
+            "goal_margin": 2,
+            "stats": "Todas",
+            "fixture": league.fixture or "",
+            "flag_url": country_flag_url(league.country),
         }
         for idx, league in enumerate(db.leagues, start=1)
     ]
@@ -201,21 +226,21 @@ def create_league(payload: Dict[str, Any]) -> Dict[str, Any]:
     template = catalog_template(db, payload)
     league_id = validate_identifier(payload.get("league_id") or payload.get("id") or f"{template.name}-{template.country}-01", "league id")
     if db.league_exists(league_id):
-        raise CLIError(f'League "{league_id}" already exists.')
+        raise CLIError(f'La liga "{league_id}" ya existe.')
 
     current_year_threshold = date.today().year - 4
     start_year = int(payload.get("start_year") or template.start_year)
     if start_year < template.start_year:
-        raise CLIError(f"{template.name} starts at {template.start_year}; requested {start_year}.")
+        raise CLIError(f"{template.name} inicia en {template.start_year}; se solicito {start_year}.")
     if start_year > current_year_threshold:
-        raise CLIError(f"Start year cannot be newer than {current_year_threshold}.")
+        raise CLIError(f"El ano de inicio no puede ser mayor que {current_year_threshold}.")
 
     history_window = int(payload.get("history_window", 3))
     goal_margin = int(payload.get("goal_margin", 2))
     if history_window < 2 or history_window > 5:
-        raise CLIError("history_window must be between 2 and 5.")
+        raise CLIError("El historial debe estar entre 2 y 5.")
     if goal_margin < 2 or goal_margin > 5:
-        raise CLIError("goal_margin must be between 2 and 5.")
+        raise CLIError("El margen debe estar entre 2 y 5.")
 
     stats_columns = _resolve_stats_columns(template, str(payload.get("stats", "all")))
     league = template.clone(
@@ -230,7 +255,7 @@ def create_league(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     df = db.create_league(league=league)
     if df is None:
-        raise CLIError("League download failed. Check internet access and source availability.")
+        raise CLIError("No se pudo descargar la liga. Revisa internet y disponibilidad de la fuente.")
     return {"league": league_payload(league), "preview": table_payload(df.head(25), page=1, page_size=25)}
 
 
@@ -241,7 +266,7 @@ def update_league(league_id: str) -> Dict[str, Any]:
 def delete_league(league_id: str) -> Dict[str, str]:
     db = LeagueDatabase()
     if not db.league_exists(league_id):
-        raise CLIError(f'League "{league_id}" does not exist.')
+        raise CLIError(f'La liga "{league_id}" no existe.')
     db.delete_league(league_id)
     return {"deleted": league_id}
 
@@ -295,16 +320,16 @@ def train_model(league_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     _, league, df = load_league(league_id)
     df = df.dropna(ignore_index=True)
     if df.empty:
-        raise CLIError("Training dataset has no complete rows after dropping missing values.")
+        raise CLIError("El dataset de entrenamiento no tiene filas completas despues de quitar faltantes.")
 
     model_db = ModelDatabase(league_id=league.league_id)
     model_id = validate_identifier(payload.get("model_id") or payload.get("id") or f"{league.league_id}-{model_key}", "model id")
     if model_db.model_exists(model_id):
-        raise CLIError(f'Model "{model_id}" already exists for league "{league.league_id}".')
+        raise CLIError(f'El modelo "{model_id}" ya existe para la liga "{league.league_id}".')
 
     args = training_args(payload, league_id=league.league_id, model_id=model_id, model_key=model_key)
     if args.eval_size < 5 or args.eval_size > 30:
-        raise CLIError("eval_size must be between 5 and 30 percent.")
+        raise CLIError("El porcentaje de evaluacion debe estar entre 5 y 30.")
 
     model_config = build_model_params(args=args, league_id=league.league_id, model_id=model_id, model_key=model_key)
     model_config["train"] = {"eval_samples_size": float(args.eval_size), "results": {}}
@@ -370,7 +395,7 @@ def evaluate_model(league_id: str, model_id: str, payload: Dict[str, Any]) -> Di
 
     dataset_masks = _dataset_masks(df=df, config=config)
     if dataset_key not in dataset_masks:
-        raise CLIError("dataset must be all, train or eval.")
+        raise CLIError("Los datos deben ser: todos, entrenamiento o evaluacion.")
     dataset_mask = dataset_masks[dataset_key]
     prob_percentiles = _compute_probability_percentiles(
         y_prob=y_prob[dataset_mask],
@@ -408,7 +433,7 @@ def delete_model(league_id: str, model_id: str) -> Dict[str, str]:
     load_league(league_id)
     model_db = ModelDatabase(league_id=league_id)
     if not model_db.model_exists(model_id):
-        raise CLIError(f'Model "{model_id}" does not exist.')
+        raise CLIError(f'El modelo "{model_id}" no existe.')
     model_db.delete_model(model_id)
     return {"deleted": model_id}
 
@@ -423,11 +448,11 @@ def manual_prediction(league_id: str, payload: Dict[str, Any]) -> Dict[str, Any]
     home_teams = sorted(df["Home"].dropna().unique().tolist())
     away_teams = sorted(df["Away"].dropna().unique().tolist())
     if home not in home_teams:
-        raise CLIError(f'Unknown home team "{home}".')
+        raise CLIError(f'Equipo local desconocido: "{home}".')
     if away not in away_teams:
-        raise CLIError(f'Unknown away team "{away}".')
+        raise CLIError(f'Equipo visitante desconocido: "{away}".')
     if home == away:
-        raise CLIError("Home and away teams must be different.")
+        raise CLIError("El equipo local y visitante deben ser diferentes.")
 
     match_df = pd.DataFrame({
         "Date": [date.today().strftime("%Y-%m-%d")],
@@ -452,7 +477,7 @@ def fixture_prediction(league_id: str, payload: Dict[str, Any], fixture_df: Opti
 
     if fixture_df is None:
         if not payload.get("date"):
-            raise CLIError("date is required when no fixture file is uploaded.")
+            raise CLIError("La fecha es obligatoria si no se sube un archivo de partidos.")
         fixture_df = scrape_fixtures(league, str(payload.get("date")), payload.get("headless"))
 
     fixture_df = _validate_fixture_rows(fixture_df, df)
@@ -496,7 +521,7 @@ def analysis_plot(league_id: str, analysis_type: str, payload: Dict[str, Any]) -
         analyzer = DistributionAnalyzer(df=df)
         column = payload.get("column")
         if column not in analyzer.all_features:
-            raise CLIError(f'Unknown distribution column "{column}".')
+            raise CLIError(f'Columna de distribucion desconocida: "{column}".')
         ax = analyzer.generate_plot(season=season, colormap=colormap, column=column)
     elif analysis_type == "variance":
         ax = VarianceAnalyzer(df=df).generate_plot(season=season, colormap=colormap)
@@ -516,7 +541,7 @@ def analysis_plot(league_id: str, analysis_type: str, payload: Dict[str, Any]) -
     elif analysis_type == "rules":
         ax = RuleExtractorAnalyzer(df=df).generate_plot(season=season, target_type=parse_target(payload.get("target", "result")), max_depth=int(payload.get("depth", 3)))
     else:
-        raise CLIError(f'Unknown analysis type "{analysis_type}".')
+        raise CLIError(f'Tipo de analisis desconocido: "{analysis_type}".')
 
     save_figure(ax, str(output))
     return {"image": image_payload(output)}
@@ -539,30 +564,38 @@ def explain_plot(league_id: str, model_id: str, plot_type: str, payload: Dict[st
         validate_target_label(model.target_type, payload.get("target"))
         ax = explainer.shap_bar_plot(target=payload.get("target"), clustering=bool(payload.get("cluster", True)))
         if ax is None:
-            raise CLIError("This explainer does not provide SHAP values for the selected model.")
+            raise CLIError("Este explicador no entrega valores SHAP para el modelo seleccionado.")
     elif plot_type == "extra":
         ax = extra_explainer_plot(explainer, payload)
     else:
-        raise CLIError(f'Unknown explain plot "{plot_type}".')
+        raise CLIError(f'Grafico de explicacion desconocido: "{plot_type}".')
 
     save_figure(ax, str(output))
     return {"image": image_payload(output)}
 
 
 def browser_config() -> Dict[str, Any]:
+    data = DEFAULT_BROWSER_CONFIG.copy()
     with open("storage/network/browser.json", "r") as file:
-        return json.load(file)
+        data.update(json.load(file))
+    data["application"] = str(data.get("application") or DEFAULT_BROWSER_CONFIG["application"]).lower()
+    data["headless"] = bool(data.get("headless", DEFAULT_BROWSER_CONFIG["headless"]))
+    data["brave_binary"] = str(data.get("brave_binary") or "")
+    return data
 
 
 def update_browser_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     data = browser_config()
     application = payload.get("application")
     if application is not None:
-        if application not in {"chrome", "firefox", "edge"}:
-            raise CLIError("application must be chrome, firefox or edge.")
+        application = str(application).lower()
+        if application not in SUPPORTED_BROWSERS:
+            raise CLIError("El navegador debe ser chrome, firefox, edge o brave.")
         data["application"] = application
     if "headless" in payload:
         data["headless"] = bool(payload["headless"])
+    if "brave_binary" in payload:
+        data["brave_binary"] = str(payload.get("brave_binary") or "").strip()
     with open("storage/network/browser.json", "w") as file:
         json.dump(data, file, indent=2)
         file.write("\n")
@@ -572,21 +605,21 @@ def update_browser_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 def load_league(league_id: str, update: bool = False):
     db = LeagueDatabase()
     if not db.league_exists(league_id):
-        raise CLIError(f'League "{league_id}" does not exist.')
+        raise CLIError(f'La liga "{league_id}" no existe.')
     df = db.update_league(league_id) if update else db.load_league(league_id)
     if df is None:
-        raise CLIError(f'Could not load league "{league_id}".')
+        raise CLIError(f'No se pudo cargar la liga "{league_id}".')
     return db, db.index[league_id], df.reset_index(drop=True)
 
 
 def load_model(model_db: ModelDatabase, model_id: Optional[str]):
     if not model_id:
-        raise CLIError("model_id is required.")
+        raise CLIError("El id del modelo es obligatorio.")
     if not model_db.model_exists(model_id):
-        raise CLIError(f'Model "{model_id}" does not exist.')
+        raise CLIError(f'El modelo "{model_id}" no existe.')
     model, config = model_db.load_model(model_id=model_id)
     if model is None or config is None:
-        raise CLIError(f'Model "{model_id}" could not be loaded.')
+        raise CLIError(f'No se pudo cargar el modelo "{model_id}".')
     return model, config
 
 
@@ -597,7 +630,7 @@ def read_fixture_upload(filename: str, content: bytes) -> pd.DataFrame:
     elif suffix in {".xlsx", ".xls"}:
         df = pd.read_excel(BytesIO(content))
     else:
-        raise CLIError("Fixture input must be .csv or .xlsx.")
+        raise CLIError("El archivo de partidos debe ser .csv o .xlsx.")
     load_required_columns(df, ["Home", "Away", "1", "X", "2"], "Fixture input")
     return df[["Home", "Away", "1", "X", "2"]].copy()
 
@@ -606,19 +639,19 @@ def scrape_fixtures(league, date_text: str, headless: Optional[bool]) -> pd.Data
     try:
         selected_date = datetime.strptime(date_text, "%Y-%m-%d").date()
     except ValueError as exc:
-        raise CLIError("date must use YYYY-MM-DD format.") from exc
+        raise CLIError("La fecha debe usar el formato AAAA-MM-DD.") from exc
     footystats_date = selected_date.strftime("%b %d").replace(" 0", " ")
 
     scraper = FootyStatsScraper(headless=headless)
     try:
         loaded = scraper.load_page(league.fixture)
         if not loaded:
-            raise CLIError("Could not load FootyStats page. Check internet, browser driver and fixture URL.")
+            raise CLIError("No se pudo cargar FootyStats. Revisa internet, driver del navegador y URL de fixtures.")
         parsed = scraper.parse_fixture_table(date_str=footystats_date)
     finally:
         scraper.quit()
     if parsed is None or parsed.empty:
-        raise CLIError(f"No fixtures found for {date_text}.")
+        raise CLIError(f"No se encontraron partidos para {date_text}.")
     return match_fixture_teams(parsed_teams_df=parsed, league_df=load_league(league.league_id)[2])
 
 
@@ -633,12 +666,12 @@ def load_explainer(league_id: str, model_id: str, compute_shap: bool):
             explainer_cls = candidate
             break
     if explainer_cls is None:
-        raise CLIError(f"No explainer registered for {model.__class__.__name__}.")
+        raise CLIError(f"No hay explicador registrado para {model.__class__.__name__}.")
     explainer = explainer_cls(model=model, df=df)
     if compute_shap:
         explainer.compute_shap_values()
         if explainer.shap_values is None:
-            raise CLIError("This model/explainer does not provide SHAP values for this plot.")
+            raise CLIError("Este modelo o explicador no entrega valores SHAP para este grafico.")
     return explainer, model
 
 
@@ -651,14 +684,14 @@ def prediction_output_dataframe(df: pd.DataFrame, target_type: TargetType, y_pre
 def validate_target_label(target_type: TargetType, target: Optional[str]):
     allowed = ["H", "D", "A"] if target_type == TargetType.RESULT else ["U", "O"]
     if target not in allowed:
-        raise CLIError(f'Invalid target "{target}". Valid targets for {target_label(target_type)}: {", ".join(allowed)}.')
+        raise CLIError(f'Objetivo invalido "{target}". Objetivos validos para {target_label(target_type)}: {", ".join(allowed)}.')
 
 
 def catalog_template(db: LeagueDatabase, payload: Dict[str, Any]):
     if payload.get("league_index") is not None:
         idx = int(payload["league_index"])
         if idx < 1 or idx > len(db.leagues):
-            raise CLIError(f"league_index must be between 1 and {len(db.leagues)}.")
+            raise CLIError(f"El indice de liga debe estar entre 1 y {len(db.leagues)}.")
         return db.leagues[idx - 1]
     country = payload.get("country")
     name = payload.get("name")
@@ -670,24 +703,74 @@ def catalog_template(db: LeagueDatabase, payload: Dict[str, Any]):
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
-        raise CLIError("Multiple catalog leagues matched; pass league_index.")
-    raise CLIError("No catalog league matched.")
+        raise CLIError("Varias ligas del catalogo coinciden; usa league_index.")
+    raise CLIError("No se encontro una liga del catalogo.")
+
+
+def league_display_name(league) -> str:
+    return f"{league.country} / {league.name}"
+
+
+def default_league_id(league) -> str:
+    return f"{slugify(league.country)}-{slugify(league.name)}-{league.start_year}"
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
+    return slug or "liga"
+
+
+def country_flag_url(country: str) -> str:
+    flag_path = COUNTRY_FLAGS_ROOT / f"{country}.png"
+    if flag_path.exists():
+        return f"/assets/graphics/countries/{country}.png"
+    return ""
+
+
+def category_label(category: str) -> str:
+    labels = {"main": "Principal", "extra": "Extra"}
+    return labels.get(str(category), str(category) or "Principal")
+
+
+def odd_range_payload(value) -> Dict[str, Any]:
+    if not value:
+        return {"active": False, "min": "", "max": "", "label": "Todas"}
+    low, high = value
+    return {"active": True, "min": float(low), "max": float(high), "label": f"{float(low):g}:{float(high):g}"}
+
+
+def display_config_value(value: Any, default: str) -> str:
+    if value is None:
+        return default
+    if isinstance(value, type):
+        return value.__name__
+    text = str(value)
+    return default if text in {"", "None"} else text
+
+
+def display_defaults(defaults: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        str(key): "automatico" if value is None else jsonable(value)
+        for key, value in defaults.items()
+    }
 
 
 def league_payload(league) -> Dict[str, Any]:
     return {
-        "league_id": league.league_id,
+        "league_id": league.league_id or default_league_id(league),
         "country": league.country,
         "name": league.name,
-        "category": league.category,
-        "start_year": league.start_year,
-        "history_window": league.match_history_window,
-        "goal_margin": league.goal_diff_margin,
-        "stats": "all" if league.stats_columns is None else league.stats_columns,
-        "odd_1": league.odd_1_range,
-        "odd_x": league.odd_x_range,
-        "odd_2": league.odd_2_range,
-        "fixture": league.fixture,
+        "display_name": league_display_name(league),
+        "category": category_label(league.category),
+        "start_year": int(league.start_year),
+        "history_window": int(league.match_history_window or 3),
+        "goal_margin": int(league.goal_diff_margin or 2),
+        "stats": "Todas" if league.stats_columns is None else ", ".join(league.stats_columns),
+        "odd_1": odd_range_payload(league.odd_1_range),
+        "odd_x": odd_range_payload(league.odd_x_range),
+        "odd_2": odd_range_payload(league.odd_2_range),
+        "fixture": league.fixture or "",
+        "flag_url": country_flag_url(league.country),
     }
 
 
@@ -695,11 +778,11 @@ def model_payload(model_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
     train_cfg = config.get("train", {})
     return {
         "model_id": model_id,
-        "class": jsonable(config.get("cls")),
+        "class": display_config_value(config.get("cls"), default="Modelo"),
         "target": jsonable(config.get("target_type")),
-        "normalizer": str(config.get("normalizer")),
-        "sampler": str(config.get("sampler")),
-        "eval_size": train_cfg.get("eval_samples_size"),
+        "normalizer": display_config_value(config.get("normalizer"), default="Ninguno"),
+        "sampler": display_config_value(config.get("sampler"), default="Ninguno"),
+        "eval_size": train_cfg.get("eval_samples_size", 20.0),
         "filters": jsonable(config.get("eval", {}).get("percentiles", {})),
     }
 
@@ -717,7 +800,7 @@ def filter_dataframe(
     if query:
         if column:
             if column not in df.columns:
-                raise CLIError(f'Unknown column "{column}".')
+                raise CLIError(f'Columna desconocida: "{column}".')
             search_df = df[[column]]
         else:
             search_df = df
@@ -730,7 +813,7 @@ def filter_dataframe(
     if selected_columns:
         missing = [col for col in selected_columns if col not in df.columns]
         if missing:
-            raise CLIError(f"Unknown columns: {', '.join(missing)}")
+            raise CLIError(f"Columnas desconocidas: {', '.join(missing)}")
         df = df[selected_columns]
     return df
 
@@ -800,7 +883,7 @@ def extra_explainer_plot(explainer, payload: Dict[str, Any]):
     plot = payload.get("plot")
     if plot == "coefficients":
         if not isinstance(explainer, (LogisticRegressionExplainer, SVMExplainer)):
-            raise CLIError("Coefficient plot is available for Logistic Regression and linear SVM models.")
+            raise CLIError("El grafico de coeficientes esta disponible para regresion logistica y SVM lineal.")
         return explainer.coefficients_bar_plot()
     if plot == "model":
         if isinstance(explainer, LogisticRegressionExplainer):
@@ -811,25 +894,25 @@ def extra_explainer_plot(explainer, payload: Dict[str, Any]):
             return explainer.visualize_model(features=_parse_feature_pair(payload.get("features")))
         if isinstance(explainer, KNNExplainer):
             return explainer.visualize_model(features=_parse_feature_pair(payload.get("features")), match_index=int(payload.get("match_index", 0)))
-        raise CLIError("Model visualization is not available for this model type.")
+        raise CLIError("La visualizacion del modelo no esta disponible para este tipo de modelo.")
     if plot == "impurity":
         if not isinstance(explainer, (DecisionTreeExplainer, RandomForestExplainer, ExtremeBoostingExplainer)):
-            raise CLIError("Impurity plot is available for tree-based models.")
+            raise CLIError("El grafico de impureza esta disponible para modelos basados en arboles.")
         return explainer.feature_impurity_bar_plot()
     if plot == "tree":
         if isinstance(explainer, RandomForestExplainer):
             return explainer.plot_tree_rules(max_depth=int(payload.get("depth", 3)), estimator_id=int(payload.get("estimator_id", 0)))
         if isinstance(explainer, DecisionTreeExplainer):
             return explainer.plot_tree_rules(max_depth=int(payload.get("depth", 3)))
-        raise CLIError("Tree rule visualization is available for Decision Tree and Random Forest.")
+        raise CLIError("La visualizacion de reglas esta disponible para arbol de decision y Random Forest.")
     if plot == "attention":
         if not isinstance(explainer, NeuralNetworkExplainer):
-            raise CLIError("Attention plot is available only for DNN models with VSN support.")
+            raise CLIError("El grafico de atencion esta disponible solo para modelos DNN con soporte VSN.")
         ax = explainer.plot_attention_scores()
         if ax is None:
-            raise CLIError("This DNN model does not include attention/VSN scores.")
+            raise CLIError("Este modelo DNN no incluye puntajes de atencion o VSN.")
         return ax
-    raise CLIError("extra explain requires plot: coefficients, model, impurity, tree or attention.")
+    raise CLIError("La explicacion extra requiere plot: coefficients, model, impurity, tree o attention.")
 
 
 def output_path(stem: str, suffix: str) -> Path:

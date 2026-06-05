@@ -425,8 +425,9 @@ def _build_config_parser(subparsers):
 
     browser = config_sub.add_parser("browser", help="Show or update browser scraping config.")
     browser.add_argument("action", choices=["show", "set"])
-    browser.add_argument("--application", choices=["chrome", "firefox", "edge"])
+    browser.add_argument("--application", choices=["chrome", "firefox", "edge", "brave"])
     browser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
+    browser.add_argument("--brave-binary", default=None, help="Ruta del ejecutable de Brave.")
     browser.set_defaults(handler=cmd_config_browser)
 
 
@@ -1048,22 +1049,27 @@ def cmd_config_browser(args):
     path = Path("storage/network/browser.json")
     with open(path, "r") as file:
         data = json.load(file)
+    data.setdefault("application", "chrome")
+    data.setdefault("headless", True)
+    data.setdefault("brave_binary", "")
 
     if args.action == "show":
-        render_mapping("Browser Config", data)
+        render_mapping("Configuracion del navegador", data)
         return
 
     if args.application:
         data["application"] = args.application
     if args.headless is not None:
         data["headless"] = args.headless
-    if not args.application and args.headless is None:
-        raise CLIError("Nothing to update. Pass --application and/or --headless/--no-headless.")
+    if args.brave_binary is not None:
+        data["brave_binary"] = args.brave_binary.strip()
+    if not args.application and args.headless is None and args.brave_binary is None:
+        raise CLIError("Nada para actualizar. Usa --application, --headless/--no-headless o --brave-binary.")
 
     with open(path, "w") as file:
         json.dump(data, file, indent=2)
         file.write("\n")
-    render_mapping("Browser Config Updated", data)
+    render_mapping("Configuracion del navegador actualizada", data)
 
 
 def cmd_root_help(args):

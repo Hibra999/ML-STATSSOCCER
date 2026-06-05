@@ -11,7 +11,7 @@
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">MS</div>
-        <div><strong>ML-STATSSOCCER</strong><span>Local Web</span></div>
+        <div><strong>ML-STATSSOCCER</strong><span>Web Local</span></div>
       </div>
       <nav>
         <button class="nav-button active" data-view="dashboard">Inicio</button>
@@ -21,7 +21,7 @@
         <button class="nav-button" data-view="evaluate">Evaluar</button>
         <button class="nav-button" data-view="predict">Predecir</button>
         <button class="nav-button" data-view="analysis">Analisis</button>
-        <button class="nav-button" data-view="config">Config</button>
+        <button class="nav-button" data-view="config">Configuracion</button>
       </nav>
     </aside>
 
@@ -31,7 +31,7 @@
           <h1 id="view-title">Inicio</h1>
           <p id="view-meta">http://127.0.0.1:5050</p>
         </div>
-        <button id="refresh-btn" class="icon-button" title="Actualizar">R</button>
+        <button id="refresh-btn" class="icon-button" title="Actualizar">A</button>
       </header>
 
       <section id="alert" class="alert hidden"></section>
@@ -43,7 +43,7 @@
           <div class="metric"><span>Servidor</span><strong>Local</strong></div>
         </div>
         <div class="panel">
-          <div class="panel-header"><h2>Jobs</h2></div>
+          <div class="panel-header"><h2>Procesos</h2></div>
           <div id="jobs-list" class="jobs"></div>
         </div>
       </section>
@@ -53,17 +53,23 @@
           <form id="league-create-form" class="panel form-panel">
             <div class="panel-header"><h2>Nueva liga</h2></div>
             <label>Catalogo<select name="league_index" id="catalog-select"></select></label>
+            <div id="catalog-preview" class="catalog-preview"></div>
             <label>ID<input name="league_id" placeholder="epl-2018" required></label>
             <div class="row three">
               <label>Inicio<input name="start_year" type="number" min="2000"></label>
               <label>Historial<input name="history_window" type="number" min="2" max="5" value="3"></label>
               <label>Margen<input name="goal_margin" type="number" min="2" max="5" value="2"></label>
             </div>
-            <label>Stats<select name="stats"><option>all</option><option>basic</option><option>extended</option><option>none</option></select></label>
+            <label>Estadisticas<select name="stats">
+              <option value="all">Todas</option>
+              <option value="basic">Basicas</option>
+              <option value="extended">Extendidas</option>
+              <option value="none">Sin estadisticas</option>
+            </select></label>
             <div class="row three">
-              <label>Odd 1<input name="odd_1" placeholder="1.30:2.50"></label>
-              <label>Odd X<input name="odd_x" placeholder="2.00:4.00"></label>
-              <label>Odd 2<input name="odd_2" placeholder="1.30:2.50"></label>
+              <label>Odd 1<input name="odd_1" value="all" placeholder="1.30:2.50"></label>
+              <label>Odd X<input name="odd_x" value="all" placeholder="2.00:4.00"></label>
+              <label>Odd 2<input name="odd_2" value="all" placeholder="1.30:2.50"></label>
             </div>
             <button type="submit" class="primary">+ Crear</button>
           </form>
@@ -80,8 +86,8 @@
             <select id="data-league"></select>
             <input id="data-query" placeholder="Buscar">
             <input id="data-column" placeholder="Columna">
-            <label class="check"><input id="data-missing" type="checkbox"> Sin missing</label>
-            <button id="data-load">R</button>
+            <label class="check"><input id="data-missing" type="checkbox"> Sin faltantes</label>
+            <button id="data-load">Cargar</button>
             <button id="data-export">CSV</button>
           </div>
           <div id="data-table"></div>
@@ -96,23 +102,23 @@
             <label>Modelo<select name="model_type" id="model-type"></select></label>
             <label>ID<input name="model_id" placeholder="rf-result"></label>
             <div class="row three">
-              <label>Target<select name="target"><option value="result">result</option><option value="over-under">over-under</option></select></label>
+              <label>Objetivo<select name="target"><option value="result">Resultado 1/X/2</option><option value="over-under">Over/Under 2.5</option></select></label>
               <label>Normalizador<select name="normalizer"><option>none</option><option>standard</option><option>min-max</option><option>max-abs</option></select></label>
-              <label>Sampler<select name="sampler"><option>none</option><option>svm-smote</option><option>nearmiss</option><option>hardness-threshold</option></select></label>
+              <label>Muestreo<select name="sampler"><option>none</option><option>svm-smote</option><option>nearmiss</option><option>hardness-threshold</option></select></label>
             </div>
             <div class="row three">
               <label>Eval %<input name="eval_size" type="number" min="5" max="30" value="20"></label>
-              <label>Trials<input name="trials" type="number" min="1" value="25"></label>
-              <label>Tune<input name="tune" placeholder="none, all o params"></label>
+              <label>Intentos<input name="trials" type="number" min="1" value="25"></label>
+              <label>Ajuste<input name="tune" value="none" placeholder="none, all o parametros"></label>
             </div>
             <div class="row two-inline">
-              <label class="check"><input name="cv" type="checkbox" checked> CV</label>
-              <label class="check"><input name="sliding_cv" type="checkbox" checked> Sliding CV</label>
+              <label class="check"><input name="cv" type="checkbox" checked> Validacion cruzada</label>
+              <label class="check"><input name="sliding_cv" type="checkbox" checked> CV deslizante</label>
             </div>
             <button type="submit" class="primary">Entrenar</button>
           </form>
           <div class="panel">
-            <div class="toolbar"><select id="models-league"></select><button id="models-load">R</button></div>
+            <div class="toolbar"><select id="models-league"></select><button id="models-load">Cargar</button></div>
             <div id="models-list"></div>
           </div>
         </div>
@@ -123,10 +129,10 @@
           <div class="row three">
             <label>Liga<select name="league_id" id="eval-league"></select></label>
             <label>Modelo<select name="model_id" id="eval-model"></select></label>
-            <label>Dataset<select name="dataset"><option>eval</option><option>all</option><option>train</option></select></label>
+            <label>Datos<select name="dataset"><option value="eval">Evaluacion</option><option value="all">Todos</option><option value="train">Entrenamiento</option></select></label>
           </div>
           <div class="row five">
-            <label>Odd filtro<input name="odd_filter" placeholder="1:1.31:1.60"></label>
+            <label>Filtro de odd<input name="odd_filter" value="none" placeholder="1:1.31:1.60"></label>
             <label>P1<input name="p1" type="number" value="0"></label>
             <label>PX<input name="px" type="number" value="0"></label>
             <label>P2<input name="p2" type="number" value="0"></label>
@@ -155,14 +161,14 @@
             <button type="submit" class="primary">Predecir</button>
           </form>
           <form id="fixtures-form" class="panel form-panel">
-            <div class="panel-header"><h2>Fixtures</h2></div>
+            <div class="panel-header"><h2>Partidos</h2></div>
             <label>Liga<select name="league_id" id="fixtures-league"></select></label>
             <label>Modelo<select name="model_id" id="fixtures-model"></select></label>
             <label>Fecha<input name="date" type="date"></label>
             <label>Archivo<input name="file" type="file" accept=".csv,.xlsx,.xls"></label>
-            <label>Filtros<input name="filters" placeholder="all, none o filtro"></label>
+            <label>Filtros<input name="filters" value="none" placeholder="all, none o filtro"></label>
             <label class="check"><input name="include_all" type="checkbox"> Exportar todo</label>
-            <button type="submit" class="primary">Predecir fixtures</button>
+            <button type="submit" class="primary">Predecir partidos</button>
           </form>
         </div>
         <div id="predict-output" class="panel output"></div>
@@ -173,11 +179,11 @@
           <div class="row four">
             <label>Liga<select name="league_id" id="analysis-league"></select></label>
             <label>Tipo<select name="analysis_type">
-              <option>descriptive</option><option>distributions</option><option>variance</option><option>correlation</option>
-              <option>boruta</option><option>coefficients</option><option>impurity</option><option>rules</option>
+              <option value="descriptive">Descriptivo</option><option value="distributions">Distribuciones</option><option value="variance">Varianza</option><option value="correlation">Correlacion</option>
+              <option value="boruta">Boruta</option><option value="coefficients">Coeficientes</option><option value="impurity">Impureza</option><option value="rules">Reglas</option>
             </select></label>
-            <label>Columna<input name="column" placeholder="Result"></label>
-            <label>Target<select name="target"><option>result</option><option>over-under</option></select></label>
+            <label>Columna<input name="column" value="Result" placeholder="Result"></label>
+            <label>Objetivo<select name="target"><option value="result">Resultado 1/X/2</option><option value="over-under">Over/Under 2.5</option></select></label>
           </div>
           <button type="submit" class="primary">Generar</button>
         </form>
@@ -186,8 +192,9 @@
 
       <section id="config" class="view">
         <form id="config-form" class="panel form-panel narrow">
-          <label>Navegador<select name="application"><option>chrome</option><option>firefox</option><option>edge</option></select></label>
-          <label class="check"><input name="headless" type="checkbox"> Headless</label>
+          <label>Navegador<select name="application"><option>chrome</option><option>firefox</option><option>edge</option><option>brave</option></select></label>
+          <label>Ruta de Brave<input name="brave_binary" placeholder="/usr/bin/brave-browser"></label>
+          <label class="check"><input name="headless" type="checkbox"> Sin ventana</label>
           <button type="submit" class="primary">Guardar</button>
         </form>
       </section>

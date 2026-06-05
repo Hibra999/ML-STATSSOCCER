@@ -1,4 +1,5 @@
 {
   "application": "chrome",
-  "headless": true
+  "headless": true,
+  "brave_binary": ""
 }

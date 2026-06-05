@@ -1,4 +1,4 @@
-const state = { leagues: [], models: {}, jobs: new Map() };
+const state = { catalog: [], leagues: [], models: {}, jobs: new Map() };
 const titles = {
   dashboard: "Inicio",
   leagues: "Ligas",
@@ -7,7 +7,13 @@ const titles = {
   evaluate: "Evaluar",
   predict: "Predecir",
   analysis: "Analisis",
-  config: "Config",
+  config: "Configuracion",
+};
+const jobLabels = {
+  queued: "En cola",
+  running: "En ejecucion",
+  succeeded: "Completado",
+  failed: "Fallido",
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -17,6 +23,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.getElementById("refresh-btn").addEventListener("click", refreshAll);
   bindForms();
+  setDefaultDates();
   refreshAll();
   setInterval(pollJobs, 1800);
 });
@@ -24,7 +31,7 @@ document.addEventListener("DOMContentLoaded", () => {
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   const payload = await response.json();
-  if (!payload.ok) throw new Error(payload.error || "Request failed");
+  if (!payload.ok) throw new Error(cleanMessage(payload.error || "Solicitud fallida"));
   return payload.data;
 }
 
@@ -59,6 +66,9 @@ async function refreshAll() {
 }
 
 function bindForms() {
+  document.getElementById("catalog-select").addEventListener("change", updateCatalogDefaults);
+  const leagueIdInput = document.querySelector("#league-create-form input[name=league_id]");
+  leagueIdInput.addEventListener("input", () => { leagueIdInput.dataset.autofilled = "false"; });
   document.getElementById("league-create-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     await submitJson("/api/leagues", formJson(event.target), true);
@@ -66,6 +76,11 @@ function bindForms() {
   document.getElementById("data-load").addEventListener("click", loadData);
   document.getElementById("data-export").addEventListener("click", exportData);
   document.getElementById("models-load").addEventListener("click", loadModelsList);
+  ["train-league", "model-type"].forEach((id) => {
+    document.getElementById(id).addEventListener("change", updateTrainingDefaults);
+  });
+  const modelIdInput = document.querySelector("#train-form input[name=model_id]");
+  modelIdInput.addEventListener("input", () => { modelIdInput.dataset.autofilled = "false"; });
   document.getElementById("train-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = formJson(event.target);
@@ -98,7 +113,7 @@ async function submitJson(path, payload, jobExpected = false) {
 function formJson(form) {
   const data = {};
   new FormData(form).forEach((value, key) => {
-    if (value === "") return;
+    if (value === "" && key !== "brave_binary") return;
     const field = form.elements[key];
     if (field && field.type === "checkbox") data[key] = field.checked;
     else if (field && field.type === "number") data[key] = Number(value);
@@ -109,18 +124,66 @@ function formJson(form) {
 }
 
 function fillCatalog(catalog) {
-  document.getElementById("catalog-select").innerHTML = catalog.map((league) => `<option value="${league.index}">${league.country} / ${league.name}</option>`).join("");
+  state.catalog = catalog;
+  document.getElementById("catalog-select").innerHTML = catalog.map((league) => `<option value="${league.index}">${escapeHtml(league.display_name)}</option>`).join("");
+  updateCatalogDefaults();
+}
+
+function selectedCatalogLeague() {
+  const selected = Number(document.getElementById("catalog-select").value);
+  return state.catalog.find((league) => Number(league.index) === selected);
+}
+
+function updateCatalogDefaults() {
+  const league = selectedCatalogLeague();
+  const preview = document.getElementById("catalog-preview");
+  if (!league) {
+    preview.innerHTML = "";
+    return;
+  }
+
+  preview.innerHTML = `
+    <img class="flag" src="${escapeAttr(league.flag_url)}" alt="Bandera ${escapeAttr(league.country)}">
+    <div class="league-meta">
+      <strong>${escapeHtml(league.display_name)}</strong>
+      <small>${escapeHtml(league.category)} - desde ${escapeHtml(league.start_year)} - historial ${escapeHtml(league.history_window)} - margen ${escapeHtml(league.goal_margin)}</small>
+    </div>`;
+
+  const form = document.getElementById("league-create-form");
+  const leagueId = form.elements.league_id;
+  if (!leagueId.value || leagueId.dataset.autofilled !== "false") {
+    leagueId.value = league.default_league_id;
+    leagueId.dataset.autofilled = "true";
+  }
+  form.elements.start_year.value = league.start_year;
+  form.elements.history_window.value = league.history_window;
+  form.elements.goal_margin.value = league.goal_margin;
 }
 
 function fillLeagueSelects(leagues) {
-  const html = leagues.map((league) => `<option value="${league.league_id}">${league.league_id}</option>`).join("");
+  const html = leagues.map((league) => `<option value="${escapeAttr(league.league_id)}">${escapeHtml(league.league_id)} - ${escapeHtml(league.display_name)}</option>`).join("");
   ["data-league", "train-league", "models-league", "eval-league", "manual-league", "fixtures-league", "analysis-league"].forEach((id) => {
     document.getElementById(id).innerHTML = html;
   });
+  updateTrainingDefaults();
 }
 
 function fillModelSpecs(specs) {
-  document.getElementById("model-type").innerHTML = specs.map((spec) => `<option value="${spec.key}">${spec.label}</option>`).join("");
+  document.getElementById("model-type").innerHTML = specs.map((spec) => `<option value="${escapeAttr(spec.key)}">${escapeHtml(spec.label)}</option>`).join("");
+  updateTrainingDefaults();
+}
+
+function updateTrainingDefaults() {
+  const form = document.getElementById("train-form");
+  const leagueId = form.elements.league_id.value;
+  const modelType = form.elements.model_type.value || "random-forest";
+  const modelId = form.elements.model_id;
+  const shortModel = { "random-forest": "rf", "decision-tree": "dt", "naive-bayes": "nb", "discriminant": "lda", "logistic": "lr" }[modelType] || modelType;
+  if (!leagueId) return;
+  if (!modelId.value || modelId.dataset.autofilled !== "false") {
+    modelId.value = `${leagueId}-${shortModel}-result`;
+    modelId.dataset.autofilled = "true";
+  }
 }
 
 function renderLeagues(leagues) {
@@ -131,10 +194,16 @@ function renderLeagues(leagues) {
   }
   target.innerHTML = `<div class="list">${leagues.map((league) => `
     <div class="item">
-      <div><strong>${league.league_id}</strong><br><small>${league.country} / ${league.name} - ${league.rows} filas - ${league.models} modelos</small></div>
-      <div>
-        <button onclick="updateLeague('${league.league_id}')">R</button>
-        <button class="danger" onclick="deleteLeague('${league.league_id}')">X</button>
+      <div class="league-main">
+        <img class="flag" src="${escapeAttr(league.flag_url)}" alt="Bandera ${escapeAttr(league.country)}">
+        <div class="league-meta">
+          <strong>${escapeHtml(league.league_id)}</strong>
+          <small>${escapeHtml(league.display_name)} - ${escapeHtml(league.rows)} filas - ${escapeHtml(league.models)} modelos - ${escapeHtml(league.stats)}</small>
+        </div>
+      </div>
+      <div class="item-actions">
+        <button onclick="updateLeague('${escapeAttr(league.league_id)}')">Actualizar</button>
+        <button class="danger" onclick="deleteLeague('${escapeAttr(league.league_id)}')">Eliminar</button>
       </div>
     </div>`).join("")}</div>`;
 }
@@ -202,7 +271,7 @@ async function loadModelsForLeague(leagueId) {
 
 function fillModelSelect(id, leagueId) {
   const models = state.models[leagueId] || [];
-  document.getElementById(id).innerHTML = models.map((model) => `<option value="${model.model_id}">${model.model_id}</option>`).join("");
+  document.getElementById(id).innerHTML = models.map((model) => `<option value="${escapeAttr(model.model_id)}">${escapeHtml(model.model_id)}</option>`).join("");
 }
 
 async function loadModelsList() {
@@ -213,8 +282,8 @@ async function loadModelsList() {
     const models = state.models[league] || [];
     document.getElementById("models-list").innerHTML = `<div class="list">${models.map((model) => `
       <div class="item">
-        <div><strong>${model.model_id}</strong><br><small>${model.class || "Model"} - ${model.target}</small></div>
-        <button class="danger" onclick="deleteModel('${league}', '${model.model_id}')">X</button>
+        <div><strong>${escapeHtml(model.model_id)}</strong><br><small>${escapeHtml(model.class || "Modelo")} - ${escapeHtml(model.target)}</small></div>
+        <button class="danger" onclick="deleteModel('${escapeAttr(league)}', '${escapeAttr(model.model_id)}')">Eliminar</button>
       </div>`).join("") || `<div class="item"><div>Sin modelos</div></div>`}</div>`;
   } catch (error) {
     showError(error.message);
@@ -296,6 +365,7 @@ async function saveConfig(event) {
 function fillConfig(config) {
   const form = document.getElementById("config-form");
   form.elements.application.value = config.application;
+  form.elements.brave_binary.value = config.brave_binary || "";
   form.elements.headless.checked = Boolean(config.headless);
 }
 
@@ -320,13 +390,13 @@ async function pollJobs() {
 function trackJob(job) {
   state.jobs.set(job.job_id, job);
   renderJobs();
-  showInfo(`Job ${job.job_id} en cola`);
+  showInfo(`Proceso ${job.job_id} en cola`);
 }
 
 function renderJobs() {
   const target = document.getElementById("jobs-list");
   const jobs = [...state.jobs.values()].slice(-8).reverse();
-  target.innerHTML = jobs.map((job) => `<div class="job ${job.status}"><strong>${job.status}</strong> - ${job.message}<br><small>${job.job_id}${job.error ? " - " + job.error : ""}</small></div>`).join("") || "<div class='item'><div>Sin jobs activos</div></div>";
+  target.innerHTML = jobs.map((job) => `<div class="job ${escapeAttr(job.status)}"><strong>${escapeHtml(jobLabels[job.status] || job.status)}</strong> - ${escapeHtml(job.message)}<br><small>${escapeHtml(job.job_id)}${job.error ? " - " + escapeHtml(cleanMessage(job.error)) : ""}</small></div>`).join("") || "<div class='item'><div>Sin procesos activos</div></div>";
 }
 
 function renderTable(id, table) {
@@ -341,7 +411,7 @@ function tableHtml(table) {
 }
 
 function renderImage(id, url) {
-  document.getElementById(id).innerHTML = `<img class="output-image" src="${url}" alt="output">`;
+  document.getElementById(id).innerHTML = `<img class="output-image" src="${escapeAttr(url)}" alt="resultado">`;
 }
 
 function jsonOptions(payload) {
@@ -356,7 +426,7 @@ function showInfo(message) {
 
 function showError(message) {
   const alert = document.getElementById("alert");
-  alert.textContent = message;
+  alert.textContent = cleanMessage(message);
   alert.className = "alert error";
 }
 
@@ -369,4 +439,19 @@ function clearAlert() {
 function escapeHtml(value) {
   if (value === null || value === undefined) return "";
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value);
+}
+
+function cleanMessage(message) {
+  return String(message || "")
+    .replace(/^(CLIError|ValueError|RuntimeError|NotImplementedError):\s*/, "")
+    .replace(/\bNone\b/g, "Sin valor");
+}
+
+function setDefaultDates() {
+  const dateInput = document.querySelector("#fixtures-form input[name=date]");
+  if (dateInput && !dateInput.value) dateInput.value = new Date().toISOString().slice(0, 10);
 }

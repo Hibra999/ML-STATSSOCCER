@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -18,20 +18,21 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         client_host = request.client.host if request.client else ""
         if client_host != "testclient" and client_host not in {"127.0.0.1", "::1"}:
-            return JSONResponse(status_code=403, content={"ok": False, "data": None, "error": "Local access only."})
+            return JSONResponse(status_code=403, content={"ok": False, "data": {}, "error": "Acceso permitido solo desde localhost."})
 
         host = _host_without_port(request.headers.get("host", ""))
         if client_host != "testclient" and host and host not in ALLOWED_HOSTS:
-            return JSONResponse(status_code=403, content={"ok": False, "data": None, "error": "Local host only."})
+            return JSONResponse(status_code=403, content={"ok": False, "data": {}, "error": "Host local obligatorio."})
         return await call_next(request)
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="ML-STATSSOCCER Local Web", docs_url="/api/docs", redoc_url=None)
+    app = FastAPI(title="ML-STATSSOCCER Web Local", docs_url="/api/docs", redoc_url=None)
     app.add_middleware(LocalOnlyMiddleware)
 
     services.OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory="src/web/static"), name="static")
+    app.mount("/assets", StaticFiles(directory="storage"), name="assets")
     app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
     @app.get("/")
@@ -60,7 +61,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/leagues")
     def create_league(payload: Dict[str, Any] = Body(...)):
-        return _submit("Creating league", services.create_league, payload)
+        return _submit("Creando liga", services.create_league, payload)
 
     @app.get("/api/leagues/{league_id}")
     def league_detail(league_id: str, rows: int = 25):
@@ -68,7 +69,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/leagues/{league_id}/update")
     def update_league(league_id: str):
-        return _submit(f"Updating {league_id}", services.update_league, league_id)
+        return _submit(f"Actualizando {league_id}", services.update_league, league_id)
 
     @app.delete("/api/leagues/{league_id}")
     def delete_league(league_id: str):
@@ -105,7 +106,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/leagues/{league_id}/models/train")
     def train_model(league_id: str, payload: Dict[str, Any] = Body(...)):
-        return _submit(f"Training model for {league_id}", services.train_model, league_id, payload)
+        return _submit(f"Entrenando modelo para {league_id}", services.train_model, league_id, payload)
 
     @app.post("/api/leagues/{league_id}/models/{model_id}/evaluate")
     def evaluate_model(league_id: str, model_id: str, payload: Dict[str, Any] = Body(default={})):
@@ -136,15 +137,15 @@ def create_app() -> FastAPI:
                 fixture_df = services.read_fixture_upload(file.filename or "fixtures.csv", await file.read())
             except Exception as exc:
                 return _error(exc)
-        return _submit(f"Predicting fixtures for {league_id}", services.fixture_prediction, league_id, payload, fixture_df)
+        return _submit(f"Prediciendo partidos para {league_id}", services.fixture_prediction, league_id, payload, fixture_df)
 
     @app.post("/api/leagues/{league_id}/analysis/{analysis_type}")
     def analysis_plot(league_id: str, analysis_type: str, payload: Dict[str, Any] = Body(default={})):
-        return _submit(f"Generating {analysis_type}", services.analysis_plot, league_id, analysis_type, payload)
+        return _submit(f"Generando {analysis_type}", services.analysis_plot, league_id, analysis_type, payload)
 
     @app.post("/api/leagues/{league_id}/models/{model_id}/explain/{plot_type}")
     def explain_plot(league_id: str, model_id: str, plot_type: str, payload: Dict[str, Any] = Body(default={})):
-        return _submit(f"Generating {plot_type}", services.explain_plot, league_id, model_id, plot_type, payload)
+        return _submit(f"Generando {plot_type}", services.explain_plot, league_id, model_id, plot_type, payload)
 
     @app.get("/api/config/browser")
     def browser_config():
@@ -158,7 +159,7 @@ def create_app() -> FastAPI:
     def get_job(job_id: str):
         job = jobs.get(job_id)
         if job is None:
-            raise HTTPException(status_code=404, detail="Job not found.")
+            return JSONResponse(status_code=404, content={"ok": False, "data": {}, "error": "Proceso no encontrado."})
         return _ok(job)
 
     return app
@@ -179,12 +180,12 @@ def _wrap(fn, *args, **kwargs):
 
 
 def _ok(data: Any):
-    return {"ok": True, "data": services.jsonable(data), "error": None}
+    return {"ok": True, "data": services.jsonable(data), "error": ""}
 
 
 def _error(exc: Exception):
     status_code = 400 if isinstance(exc, CLIError) else 500
-    return JSONResponse(status_code=status_code, content={"ok": False, "data": None, "error": f"{exc.__class__.__name__}: {exc}"})
+    return JSONResponse(status_code=status_code, content={"ok": False, "data": {}, "error": f"{exc.__class__.__name__}: {exc}"})
 
 
 def _host_without_port(host_header: str) -> str:

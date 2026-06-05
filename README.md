@@ -15,7 +15,7 @@ ML-STATSSOCCER es una aplicacion local para analisis y prediccion de partidos de
 ## Requisitos
 
 - Python 3.11.
-- Navegador compatible para scraping, si se usa esa funcion.
+- Navegador compatible para scraping, si se usa esa funcion: Chrome, Firefox, Edge o Brave.
 - Driver compatible con Selenium, si el navegador lo requiere.
 
 TensorFlow y sus dependencias son sensibles a la version de Python. Se recomienda usar un entorno virtual dedicado.
@@ -67,7 +67,7 @@ La aplicacion se enlaza a `127.0.0.1`. No esta pensada para exponerse publicamen
 5. Generar predicciones desde **Predecir**.
 6. Crear graficos desde **Analisis**.
 
-Los procesos largos, como descargas, entrenamientos y graficos pesados, se ejecutan como jobs locales.
+Los procesos largos, como descargas, entrenamientos y graficos pesados, se ejecutan como procesos locales.
 
 ## CLI Secundaria
 
@@ -93,17 +93,17 @@ python cli.py predict manual epl-2018 \
 
 ## Modelos Soportados
 
-- Logistic Regression.
-- Discriminant Analysis.
-- Decision Tree.
+- Regresion logistica.
+- Analisis discriminante.
+- Arbol de decision.
 - Random Forest.
 - XGBoost.
 - KNN.
 - Naive Bayes.
 - SVM.
-- Deep Neural Network.
+- Red neuronal profunda.
 
-Targets disponibles:
+Objetivos disponibles:
 
 - `result`: resultado 1/X/2.
 - `over-under`: U/O 2.5.
@@ -121,11 +121,18 @@ Ejemplo:
 ```json
 {
   "application": "chrome",
-  "headless": true
+  "headless": true,
+  "brave_binary": ""
 }
 ```
 
-Tambien puede editarse desde la seccion **Config** de la interfaz web.
+`application` acepta `chrome`, `firefox`, `edge` o `brave`. Si se usa Brave y el sistema no detecta el ejecutable, indique la ruta en `brave_binary` o desde la seccion **Configuracion** de la interfaz web.
+
+Las banderas del catalogo se leen desde:
+
+```text
+storage/graphics/countries
+```
 
 ## Verificacion
 

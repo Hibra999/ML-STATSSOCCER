@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import shutil
 import time
 import pandas as pd
 from typing import Optional
@@ -11,8 +13,50 @@ from selenium.webdriver.support import expected_conditions as EC
 from src.network.netutils import check_internet_connection
 
 
+def _build_chromium_options(headless: bool) -> ChromeOptions:
+    options = ChromeOptions()
+    options.add_argument('--incognito')
+    options.add_argument('--lang=en-US')
+    if headless:
+        options.add_argument('--headless=new')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+    return options
+
+
+def _detect_brave_binary() -> str:
+    for command in ('brave-browser', 'brave-browser-stable', 'brave'):
+        found = shutil.which(command)
+        if found:
+            return found
+
+    for path in (
+            '/usr/bin/brave-browser',
+            '/usr/bin/brave-browser-stable',
+            '/snap/bin/brave',
+            '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+            'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+            'C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+    ):
+        if os.path.exists(path):
+            return path
+    return ''
+
+
+def _resolve_brave_binary(browser_cfg: dict) -> str:
+    configured = str(browser_cfg.get('brave_binary') or '').strip()
+    if configured:
+        return configured
+    env_binary = os.environ.get('BRAVE_BINARY', '').strip()
+    if env_binary:
+        return env_binary
+    return _detect_brave_binary()
+
+
 class FootyStatsScraper:
-    """ FootyStats scraper, which opens FootyStats webpage via a web browser and parses the fixture table. """
+    """Scraper de FootyStats para abrir la pagina de fixtures y leer la tabla."""
 
     def __init__(self, headless: Optional[bool] = None):
         self._page_load_timeout = 5.0
@@ -21,20 +65,21 @@ class FootyStatsScraper:
         with open('storage/network/browser.json', mode='r') as jsonfile:
             browser_cfg = json.load(jsonfile)
 
-        browser = browser_cfg['application']
+        browser = str(browser_cfg.get('application', 'chrome')).lower()
         if headless is None:
             headless = browser_cfg.get('headless', True)
 
         if browser == 'chrome':
-            options = ChromeOptions()
-            options.add_argument('--incognito')
-            options.add_argument('--lang=en-US')
-            if headless:
-                options.add_argument('--headless=new')
-                options.add_argument('--no-sandbox')
-                options.add_argument('--disable-dev-shm-usage')
-                options.add_argument('--disable-gpu')
-                options.add_argument('--window-size=1920,1080')
+            self._web_driver = Chrome(options=_build_chromium_options(headless=headless))
+        elif browser == 'brave':
+            options = _build_chromium_options(headless=headless)
+            brave_binary = _resolve_brave_binary(browser_cfg)
+            if not brave_binary:
+                raise RuntimeError(
+                    'No se encontro el ejecutable de Brave. Configura "brave_binary" '
+                    'en storage/network/browser.json o define la variable BRAVE_BINARY.'
+                )
+            options.binary_location = brave_binary
             self._web_driver = Chrome(options=options)
         elif browser == 'firefox':
             options = FirefoxOptions()
@@ -56,12 +101,12 @@ class FootyStatsScraper:
             self._web_driver = Edge(options=options)
         else:
             raise NotImplementedError(
-                f'Not Implemented browser: "{browser}". '
-                f'Only Chrome, Firefox and Edge are currently supported.'
+                f'Navegador no implementado: "{browser}". '
+                f'Usa chrome, firefox, edge o brave.'
             )
 
     def load_page(self, fixture_url: str) -> bool:
-        """ Loads the FootyStats webpage and waits until loading state is ready. """
+        """Carga FootyStats y espera la tabla de partidos."""
 
         # Check internet connection first.
         if not check_internet_connection():
@@ -76,14 +121,14 @@ class FootyStatsScraper:
                 EC.presence_of_element_located((By.CSS_SELECTOR, 'div.full-matches-table'))
             )
         except Exception as _:
-            logging.info('Timed out waiting for fixture table to load.')
+            logging.info('Se agoto el tiempo de espera para cargar la tabla de partidos.')
             return False
 
         time.sleep(1.0)
         return True
 
     def parse_fixture_table(self, date_str: str) -> Optional[pd.DataFrame]:
-        """ Parses the fixture table. The fixture table should be displayed on the web page! """
+        """Lee la tabla de partidos ya cargada en la pagina."""
 
         # Reads the odd from the provided span.
         def get_odd(span) -> str:
@@ -104,7 +149,7 @@ class FootyStatsScraper:
         table_elements = tree.xpath('//div[contains(@class, "full-matches-table mt1e")]')
 
         if len(table_elements) == 0:
-            raise RuntimeError('Could not find "full-matches-table mt1e" table class.')
+            raise RuntimeError('No se encontro la tabla "full-matches-table mt1e".')
 
         # Searching the requested table by date.
         formatted_date_str = f'{date_str} ~'
@@ -121,7 +166,7 @@ class FootyStatsScraper:
                 break
 
         if requested_table is None:
-            logging.info(f'Could not find the selected date: "{date_str}" in a table header.')
+            logging.info(f'No se encontro la fecha seleccionada: "{date_str}" en la tabla.')
             return None
 
         # Parsing fixture table.
