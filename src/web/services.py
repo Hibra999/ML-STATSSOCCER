@@ -313,6 +313,7 @@ def list_models(league_id: str) -> List[Dict[str, Any]]:
 def train_model(league_id: str, payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     model_key = normalize_model_key(payload.get("model_type", "xgboost"))
     spec = MODEL_SPECS[model_key]
+    emit_training_progress(progress_callback, "preparing", 0, 1, "Preparando entrenamiento")
     _, league, df = load_league(league_id)
     df = df.dropna(ignore_index=True)
     if df.empty:
@@ -374,19 +375,24 @@ def train_model(league_id: str, payload: Dict[str, Any], progress_callback=None)
         optuna_summary["best_params"] = study.best_trial.params
 
     if args.cv:
+        emit_training_progress(progress_callback, "cv", 0, 1, "Validacion cruzada")
         model = spec.model_cls(**model_config)
         cv_df = trainer.cross_validation(model=model, df=df)
         cv_df["Model"] = model_id
         cv_df["Model Type"] = model.__class__
         model_config["train"]["results"]["cv"] = cv_df
+        emit_training_progress(progress_callback, "cv", 1, 1, "Validacion cruzada completada")
 
     if args.sliding_cv:
+        emit_training_progress(progress_callback, "sliding-cv", 0, 1, "CV deslizante")
         model = spec.model_cls(**model_config)
         sliding_df = trainer.sliding_cross_validation(model=model, df=df, test_ratio=float(args.eval_size))
         sliding_df["Model"] = model_id
         sliding_df["Model Type"] = model.__class__
         model_config["train"]["results"]["sliding-cv"] = sliding_df
+        emit_training_progress(progress_callback, "sliding-cv", 1, 1, "CV deslizante completado")
 
+    emit_training_progress(progress_callback, "fit", 0, 1, "Entrenamiento final")
     train_df, eval_df = train_test_split(df=df, test_size=float(args.eval_size))
     model = spec.model_cls(**model_config)
     model, fit_df = trainer.train(model=model, train_df=train_df, eval_df=eval_df, check_nan=True)
@@ -400,6 +406,7 @@ def train_model(league_id: str, payload: Dict[str, Any], progress_callback=None)
 
     model_config["train"]["optuna"] = optuna_summary
     model_db.save_model(model=model, model_config=model_config)
+    emit_training_progress(progress_callback, "complete", 1, 1, "Entrenamiento completado")
     return {
         "model": model_payload(model_id, model_config),
         "optuna": optuna_summary,
@@ -840,6 +847,23 @@ def normalize_optuna_choice(value: Any, allowed: set[str], label: str) -> str:
     if key not in allowed:
         raise CLIError(f'Optuna {label} invalido: "{value}".')
     return key
+
+
+def emit_training_progress(callback, stage: str, current: int, total: int, message: str, **extra):
+    if callback is None:
+        return
+    total = max(int(total or 1), 1)
+    current = min(max(int(current or 0), 0), total)
+    callback({
+        "stage": stage,
+        "current": current,
+        "total": total,
+        "current_trial": current if stage == "tuning" else "",
+        "total_trials": total if stage == "tuning" else "",
+        "percent": int(round(current * 100 / total)),
+        "message": message,
+        **extra,
+    })
 
 
 def filter_dataframe(

@@ -410,6 +410,7 @@ async function pollJobs() {
 function trackJob(job) {
   state.jobs.set(job.job_id, job);
   renderJobs();
+  renderTrainingProgress();
   showInfo(`Proceso ${job.job_id} en cola`);
 }
 
@@ -417,15 +418,64 @@ function renderJobs() {
   const target = document.getElementById("jobs-list");
   const jobs = [...state.jobs.values()].slice(-8).reverse();
   target.innerHTML = jobs.map((job) => `<div class="job ${escapeAttr(job.status)}"><strong>${escapeHtml(jobLabels[job.status] || job.status)}</strong> - ${escapeHtml(job.message)}${jobProgressHtml(job)}<br><small>${escapeHtml(job.job_id)}${job.error ? " - " + escapeHtml(cleanMessage(job.error)) : ""}</small></div>`).join("") || "<div class='item'><div>Sin procesos activos</div></div>";
+  renderTrainingProgress();
 }
 
 function jobProgressHtml(job) {
   const progress = job.progress || {};
-  if (progress.stage !== "tuning") return "";
-  const current = progress.current_trial || 0;
-  const total = progress.total_trials || 0;
+  if (!progress.stage) return "";
+  const current = progress.current_trial || progress.current || 0;
+  const total = progress.total_trials || progress.total || 0;
+  const message = progress.message ? ` - ${progress.message}` : "";
   const best = progress.best_value === null || progress.best_value === undefined ? "" : ` - mejor ${Number(progress.best_value).toFixed(3)}`;
-  return ` - Optuna ${escapeHtml(current)}/${escapeHtml(total)}${escapeHtml(best)}`;
+  return `${escapeHtml(message)} ${escapeHtml(current)}/${escapeHtml(total)}${escapeHtml(best)}`;
+}
+
+function renderTrainingProgress() {
+  const target = document.getElementById("training-progress");
+  if (!target) return;
+  const job = latestTrainingJob();
+  if (!job) {
+    target.className = "panel training-progress hidden";
+    target.innerHTML = "";
+    return;
+  }
+  const progress = job.progress || {};
+  const percent = clampPercent(progress.percent ?? (job.status === "succeeded" ? 100 : 0));
+  const label = progress.message || jobLabels[job.status] || job.status;
+  const current = progress.current_trial || progress.current || 0;
+  const total = progress.total_trials || progress.total || 0;
+  const best = progress.best_value === null || progress.best_value === undefined ? "" : `<span>Mejor ${escapeHtml(formatNumber(progress.best_value))}</span>`;
+  const stateText = progress.last_state ? `<span>${escapeHtml(progress.last_state)}</span>` : "";
+  const error = job.error ? `<span>${escapeHtml(cleanMessage(job.error))}</span>` : "";
+  const fillColor = job.status === "failed" ? "var(--red)" : "var(--blue)";
+  target.className = "panel training-progress";
+  target.innerHTML = `
+    <div class="progress-header">
+      <div class="progress-title">
+        <strong>${escapeHtml(jobLabels[job.status] || job.status)} - ${escapeHtml(job.message)}</strong>
+        <small>${escapeHtml(label)}</small>
+      </div>
+      <strong>${escapeHtml(percent)}%</strong>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" style="width:${escapeAttr(percent)}%;background:${fillColor}"></div></div>
+    <div class="progress-meta">
+      <span>${escapeHtml(progress.stage || "queued")}</span>
+      <span>${escapeHtml(current)}/${escapeHtml(total)}</span>
+      ${best}
+      ${stateText}
+      ${error}
+    </div>`;
+}
+
+function latestTrainingJob() {
+  return [...state.jobs.values()].filter((job) => String(job.message || "").includes("Entrenando modelo")).pop();
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(Math.max(Math.round(number), 0), 100);
 }
 
 function renderTrainingResult(result) {

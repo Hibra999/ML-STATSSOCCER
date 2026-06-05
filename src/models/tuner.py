@@ -43,6 +43,18 @@ class Tuner:
 
     def tune(self, trials: int, show_progress_bar: bool = False) -> optuna.Study:
         self._total_trials = trials
+        self._emit_progress({
+            "stage": "tuning",
+            "current": 0,
+            "total": trials,
+            "current_trial": 0,
+            "total_trials": trials,
+            "percent": 0,
+            "message": "Iniciando Optuna",
+            "last_state": "STARTING",
+            "best_value": None,
+            "best_trial": None,
+        })
         study = optuna.create_study(
             direction='maximize',
             sampler=self._build_sampler(self._sampler_name),
@@ -60,8 +72,18 @@ class Tuner:
         trial_params = self._tune_params(trial=trial)
         model_config = {**self._fixed_params, **trial_params}
         model = self._model_cls(**model_config)
-        metrics_df = self._trainer.cross_validation(model=model, df=self._df)
+        try:
+            metrics_df = self._trainer.cross_validation(model=model, df=self._df)
+        except Exception as exc:
+            if self._is_controlled_numerical_error(exc):
+                trial.set_user_attr("error", f"{exc.__class__.__name__}: {exc}")
+                trial.report(0.0, step=0)
+                return 0.0
+            raise
         metric_score = metrics_df.loc[metrics_df['data'] == 'eval', self._metric].mean()
+        if pd.isna(metric_score):
+            trial.set_user_attr("error", f"{self._metric} returned NaN")
+            metric_score = 0.0
         trial.report(metric_score, step=0)
         if trial.should_prune():
             raise optuna.TrialPruned()
@@ -100,15 +122,39 @@ class Tuner:
         except ValueError:
             best_value = None
             best_trial = None
-        self._progress_callback({
+        current = trial.number + 1
+        self._emit_progress({
             "stage": "tuning",
-            "current_trial": trial.number + 1,
+            "current": current,
+            "total": self._total_trials,
+            "current_trial": current,
             "total_trials": self._total_trials,
+            "percent": int(round(current * 100 / max(self._total_trials, 1))),
+            "message": "Optuna en ejecucion",
             "last_value": trial.value,
             "last_state": trial.state.name,
             "best_value": best_value,
             "best_trial": best_trial,
         })
+
+    def _emit_progress(self, progress: Dict[str, Any]):
+        if self._progress_callback is not None:
+            self._progress_callback(progress)
+
+    @staticmethod
+    def _is_controlled_numerical_error(exc: Exception) -> bool:
+        text = f"{exc.__class__.__name__}: {exc}".lower()
+        markers = [
+            "nan",
+            "inf",
+            "infinite",
+            "not finite",
+            "divide by zero",
+            "overflow",
+            "underflow",
+            "probabil",
+        ]
+        return any(marker in text for marker in markers)
 
     @staticmethod
     def _build_sampler(name: str) -> optuna.samplers.BaseSampler:

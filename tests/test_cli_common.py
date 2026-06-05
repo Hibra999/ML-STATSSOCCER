@@ -1,5 +1,7 @@
 from argparse import Namespace
+import warnings
 
+import numpy as np
 import pytest
 
 from src.cli import app as cli_app
@@ -7,6 +9,7 @@ from src.cli.common import CLIError, parse_eval_odd_range, parse_odd_range, vali
 from src.cli.model_specs import MODEL_SPECS, build_model_params, normalize_model_key
 from src.preprocessing.utils.target import TargetType
 from src.models.tuner import Tuner
+from src.models.classifiers.boosting import _filter_ngboost_categorical_warning, sanitize_probabilities
 
 
 def test_parse_odd_range_accepts_min_max():
@@ -80,3 +83,71 @@ def test_tuner_builds_configurable_sampler_and_pruner():
     assert Tuner._build_sampler("tpe").__class__.__name__ == "TPESampler"
     assert Tuner._build_pruner("median").__class__.__name__ == "MedianPruner"
     assert Tuner._build_pruner("successive-halving").__class__.__name__ == "SuccessiveHalvingPruner"
+
+
+def test_sanitize_probabilities_clips_and_renormalizes():
+    probabilities = np.array([
+        [0.0, 0.0, 0.0],
+        [np.nan, np.inf, -np.inf],
+        [0.2, 0.3, 0.5],
+    ])
+
+    sanitized = sanitize_probabilities(probabilities)
+
+    assert np.isfinite(sanitized).all()
+    assert (sanitized > 0).all()
+    assert np.allclose(sanitized.sum(axis=1), 1.0)
+
+
+def test_ngboost_warning_filter_is_specific():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _filter_ngboost_categorical_warning()
+        warnings.warn_explicit(
+            "divide by zero encountered in log",
+            RuntimeWarning,
+            filename="categorical.py",
+            lineno=13,
+            module="ngboost.distns.categorical",
+        )
+        warnings.warn("other warning", RuntimeWarning)
+
+    assert len(caught) == 1
+    assert str(caught[0].message) == "other warning"
+
+
+def test_tuner_emits_progress_payloads():
+    progress = []
+    tuner = Tuner(
+        model_cls=object,
+        fixed_params={},
+        tunable_params={"x": [1]},
+        df=None,
+        metric="Accuracy",
+        progress_callback=progress.append,
+    )
+    tuner._total_trials = 2
+
+    class Trial:
+        number = 0
+        value = 0.75
+        state = type("State", (), {"name": "COMPLETE"})()
+
+    class Study:
+        best_value = 0.75
+        best_trial = type("BestTrial", (), {"number": 0})()
+
+    tuner._emit_progress({
+        "stage": "tuning",
+        "current": 0,
+        "total": 2,
+        "percent": 0,
+        "message": "Iniciando Optuna",
+    })
+    tuner._on_trial_complete(Study(), Trial())
+
+    assert progress[0]["percent"] == 0
+    assert progress[1]["current"] == 1
+    assert progress[1]["total"] == 2
+    assert progress[1]["percent"] == 50
+    assert progress[1]["best_value"] == 0.75

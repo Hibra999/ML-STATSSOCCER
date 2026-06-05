@@ -1,4 +1,7 @@
+import warnings
+
 import numpy as np
+import pandas as pd
 from typing import Any, Dict, List, Optional, Union
 
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -9,6 +12,35 @@ from src.preprocessing.utils.sampling import SamplerType
 from src.preprocessing.utils.target import TargetType
 
 
+PROBABILITY_EPSILON = 1e-12
+
+
+def sanitize_probabilities(probabilities: np.ndarray, epsilon: float = PROBABILITY_EPSILON) -> np.ndarray:
+    probs = np.asarray(probabilities, dtype=float)
+    if probs.ndim == 1:
+        probs = probs.reshape(-1, 1)
+    if probs.ndim != 2:
+        raise ValueError(f"Expected 2D probabilities, got shape {probs.shape}.")
+
+    probs = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+    probs = np.clip(probs, epsilon, 1.0)
+    row_sums = probs.sum(axis=1, keepdims=True)
+    invalid_rows = ~np.isfinite(row_sums[:, 0]) | (row_sums[:, 0] <= 0.0)
+    if invalid_rows.any():
+        probs[invalid_rows] = 1.0 / probs.shape[1]
+        row_sums = probs.sum(axis=1, keepdims=True)
+    return probs / row_sums
+
+
+def _filter_ngboost_categorical_warning():
+    warnings.filterwarnings(
+        "ignore",
+        message="divide by zero encountered in log",
+        category=RuntimeWarning,
+        module=r"ngboost\.distns\.categorical",
+    )
+
+
 def _estimator_feature_importances(estimator) -> np.ndarray:
     if hasattr(estimator, "feature_importances_"):
         return np.asarray(estimator.feature_importances_)
@@ -17,7 +49,12 @@ def _estimator_feature_importances(estimator) -> np.ndarray:
     raise ValueError("Este modelo no expone importancias de variables.")
 
 
-class NGBoost(ClassificationModel):
+class ProbabilitySanitizingModel(ClassificationModel):
+    def predict_proba(self, df: pd.DataFrame) -> np.ndarray:
+        return sanitize_probabilities(super().predict_proba(df))
+
+
+class NGBoost(ProbabilitySanitizingModel):
     def __init__(
             self,
             league_id: str,
@@ -27,7 +64,7 @@ class NGBoost(ClassificationModel):
             sampler: Optional[SamplerType] = None,
             n_estimators: int = 300,
             max_depth: int = 3,
-            learning_rate: float = 0.03,
+            learning_rate: float = 0.02,
             minibatch_frac: float = 1.0,
             natural_gradient: bool = True,
             calibrate_probabilities: bool = False,
@@ -47,6 +84,16 @@ class NGBoost(ClassificationModel):
             calibrate_probabilities=calibrate_probabilities,
             **kwargs
         )
+
+    def fit(self, train_df: pd.DataFrame, eval_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        with warnings.catch_warnings():
+            _filter_ngboost_categorical_warning()
+            return super().fit(train_df=train_df, eval_df=eval_df)
+
+    def predict_proba(self, df: pd.DataFrame) -> np.ndarray:
+        with warnings.catch_warnings():
+            _filter_ngboost_categorical_warning()
+            return super().predict_proba(df)
 
     def build_classifier(self, input_size: int, num_classes: int) -> BaseEstimator:
         try:
@@ -77,9 +124,9 @@ class NGBoost(ClassificationModel):
         if param == "n_estimators":
             return {"low": 100, "high": 800, "step": 100}
         if param == "max_depth":
-            return {"low": 2, "high": 8, "step": 1}
+            return {"low": 2, "high": 5, "step": 1}
         if param == "learning_rate":
-            return {"low": 0.01, "high": 0.2, "step": 0.01}
+            return {"low": 0.005, "high": 0.08, "step": 0.005}
         if param == "minibatch_frac":
             return {"low": 0.5, "high": 1.0, "step": 0.1}
         if param == "natural_gradient":
@@ -97,7 +144,7 @@ class NGBoost(ClassificationModel):
         return model_config
 
 
-class CatBoost(ClassificationModel):
+class CatBoost(ProbabilitySanitizingModel):
     def __init__(
             self,
             league_id: str,
@@ -178,7 +225,7 @@ class CatBoost(ClassificationModel):
         return model_config
 
 
-class LightGBM(ClassificationModel):
+class LightGBM(ProbabilitySanitizingModel):
     def __init__(
             self,
             league_id: str,

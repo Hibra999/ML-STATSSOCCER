@@ -1,10 +1,12 @@
 import numpy as np
+import pandas as pd
 from typing import Any, Dict, List, Optional, Union
 from sklearn.base import BaseEstimator, TransformerMixin
 from xgboost import XGBClassifier
 from src.preprocessing.utils.sampling import SamplerType
 from src.preprocessing.utils.target import TargetType
 from src.models.model import ClassificationModel
+from src.models.classifiers.boosting import sanitize_probabilities
 
 
 class XGBoost(ClassificationModel):
@@ -84,6 +86,9 @@ class XGBoost(ClassificationModel):
             return self._classifier.calibrated_classifiers_[0].estimator.feature_importances_
         else:
             return self._classifier.feature_importances_
+
+    def predict_proba(self, df: pd.DataFrame) -> np.ndarray:
+        return sanitize_probabilities(super().predict_proba(df))
 
     @classmethod
     def _get_suggested_param_values(cls, param: str) -> Union[List[Any], Dict[str, Any]]:

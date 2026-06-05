@@ -24,7 +24,7 @@ MODEL_SPECS: Dict[str, ModelSpec] = {
         defaults={
             "n_estimators": 300,
             "max_depth": 3,
-            "learning_rate": 0.03,
+            "learning_rate": 0.02,
             "minibatch_frac": 1.0,
             "natural_gradient": True,
         },

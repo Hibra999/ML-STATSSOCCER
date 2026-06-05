@@ -60,3 +60,21 @@ def test_web_model_specs_only_expose_boosting_models():
 
     assert keys == {"ngboost", "catboost", "lightgbm", "xgboost"}
     assert all(spec["tunables"] for spec in specs)
+
+
+def test_training_progress_payload_shape():
+    from src.web import services
+
+    payloads = []
+    services.emit_training_progress(payloads.append, "tuning", 2, 5, "Optuna en ejecucion", best_value=0.8)
+
+    assert payloads == [{
+        "stage": "tuning",
+        "current": 2,
+        "total": 5,
+        "current_trial": 2,
+        "total_trials": 5,
+        "percent": 40,
+        "message": "Optuna en ejecucion",
+        "best_value": 0.8,
+    }]
