@@ -136,15 +136,14 @@ def test_dashboard_fixtures_uses_catalog_leagues_and_limits(monkeypatch):
                 SimpleNamespace(country="Mexico", name="Liga-MX", fixture="https://example.test/fixtures")
             ]
 
-    def fake_scrape_upcoming_fixtures(**kwargs):
-        assert kwargs["match_teams"] is False
+    def fake_scrape_dashboard_upcoming_fixtures(**kwargs):
         return pd.DataFrame([
-            {"Date": "2026-06-05", "Hora MX": "18:00", "Home": "A", "Away": "B", "1": 1.8, "X": 3.2, "2": 4.0},
-            {"Date": "2026-06-06", "Hora MX": "20:00", "Home": "C", "Away": "D", "1": 2.1, "X": 3.1, "2": 3.4},
+            {"Date": "2026-06-05", "Dia": "Viernes", "Hora MX": "18:00", "Home": "A", "Away": "B", "Fuente": "FotMob"},
+            {"Date": "2026-06-06", "Dia": "Sabado", "Hora MX": "20:00", "Home": "C", "Away": "D", "Fuente": "FotMob"},
         ])
 
     monkeypatch.setattr(services, "LeagueDatabase", FakeLeagueDatabase)
-    monkeypatch.setattr(services, "scrape_upcoming_fixtures", fake_scrape_upcoming_fixtures)
+    monkeypatch.setattr(services, "scrape_dashboard_upcoming_fixtures", fake_scrape_dashboard_upcoming_fixtures)
 
     result = services.dashboard_fixtures(limit=1, days=7)
 
@@ -156,6 +155,83 @@ def test_dashboard_fixtures_uses_catalog_leagues_and_limits(monkeypatch):
     assert result["fixtures"]["rows"][0]["Catalogo"] == 1
     assert result["fixtures"]["rows"][0]["Liga"] == "Mexico / Liga-MX"
     assert result["fixtures"]["rows"][0]["Hora MX"] == "18:00"
+    assert result["fixtures"]["rows"][0]["Fuente"] == "FotMob"
+
+
+def test_fotmob_provider_parses_upcoming_matches_in_mx_time():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from src.network.fixtures.fotmob import parse_fotmob_upcoming_fixtures
+
+    payload = {
+        "fixtures": {
+            "allMatches": [
+                {
+                    "home": {"name": "FC Tokyo"},
+                    "away": {"name": "Cerezo Osaka"},
+                    "status": {"utcTime": "2026-06-06T05:00:00Z", "finished": False, "cancelled": False},
+                },
+                {
+                    "home": {"name": "Finished"},
+                    "away": {"name": "Match"},
+                    "status": {"utcTime": "2026-06-06T03:00:00Z", "finished": True},
+                },
+            ],
+        },
+    }
+
+    result = parse_fotmob_upcoming_fixtures(
+        payload=payload,
+        days=7,
+        now=datetime(2026, 6, 5, 12, 0, tzinfo=ZoneInfo("America/Mexico_City")),
+        source_name="FotMob: J. League",
+    )
+
+    assert result.to_dict(orient="records") == [{
+        "Date": "2026-06-05",
+        "Dia": "Viernes",
+        "Hora MX": "23:00",
+        "Home": "FC Tokyo",
+        "Away": "Cerezo Osaka",
+        "Fuente": "FotMob: J. League",
+    }]
+
+
+def test_fotmob_resolves_catalog_alias_from_all_leagues():
+    from types import SimpleNamespace
+
+    from src.network.fixtures import fotmob
+
+    class FakeSession:
+        def get(self, url, headers=None, timeout=None):
+            class Response:
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "countries": [{
+                            "ccode": "JPN",
+                            "leagues": [{
+                                "id": 223,
+                                "name": "J. League",
+                                "localizedName": "J. League",
+                                "pageUrl": "/leagues/223/overview/j-league",
+                                "ccode": "JPN",
+                            }],
+                        }],
+                    }
+
+            return Response()
+
+    source = fotmob.resolve_fotmob_league(
+        league=SimpleNamespace(country="Japan", name="J-1"),
+        session=FakeSession(),
+    )
+
+    assert source["id"] == 223
+    assert source["name"] == "J. League"
 
 
 def test_dashboard_error_notes_are_grouped():
@@ -172,3 +248,19 @@ def test_dashboard_error_notes_are_grouped():
     assert notes[0].startswith("4 ligas fallaron")
     assert "Argentina / Primera-Division" in notes[0]
     assert "y 1 mas" in notes[0]
+
+
+def test_dashboard_error_cleaning_groups_request_object_addresses():
+    from src.web import services
+
+    cleaned = [
+        services.clean_error_text(RuntimeError("No se pudo cargar FotMob: <urllib3.connection.HTTPSConnection object at 0xabc123>")),
+        services.clean_error_text(RuntimeError("No se pudo cargar FotMob: <urllib3.connection.HTTPSConnection object at 0xdef456>")),
+    ]
+    notes = services.compact_dashboard_errors([
+        {"league": "Japan / J-1", "message": cleaned[0]},
+        {"league": "USA / MLS", "message": cleaned[1]},
+    ])
+
+    assert len(notes) == 1
+    assert notes[0].startswith("2 ligas fallaron")

@@ -74,6 +74,7 @@ from src.interpretability.explainers.svm import SVMExplainer
 from src.models.classifiers.neuralnets.nn import NeuralNetwork
 from src.models.trainer import Trainer
 from src.models.tuner import Tuner
+from src.network.fixtures.fotmob import FOTMOB_DASHBOARD_COLUMNS, scrape_fotmob_upcoming_fixtures
 from src.network.fixtures.footystats.scraper import FootyStatsScraper
 from src.network.fixtures.utils import match_fixture_teams
 from src.preprocessing.selection import train_test_split
@@ -93,7 +94,7 @@ UPCOMING_FIXTURE_DAYS = 7
 DASHBOARD_FIXTURE_LIMIT = 5
 MEXICO_CITY_TZ = ZoneInfo("America/Mexico_City")
 PREDICT_FIXTURE_COLUMNS = ["Date", "Hora MX", "Home", "Away", "1", "X", "2"]
-DASHBOARD_FIXTURE_COLUMNS = ["Catalogo", "Liga", "Pais", *PREDICT_FIXTURE_COLUMNS]
+DASHBOARD_FIXTURE_COLUMNS = ["Catalogo", "Liga", "Pais", *FOTMOB_DASHBOARD_COLUMNS]
 MODEL_LABELS_ES = {
     "ngboost": "NGBoost",
     "catboost": "CatBoost",
@@ -179,13 +180,10 @@ def dashboard_fixtures(limit: int = DASHBOARD_FIXTURE_LIMIT, days: int = UPCOMIN
             continue
         attempted += 1
         try:
-            fixture_df = scrape_upcoming_fixtures(
+            fixture_df = scrape_dashboard_upcoming_fixtures(
                 league=league,
-                league_df=pd.DataFrame(),
                 days=days,
                 limit=limit - len(rows),
-                headless=None,
-                match_teams=False,
             )
         except Exception as exc:
             failed += 1
@@ -833,6 +831,14 @@ def scrape_upcoming_fixtures(
     return fixture_df
 
 
+def scrape_dashboard_upcoming_fixtures(
+        league,
+        days: int = UPCOMING_FIXTURE_DAYS,
+        limit: Optional[int] = None,
+) -> pd.DataFrame:
+    return scrape_fotmob_upcoming_fixtures(league=league, days=days, limit=limit)
+
+
 def load_explainer(league_id: str, model_id: str, compute_shap: bool):
     _, _, df = load_league(league_id)
     df = df.dropna(ignore_index=True)
@@ -1002,7 +1008,10 @@ def normalize_optuna_choice(value: Any, allowed: set[str], label: str) -> str:
 
 
 def clean_error_text(exc: Exception) -> str:
-    return re.sub(r"^(CLIError|ValueError|RuntimeError|NotImplementedError):\s*", "", f"{exc.__class__.__name__}: {exc}")
+    message = re.sub(r"^(CLIError|ValueError|RuntimeError|NotImplementedError|FotMobFixtureError):\s*", "", f"{exc.__class__.__name__}: {exc}")
+    message = re.sub(r"<[^>]+ object at 0x[0-9a-fA-F]+>", "<conexion>", message)
+    message = re.sub(r"0x[0-9a-fA-F]+", "0x...", message)
+    return message
 
 
 def compact_dashboard_errors(errors: List[Dict[str, str]]) -> List[str]:
