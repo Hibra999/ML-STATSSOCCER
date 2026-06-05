@@ -4,8 +4,9 @@ import pytest
 
 from src.cli import app as cli_app
 from src.cli.common import CLIError, parse_eval_odd_range, parse_odd_range, validate_identifier
-from src.cli.model_specs import build_model_params
+from src.cli.model_specs import MODEL_SPECS, build_model_params, normalize_model_key
 from src.preprocessing.utils.target import TargetType
+from src.models.tuner import Tuner
 
 
 def test_parse_odd_range_accepts_min_max():
@@ -34,55 +35,48 @@ def test_run_without_args_shows_web_help(capsys):
     assert "chat" not in captured.out.lower()
 
 
-def test_build_dnn_params_omits_calibration():
+def test_model_aliases_only_resolve_supported_boosting_models():
+    assert normalize_model_key("ngb") == "ngboost"
+    assert normalize_model_key("cat") == "catboost"
+    assert normalize_model_key("lgbm") == "lightgbm"
+    assert normalize_model_key("xgb") == "xgboost"
+    assert set(MODEL_SPECS) == {"ngboost", "catboost", "lightgbm", "xgboost"}
+
+
+@pytest.mark.parametrize("model_key", ["ngboost", "catboost", "lightgbm", "xgboost"])
+def test_build_boosting_model_params(model_key):
     args = Namespace(
         target="over-under",
         normalizer="standard",
         sampler="none",
         calibrate=True,
-        penalty=None,
-        oas=None,
-        decision_boundary=None,
-        criterion=None,
-        min_samples_leaf=None,
-        min_samples_split=None,
-        max_features=None,
         max_depth=None,
-        class_weight=None,
         n_estimators=None,
         min_child_weight=None,
         learning_rate=None,
         lambda_regularization=None,
         alpha_regularization=None,
-        n_neighbors=None,
-        weights=None,
-        p=None,
-        algorithm=None,
-        kernel=None,
-        degree=None,
-        gamma=None,
-        hidden_layers=2,
-        hidden_units=None,
-        hidden_activation=None,
-        vsn=False,
-        layer_normalization=None,
-        batch_normalization=None,
-        dropout_rate=None,
-        odd_noise_std=None,
-        optimizer=None,
-        lookahead=None,
-        label_smoothing=None,
-        batch_size=None,
-        epochs=None,
-        early_stopping_patience=None,
-        lr_decay_patience=None,
-        lr_decay_factor=None,
-        verbose=None,
+        num_leaves=None,
+        min_child_samples=None,
+        minibatch_frac=None,
+        natural_gradient=None,
+        l2_leaf_reg=None,
+        random_strength=None,
     )
 
-    params = build_model_params(args=args, league_id="league", model_id="model", model_key="dnn")
+    params = build_model_params(args=args, league_id="league", model_id="model", model_key=model_key)
 
     assert params["target_type"] == TargetType.OVER_UNDER
-    assert "calibrate_probabilities" not in params
-    assert params["hidden_layers"] == 2
-    assert params["vsn"] is False
+    assert params["league_id"] == "league"
+    assert params["model_id"] == "model"
+    if model_key == "ngboost":
+        assert "calibrate_probabilities" not in params
+    else:
+        assert params["calibrate_probabilities"] is True
+
+
+def test_tuner_builds_configurable_sampler_and_pruner():
+    assert Tuner._build_sampler("random").__class__.__name__ == "RandomSampler"
+    assert Tuner._build_sampler("tpe").__class__.__name__ == "TPESampler"
+    assert Tuner._build_pruner("median").__class__.__name__ == "MedianPruner"
+    assert Tuner._build_pruner("successive-halving").__class__.__name__ == "SuccessiveHalvingPruner"

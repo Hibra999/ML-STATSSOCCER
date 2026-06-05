@@ -143,6 +143,20 @@ h2 { font-size: 16px; }
   min-width: 0;
 }
 
+.catalog-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px;
+  gap: 10px;
+  align-items: end;
+}
+
+.catalog-flag {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .catalog-preview {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -178,6 +192,7 @@ h2 { font-size: 16px; }
 }
 
 .row.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.row.one { grid-template-columns: minmax(0, 1fr); }
 .row.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .row.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .row.five { grid-template-columns: 2fr repeat(3, 1fr) 1fr; }
@@ -333,12 +348,47 @@ th {
   background: #fff;
 }
 
+.output-block {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.param {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+  min-width: 0;
+}
+
+.param span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.optuna-chart {
+  width: 100%;
+  min-height: 180px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
 @media (max-width: 980px) {
   .app-shell { grid-template-columns: 1fr; }
   nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .grid.two,
   .metric-grid,
   .row.two,
+  .row.one,
   .row.three,
   .row.four,
   .row.five {
@@ -350,5 +400,11 @@ th {
   .item-actions {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+  .catalog-select-row {
+    grid-template-columns: 1fr;
+  }
+  .catalog-flag {
+    justify-content: flex-start;
   }
 }

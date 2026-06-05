@@ -106,7 +106,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/leagues/{league_id}/models/train")
     def train_model(league_id: str, payload: Dict[str, Any] = Body(...)):
-        return _submit(f"Entrenando modelo para {league_id}", services.train_model, league_id, payload)
+        return _submit(f"Entrenando modelo para {league_id}", services.train_model, league_id, payload, with_progress=True)
 
     @app.post("/api/leagues/{league_id}/models/{model_id}/evaluate")
     def evaluate_model(league_id: str, model_id: str, payload: Dict[str, Any] = Body(default={})):
@@ -165,9 +165,9 @@ def create_app() -> FastAPI:
     return app
 
 
-def _submit(message: str, fn, *args, **kwargs):
+def _submit(message: str, fn, *args, with_progress: bool = False, **kwargs):
     try:
-        return _ok(jobs.submit(message, fn, *args, **kwargs))
+        return _ok(jobs.submit(message, fn, *args, with_progress=with_progress, **kwargs))
     except Exception as exc:
         return _error(exc)
 

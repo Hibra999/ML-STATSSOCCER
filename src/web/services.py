@@ -59,7 +59,7 @@ from src.cli.common import (
     target_label,
     validate_identifier,
 )
-from src.cli.model_specs import MODEL_SPECS, build_model_params, normalize_model_key, tunable_params_for_args
+from src.cli.model_specs import MODEL_SPECS, build_model_params, normalize_model_key, tunable_param_names, tunable_params_for_args
 from src.database.league import LeagueDatabase
 from src.database.model import ModelDatabase
 from src.interpretability.explainers.decisiontree import DecisionTreeExplainer
@@ -89,15 +89,10 @@ DEFAULT_BROWSER_CONFIG = {
     "brave_binary": "",
 }
 MODEL_LABELS_ES = {
-    "logistic": "Regresion logistica",
-    "discriminant": "Analisis discriminante",
-    "decision-tree": "Arbol de decision",
-    "random-forest": "Random Forest",
+    "ngboost": "NGBoost",
+    "catboost": "CatBoost",
+    "lightgbm": "LightGBM",
     "xgboost": "XGBoost",
-    "knn": "KNN",
-    "naive-bayes": "Naive Bayes",
-    "svm": "SVM",
-    "dnn": "Red neuronal profunda",
 }
 
 
@@ -165,6 +160,7 @@ def model_specs() -> List[Dict[str, Any]]:
             "label": MODEL_LABELS_ES.get(spec.key, spec.label),
             "supports_calibration": spec.supports_calibration,
             "defaults": display_defaults(spec.defaults),
+            "tunables": tunable_param_names(spec),
         }
         for spec in MODEL_SPECS.values()
     ]
@@ -309,13 +305,13 @@ def list_models(league_id: str) -> List[Dict[str, Any]]:
     models = []
     for model_id in model_db.get_model_ids():
         config = model_db.load_model_config(model_id)
-        if config is not None:
+        if config is not None and is_supported_model_config(config):
             models.append(model_payload(model_id, config))
     return models
 
 
-def train_model(league_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    model_key = normalize_model_key(payload.get("model_type", "random-forest"))
+def train_model(league_id: str, payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+    model_key = normalize_model_key(payload.get("model_type", "xgboost"))
     spec = MODEL_SPECS[model_key]
     _, league, df = load_league(league_id)
     df = df.dropna(ignore_index=True)
@@ -328,20 +324,54 @@ def train_model(league_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise CLIError(f'El modelo "{model_id}" ya existe para la liga "{league.league_id}".')
 
     args = training_args(payload, league_id=league.league_id, model_id=model_id, model_key=model_key)
+    if "tuning_enabled" in payload:
+        if bool_payload(args.tuning_enabled):
+            if str(args.tune or "").strip().lower() in {"", "none"}:
+                args.tune = "all"
+        else:
+            args.tune = None
+    args.trials = int(args.trials)
+    args.eval_size = float(args.eval_size)
+    args.optuna_sampler = normalize_optuna_choice(args.optuna_sampler, {"tpe", "random", "cmaes", "cma-es"}, "sampler")
+    args.optuna_pruner = normalize_optuna_choice(args.optuna_pruner, {"none", "median", "successive-halving"}, "pruner")
     if args.eval_size < 5 or args.eval_size > 30:
         raise CLIError("El porcentaje de evaluacion debe estar entre 5 y 30.")
+    if args.trials < 1:
+        raise CLIError("N trials debe ser mayor o igual a 1.")
+    if args.objective not in {"Accuracy", "F1", "Precision", "Recall"}:
+        raise CLIError("El objetivo debe ser Accuracy, F1, Precision o Recall.")
 
     model_config = build_model_params(args=args, league_id=league.league_id, model_id=model_id, model_key=model_key)
     model_config["train"] = {"eval_samples_size": float(args.eval_size), "results": {}}
 
     trainer = Trainer()
     tunable_params = tunable_params_for_args(args, spec)
+    optuna_summary = {
+        "enabled": bool(tunable_params),
+        "sampler": args.optuna_sampler,
+        "pruner": args.optuna_pruner,
+        "n_trials": args.trials if tunable_params else 0,
+        "objective": args.objective,
+        "best_score": "",
+        "best_params": {},
+    }
     if tunable_params:
-        tuner = Tuner(model_cls=spec.model_cls, fixed_params=model_config, tunable_params=tunable_params, df=df, metric=args.objective)
+        tuner = Tuner(
+            model_cls=spec.model_cls,
+            fixed_params=model_config,
+            tunable_params=tunable_params,
+            df=df,
+            metric=args.objective,
+            sampler=args.optuna_sampler,
+            pruner=args.optuna_pruner,
+            progress_callback=progress_callback,
+        )
         study = tuner.tune(trials=args.trials)
         trials_df = _study_to_dataframe(study, args.objective)
         model_config["train"]["results"]["tune"] = trials_df
         model_config.update(**study.best_trial.params)
+        optuna_summary["best_score"] = study.best_value
+        optuna_summary["best_params"] = study.best_trial.params
 
     if args.cv:
         model = spec.model_cls(**model_config)
@@ -368,9 +398,11 @@ def train_model(league_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(model, NeuralNetwork):
         model_config.update({"input_size": model.input_size, "num_classes": model.num_classes})
 
+    model_config["train"]["optuna"] = optuna_summary
     model_db.save_model(model=model, model_config=model_config)
     return {
         "model": model_payload(model_id, model_config),
+        "optuna": optuna_summary,
         "results": {name: table_payload(result_df, page=1, page_size=50) for name, result_df in model_config["train"]["results"].items()},
     }
 
@@ -617,6 +649,11 @@ def load_model(model_db: ModelDatabase, model_id: Optional[str]):
         raise CLIError("El id del modelo es obligatorio.")
     if not model_db.model_exists(model_id):
         raise CLIError(f'El modelo "{model_id}" no existe.')
+    config = model_db.load_model_config(model_id=model_id)
+    if config is None:
+        raise CLIError(f'No se pudo cargar el modelo "{model_id}".')
+    if not is_supported_model_config(config):
+        raise CLIError(f'El modelo "{model_id}" usa un tipo no soportado en esta version.')
     model, config = model_db.load_model(model_id=model_id)
     if model is None or config is None:
         raise CLIError(f'No se pudo cargar el modelo "{model_id}".')
@@ -787,6 +824,24 @@ def model_payload(model_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def is_supported_model_config(config: Dict[str, Any]) -> bool:
+    supported_classes = {spec.model_cls for spec in MODEL_SPECS.values()}
+    return config.get("cls") in supported_classes
+
+
+def bool_payload(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "si", "sí", "on"}
+
+
+def normalize_optuna_choice(value: Any, allowed: set[str], label: str) -> str:
+    key = str(value or "").strip().lower().replace("_", "-")
+    if key not in allowed:
+        raise CLIError(f'Optuna {label} invalido: "{value}".')
+    return key
+
+
 def filter_dataframe(
         df: pd.DataFrame,
         query: Optional[str],
@@ -830,50 +885,35 @@ def training_args(payload: Dict[str, Any], league_id: str, model_id: str, model_
         "eval_size": 20.0,
         "cv": True,
         "sliding_cv": True,
+        "tuning_enabled": False,
         "tune": None,
         "trials": 25,
+        "optuna_sampler": "tpe",
+        "optuna_pruner": "none",
         "objective": "Accuracy",
         "export_metrics": None,
-        "penalty": None,
-        "oas": None,
-        "decision_boundary": None,
-        "criterion": None,
-        "min_samples_leaf": None,
-        "min_samples_split": None,
-        "max_features": None,
         "max_depth": None,
-        "class_weight": None,
         "n_estimators": None,
         "min_child_weight": None,
         "learning_rate": None,
         "lambda_regularization": None,
         "alpha_regularization": None,
-        "n_neighbors": None,
-        "weights": None,
-        "p": None,
-        "algorithm": None,
-        "kernel": None,
-        "degree": None,
-        "gamma": None,
-        "hidden_layers": None,
-        "hidden_units": None,
-        "hidden_activation": None,
-        "vsn": None,
-        "layer_normalization": None,
-        "batch_normalization": None,
-        "dropout_rate": None,
-        "odd_noise_std": None,
-        "optimizer": None,
-        "lookahead": None,
-        "label_smoothing": None,
-        "batch_size": None,
-        "epochs": None,
-        "early_stopping_patience": None,
-        "lr_decay_patience": None,
-        "lr_decay_factor": None,
-        "verbose": None,
+        "num_leaves": None,
+        "min_child_samples": None,
+        "minibatch_frac": None,
+        "natural_gradient": None,
+        "l2_leaf_reg": None,
+        "random_strength": None,
     }
-    aliases = {"eval-size": "eval_size", "sliding-cv": "sliding_cv", "model-id": "model_id"}
+    aliases = {
+        "eval-size": "eval_size",
+        "sliding-cv": "sliding_cv",
+        "model-id": "model_id",
+        "n_trials": "trials",
+        "tune_params": "tune",
+        "optuna-sampler": "optuna_sampler",
+        "optuna-pruner": "optuna_pruner",
+    }
     for key, value in payload.items():
         defaults[aliases.get(key, key)] = value
     return SimpleNamespace(**defaults)

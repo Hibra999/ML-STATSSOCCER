@@ -50,3 +50,13 @@ def test_web_browser_config_supports_brave():
     assert "brave" in services.SUPPORTED_BROWSERS
     assert "brave_binary" in config
     assert config["brave_binary"] is not None
+
+
+def test_web_model_specs_only_expose_boosting_models():
+    from src.web import services
+
+    specs = services.model_specs()
+    keys = {spec["key"] for spec in specs}
+
+    assert keys == {"ngboost", "catboost", "lightgbm", "xgboost"}
+    assert all(spec["tunables"] for spec in specs)

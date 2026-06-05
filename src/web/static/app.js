@@ -1,4 +1,4 @@
-const state = { catalog: [], leagues: [], models: {}, jobs: new Map() };
+const state = { catalog: [], leagues: [], models: {}, specs: [], jobs: new Map() };
 const titles = {
   dashboard: "Inicio",
   leagues: "Ligas",
@@ -59,7 +59,10 @@ async function refreshAll() {
     fillModelSpecs(specs);
     renderLeagues(leagues);
     fillConfig(config);
-    if (leagues.length) await refreshModelSelects();
+    if (leagues.length) {
+      await refreshModelSelects();
+      await loadData();
+    }
   } catch (error) {
     showError(error.message);
   }
@@ -74,6 +77,7 @@ function bindForms() {
     await submitJson("/api/leagues", formJson(event.target), true);
   });
   document.getElementById("data-load").addEventListener("click", loadData);
+  document.getElementById("data-league").addEventListener("change", loadData);
   document.getElementById("data-export").addEventListener("click", exportData);
   document.getElementById("models-load").addEventListener("click", loadModelsList);
   ["train-league", "model-type"].forEach((id) => {
@@ -81,6 +85,7 @@ function bindForms() {
   });
   const modelIdInput = document.querySelector("#train-form input[name=model_id]");
   modelIdInput.addEventListener("input", () => { modelIdInput.dataset.autofilled = "false"; });
+  document.getElementById("tuning-enabled").addEventListener("change", toggleTuningControls);
   document.getElementById("train-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = formJson(event.target);
@@ -96,6 +101,7 @@ function bindForms() {
   document.getElementById("fixtures-form").addEventListener("submit", fixturesPredict);
   document.getElementById("analysis-form").addEventListener("submit", analysisPlot);
   document.getElementById("config-form").addEventListener("submit", saveConfig);
+  toggleTuningControls();
 }
 
 async function submitJson(path, payload, jobExpected = false) {
@@ -137,11 +143,16 @@ function selectedCatalogLeague() {
 function updateCatalogDefaults() {
   const league = selectedCatalogLeague();
   const preview = document.getElementById("catalog-preview");
+  const catalogFlag = document.getElementById("catalog-flag");
   if (!league) {
     preview.innerHTML = "";
+    if (catalogFlag) catalogFlag.innerHTML = "";
     return;
   }
 
+  if (catalogFlag) {
+    catalogFlag.innerHTML = `<img class="flag" src="${escapeAttr(league.flag_url)}" alt="Bandera ${escapeAttr(league.country)}">`;
+  }
   preview.innerHTML = `
     <img class="flag" src="${escapeAttr(league.flag_url)}" alt="Bandera ${escapeAttr(league.country)}">
     <div class="league-meta">
@@ -169,6 +180,7 @@ function fillLeagueSelects(leagues) {
 }
 
 function fillModelSpecs(specs) {
+  state.specs = specs;
   document.getElementById("model-type").innerHTML = specs.map((spec) => `<option value="${escapeAttr(spec.key)}">${escapeHtml(spec.label)}</option>`).join("");
   updateTrainingDefaults();
 }
@@ -176,14 +188,21 @@ function fillModelSpecs(specs) {
 function updateTrainingDefaults() {
   const form = document.getElementById("train-form");
   const leagueId = form.elements.league_id.value;
-  const modelType = form.elements.model_type.value || "random-forest";
+  const modelType = form.elements.model_type.value || "xgboost";
   const modelId = form.elements.model_id;
-  const shortModel = { "random-forest": "rf", "decision-tree": "dt", "naive-bayes": "nb", "discriminant": "lda", "logistic": "lr" }[modelType] || modelType;
+  const shortModel = { ngboost: "ngb", catboost: "cat", lightgbm: "lgbm", xgboost: "xgb" }[modelType] || modelType;
   if (!leagueId) return;
   if (!modelId.value || modelId.dataset.autofilled !== "false") {
     modelId.value = `${leagueId}-${shortModel}-result`;
     modelId.dataset.autofilled = "true";
   }
+}
+
+function toggleTuningControls() {
+  const enabled = document.getElementById("tuning-enabled").checked;
+  document.querySelectorAll("[data-tuning-control]").forEach((input) => {
+    input.disabled = !enabled;
+  });
 }
 
 function renderLeagues(leagues) {
@@ -378,6 +397,7 @@ async function pollJobs() {
       if (job.status === "succeeded" || job.status === "failed") {
         if (job.result && job.result.image) renderImage("analysis-output", job.result.image.url);
         if (job.result && job.result.predictions) renderTable("predict-output", job.result.predictions);
+        if (job.result && job.result.results) renderTrainingResult(job.result);
         if (job.status === "succeeded") await refreshAll();
       }
     } catch (error) {
@@ -396,7 +416,83 @@ function trackJob(job) {
 function renderJobs() {
   const target = document.getElementById("jobs-list");
   const jobs = [...state.jobs.values()].slice(-8).reverse();
-  target.innerHTML = jobs.map((job) => `<div class="job ${escapeAttr(job.status)}"><strong>${escapeHtml(jobLabels[job.status] || job.status)}</strong> - ${escapeHtml(job.message)}<br><small>${escapeHtml(job.job_id)}${job.error ? " - " + escapeHtml(cleanMessage(job.error)) : ""}</small></div>`).join("") || "<div class='item'><div>Sin procesos activos</div></div>";
+  target.innerHTML = jobs.map((job) => `<div class="job ${escapeAttr(job.status)}"><strong>${escapeHtml(jobLabels[job.status] || job.status)}</strong> - ${escapeHtml(job.message)}${jobProgressHtml(job)}<br><small>${escapeHtml(job.job_id)}${job.error ? " - " + escapeHtml(cleanMessage(job.error)) : ""}</small></div>`).join("") || "<div class='item'><div>Sin procesos activos</div></div>";
+}
+
+function jobProgressHtml(job) {
+  const progress = job.progress || {};
+  if (progress.stage !== "tuning") return "";
+  const current = progress.current_trial || 0;
+  const total = progress.total_trials || 0;
+  const best = progress.best_value === null || progress.best_value === undefined ? "" : ` - mejor ${Number(progress.best_value).toFixed(3)}`;
+  return ` - Optuna ${escapeHtml(current)}/${escapeHtml(total)}${escapeHtml(best)}`;
+}
+
+function renderTrainingResult(result) {
+  const target = document.getElementById("training-output");
+  const model = result.model || {};
+  const optuna = result.optuna || {};
+  const results = result.results || {};
+  const blocks = [
+    `<div class="output-block">
+      <h2>${escapeHtml(model.model_id || "Modelo")}</h2>
+      <div class="param-grid">
+        <div class="param"><span>Tipo</span>${escapeHtml(model.class || "")}</div>
+        <div class="param"><span>Objetivo</span>${escapeHtml(model.target || "")}</div>
+        <div class="param"><span>Eval %</span>${escapeHtml(model.eval_size || "")}</div>
+      </div>
+    </div>`,
+  ];
+  if (optuna.enabled) {
+    blocks.push(`<div class="output-block">
+      <h2>Optuna</h2>
+      <div class="param-grid">
+        <div class="param"><span>Sampler</span>${escapeHtml(optuna.sampler)}</div>
+        <div class="param"><span>Pruner</span>${escapeHtml(optuna.pruner)}</div>
+        <div class="param"><span>Trials</span>${escapeHtml(optuna.n_trials)}</div>
+        <div class="param"><span>Mejor score</span>${escapeHtml(formatNumber(optuna.best_score))}</div>
+      </div>
+      ${renderParamGrid(optuna.best_params || {})}
+      ${renderOptunaChart(results.tune, optuna.objective)}
+      ${tableHtml(results.tune)}
+    </div>`);
+  }
+  if (results.fit) blocks.push(`<div class="output-block"><h2>Entrenamiento</h2>${tableHtml(results.fit)}</div>`);
+  if (results.cv) blocks.push(`<div class="output-block"><h2>Validacion cruzada</h2>${tableHtml(results.cv)}</div>`);
+  if (results["sliding-cv"]) blocks.push(`<div class="output-block"><h2>CV deslizante</h2>${tableHtml(results["sliding-cv"])}</div>`);
+  target.innerHTML = blocks.join("");
+}
+
+function renderParamGrid(params) {
+  const entries = Object.entries(params);
+  if (!entries.length) return "";
+  return `<div class="param-grid">${entries.map(([key, value]) => `<div class="param"><span>${escapeHtml(key)}</span>${escapeHtml(formatNumber(value))}</div>`).join("")}</div>`;
+}
+
+function renderOptunaChart(table, metric) {
+  if (!table || !table.rows || !metric) return "";
+  const points = table.rows
+    .map((row, index) => ({ trial: Number(row.Trial ?? index), value: Number(row[metric]) }))
+    .filter((point) => Number.isFinite(point.trial) && Number.isFinite(point.value))
+    .sort((a, b) => a.trial - b.trial);
+  if (points.length < 2) return "";
+  const width = 720;
+  const height = 180;
+  const pad = 24;
+  const minX = Math.min(...points.map((point) => point.trial));
+  const maxX = Math.max(...points.map((point) => point.trial));
+  const minY = Math.min(...points.map((point) => point.value));
+  const maxY = Math.max(...points.map((point) => point.value));
+  const scaleX = (value) => pad + ((value - minX) / Math.max(maxX - minX, 1)) * (width - pad * 2);
+  const scaleY = (value) => height - pad - ((value - minY) / Math.max(maxY - minY, 0.001)) * (height - pad * 2);
+  const polyline = points.map((point) => `${scaleX(point.trial).toFixed(1)},${scaleY(point.value).toFixed(1)}`).join(" ");
+  const circles = points.map((point) => `<circle cx="${scaleX(point.trial).toFixed(1)}" cy="${scaleY(point.value).toFixed(1)}" r="3"></circle>`).join("");
+  return `<svg class="optuna-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Optuna">
+    <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="#d9e1ea"></line>
+    <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" stroke="#d9e1ea"></line>
+    <polyline points="${polyline}" fill="none" stroke="#2563eb" stroke-width="2.5"></polyline>
+    <g fill="#2563eb">${circles}</g>
+  </svg>`;
 }
 
 function renderTable(id, table) {
@@ -449,6 +545,11 @@ function cleanMessage(message) {
   return String(message || "")
     .replace(/^(CLIError|ValueError|RuntimeError|NotImplementedError):\s*/, "")
     .replace(/\bNone\b/g, "Sin valor");
+}
+
+function formatNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(3) : value;
 }
 
 function setDefaultDates() {

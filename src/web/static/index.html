@@ -52,7 +52,10 @@
         <div class="grid two">
           <form id="league-create-form" class="panel form-panel">
             <div class="panel-header"><h2>Nueva liga</h2></div>
-            <label>Catalogo<select name="league_index" id="catalog-select"></select></label>
+            <div class="catalog-select-row">
+              <label>Catalogo<select name="league_index" id="catalog-select"></select></label>
+              <div id="catalog-flag" class="catalog-flag"></div>
+            </div>
             <div id="catalog-preview" class="catalog-preview"></div>
             <label>ID<input name="league_id" placeholder="epl-2018" required></label>
             <div class="row three">
@@ -100,7 +103,7 @@
             <div class="panel-header"><h2>Entrenar</h2></div>
             <label>Liga<select name="league_id" id="train-league"></select></label>
             <label>Modelo<select name="model_type" id="model-type"></select></label>
-            <label>ID<input name="model_id" placeholder="rf-result"></label>
+            <label>ID<input name="model_id" placeholder="xgb-result"></label>
             <div class="row three">
               <label>Objetivo<select name="target"><option value="result">Resultado 1/X/2</option><option value="over-under">Over/Under 2.5</option></select></label>
               <label>Normalizador<select name="normalizer"><option>none</option><option>standard</option><option>min-max</option><option>max-abs</option></select></label>
@@ -108,8 +111,16 @@
             </div>
             <div class="row three">
               <label>Eval %<input name="eval_size" type="number" min="5" max="30" value="20"></label>
-              <label>Intentos<input name="trials" type="number" min="1" value="25"></label>
-              <label>Ajuste<input name="tune" value="none" placeholder="none, all o parametros"></label>
+              <label>N trials<input name="n_trials" type="number" min="1" value="25" data-tuning-control></label>
+              <label>Objetivo<select name="objective" data-tuning-control><option>Accuracy</option><option>F1</option><option>Precision</option><option>Recall</option></select></label>
+            </div>
+            <div class="row three">
+              <label class="check"><input name="tuning_enabled" id="tuning-enabled" type="checkbox"> Fine-tuning Optuna</label>
+              <label>Algoritmo<select name="optuna_sampler" data-tuning-control><option value="tpe">TPE</option><option value="random">Random</option><option value="cmaes">CMA-ES</option></select></label>
+              <label>Pruner<select name="optuna_pruner" data-tuning-control><option value="none">None</option><option value="median">Median</option><option value="successive-halving">Successive Halving</option></select></label>
+            </div>
+            <div class="row one">
+              <label>Parametros<input name="tune_params" id="tune-params" value="all" data-tuning-control></label>
             </div>
             <div class="row two-inline">
               <label class="check"><input name="cv" type="checkbox" checked> Validacion cruzada</label>
@@ -122,6 +133,7 @@
             <div id="models-list"></div>
           </div>
         </div>
+        <div id="training-output" class="panel output"></div>
       </section>
 
       <section id="evaluate" class="view">

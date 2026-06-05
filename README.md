@@ -83,7 +83,7 @@ Ejemplo de prediccion manual:
 
 ```bash
 python cli.py predict manual epl-2018 \
-  --model rf-result \
+  --model xgb-result \
   --home Arsenal \
   --away Chelsea \
   --odd-1 2.10 \
@@ -93,15 +93,10 @@ python cli.py predict manual epl-2018 \
 
 ## Modelos Soportados
 
-- Regresion logistica.
-- Analisis discriminante.
-- Arbol de decision.
-- Random Forest.
+- NGBoost.
+- CatBoost.
+- LightGBM.
 - XGBoost.
-- KNN.
-- Naive Bayes.
-- SVM.
-- Red neuronal profunda.
 
 Objetivos disponibles:
 

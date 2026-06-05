@@ -57,17 +57,20 @@ python cli.py data export epl-2018 --output exports/epl.csv --hide-missing
 Modelos:
 
 ```text
-logistic, discriminant, decision-tree, random-forest, xgboost, knn, naive-bayes, svm, dnn
+ngboost, catboost, lightgbm, xgboost
 ```
 
 Ejemplo:
 
 ```bash
-python cli.py model train epl-2018 random-forest \
-  --id epl-rf-result \
+python cli.py model train epl-2018 xgboost \
+  --id epl-xgb-result \
   --target result \
   --normalizer standard \
   --eval-size 20 \
+  --tune all \
+  --trials 25 \
+  --optuna-sampler tpe \
   --cv \
   --sliding-cv
 ```
@@ -75,10 +78,10 @@ python cli.py model train epl-2018 random-forest \
 ## Evaluation
 
 ```bash
-python cli.py model evaluate epl-2018 --model epl-rf-result --dataset all
+python cli.py model evaluate epl-2018 --model epl-xgb-result --dataset all
 
 python cli.py model evaluate epl-2018 \
-  --model epl-rf-result \
+  --model epl-xgb-result \
   --dataset eval \
   --odd-filter "1:1.31:1.60" \
   --p1 70 --px 60 --p2 70 \
@@ -89,7 +92,7 @@ python cli.py model evaluate epl-2018 \
 
 ```bash
 python cli.py predict manual epl-2018 \
-  --model epl-rf-result \
+  --model epl-xgb-result \
   --home Arsenal \
   --away Chelsea \
   --odd-1 2.10 \
@@ -97,7 +100,7 @@ python cli.py predict manual epl-2018 \
   --odd-2 3.10
 
 python cli.py predict fixtures epl-2018 \
-  --model epl-rf-result \
+  --model epl-xgb-result \
   --input fixtures.csv \
   --filters all \
   --output exports/fixtures.csv
@@ -116,8 +119,8 @@ python cli.py analysis variance epl-2018 --output outputs/variance.png
 python cli.py analysis correlation epl-2018 --method spearman --output outputs/correlation.png
 python cli.py analysis rules epl-2018 --target result --depth 4 --output outputs/rules.png
 
-python cli.py explain shap epl-2018 rf-result --target H --output outputs/shap.png
-python cli.py explain extra epl-2018 rf-result --plot impurity --output outputs/impurity.png
+python cli.py explain shap epl-2018 epl-xgb-result --target H --output outputs/shap.png
+python cli.py explain extra epl-2018 epl-xgb-result --plot impurity --output outputs/impurity.png
 ```
 
 ## Browser Configuration

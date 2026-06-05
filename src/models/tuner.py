@@ -1,6 +1,6 @@
 import optuna
 import pandas as pd
-from typing import Any, Dict, List, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 from src.models.trainer import Trainer
 
 
@@ -13,7 +13,10 @@ class Tuner:
             fixed_params: Dict[str, Any],
             tunable_params: Dict[str, Union[List, Dict[str, Any]]],
             df: pd.DataFrame,
-            metric: str
+            metric: str,
+            sampler: str = "tpe",
+            pruner: str = "none",
+            progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         """
             :param model_cls: The model instance to be created.
@@ -31,12 +34,26 @@ class Tuner:
         self._tunable_params = tunable_params
         self._metric = metric
         self._df = df
+        self._sampler_name = sampler
+        self._pruner_name = pruner
+        self._progress_callback = progress_callback
+        self._total_trials = 0
 
         self._trainer = Trainer()
 
-    def tune(self, trials: int) -> optuna.Study:
-        study = optuna.create_study(direction='maximize')
-        study.optimize(self._objective, n_trials=trials, show_progress_bar=True)
+    def tune(self, trials: int, show_progress_bar: bool = False) -> optuna.Study:
+        self._total_trials = trials
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=self._build_sampler(self._sampler_name),
+            pruner=self._build_pruner(self._pruner_name),
+        )
+        study.optimize(
+            self._objective,
+            n_trials=trials,
+            show_progress_bar=show_progress_bar,
+            callbacks=[self._on_trial_complete],
+        )
         return study
 
     def _objective(self, trial: optuna.Trial) -> float:
@@ -45,6 +62,9 @@ class Tuner:
         model = self._model_cls(**model_config)
         metrics_df = self._trainer.cross_validation(model=model, df=self._df)
         metric_score = metrics_df.loc[metrics_df['data'] == 'eval', self._metric].mean()
+        trial.report(metric_score, step=0)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
         return metric_score
 
     def _tune_params(self, trial: optuna.Trial) -> Dict[str, Union[List, Dict[str, Any]]]:
@@ -70,3 +90,44 @@ class Tuner:
 
             trial_params[param_name] = suggested_val
         return trial_params
+
+    def _on_trial_complete(self, study: optuna.Study, trial: optuna.trial.FrozenTrial):
+        if self._progress_callback is None:
+            return
+        try:
+            best_value = study.best_value
+            best_trial = study.best_trial.number + 1
+        except ValueError:
+            best_value = None
+            best_trial = None
+        self._progress_callback({
+            "stage": "tuning",
+            "current_trial": trial.number + 1,
+            "total_trials": self._total_trials,
+            "last_value": trial.value,
+            "last_state": trial.state.name,
+            "best_value": best_value,
+            "best_trial": best_trial,
+        })
+
+    @staticmethod
+    def _build_sampler(name: str) -> optuna.samplers.BaseSampler:
+        key = str(name or "tpe").strip().lower().replace("_", "-")
+        if key == "tpe":
+            return optuna.samplers.TPESampler(seed=0)
+        if key == "random":
+            return optuna.samplers.RandomSampler(seed=0)
+        if key in {"cmaes", "cma-es"}:
+            return optuna.samplers.CmaEsSampler(seed=0)
+        raise ValueError(f'Unknown Optuna sampler: "{name}".')
+
+    @staticmethod
+    def _build_pruner(name: str) -> optuna.pruners.BasePruner:
+        key = str(name or "none").strip().lower().replace("_", "-")
+        if key == "none":
+            return optuna.pruners.NopPruner()
+        if key == "median":
+            return optuna.pruners.MedianPruner(n_startup_trials=5)
+        if key in {"successive-halving", "successivehalving", "sha"}:
+            return optuna.pruners.SuccessiveHalvingPruner()
+        raise ValueError(f'Unknown Optuna pruner: "{name}".')

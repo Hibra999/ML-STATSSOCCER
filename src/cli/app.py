@@ -70,6 +70,7 @@ from src.interpretability.explainers.nn import NeuralNetworkExplainer
 from src.interpretability.explainers.randomforest import RandomForestExplainer
 from src.interpretability.explainers.svm import SVMExplainer
 from src.metrics.balance import compute_profit_balance
+from src.models.classifiers.boosting import CatBoost, LightGBM, NGBoost
 from src.models.classifiers.decisiontree import DecisionTree
 from src.models.classifiers.discriminant import DiscriminantAnalysisClassifier
 from src.models.classifiers.extremeboosting import XGBoost
@@ -107,6 +108,9 @@ EXPLAINER_BY_MODEL = {
     DiscriminantAnalysisClassifier: DiscriminantAnalysisExplainer,
     DecisionTree: DecisionTreeExplainer,
     RandomForest: RandomForestExplainer,
+    NGBoost: ExtremeBoostingExplainer,
+    CatBoost: ExtremeBoostingExplainer,
+    LightGBM: ExtremeBoostingExplainer,
     XGBoost: ExtremeBoostingExplainer,
     KNN: KNNExplainer,
     NaiveBayes: NaiveBayesExplainer,
@@ -256,6 +260,8 @@ def _build_model_parser(subparsers):
     train.add_argument("--sliding-cv", action=argparse.BooleanOptionalAction, default=True, help="Run sliding CV.")
     train.add_argument("--tune", help="Comma-separated tunable params, 'all' or 'none'.")
     train.add_argument("--trials", type=int, default=25, help="Optuna trials if tuning is enabled.")
+    train.add_argument("--optuna-sampler", choices=["tpe", "random", "cmaes", "cma-es"], default="tpe")
+    train.add_argument("--optuna-pruner", choices=["none", "median", "successive-halving"], default="none")
     train.add_argument("--objective", choices=["Accuracy", "F1", "Precision", "Recall"], default="Accuracy")
     train.add_argument("--export-metrics", help="Directory where metrics CSV files are exported.")
     add_model_specific_arguments(train)
@@ -648,6 +654,8 @@ def cmd_model_train(args):
         raise CLIError(f'Model "{model_id}" already exists for league "{league.league_id}".')
     if args.eval_size < 5 or args.eval_size > 30:
         raise CLIError("eval-size must be between 5 and 30 percent.")
+    if args.trials < 1:
+        raise CLIError("trials must be greater than or equal to 1.")
 
     model_config = build_model_params(args=args, league_id=league.league_id, model_id=model_id, model_key=model_key)
     model_config["train"] = {"eval_samples_size": float(args.eval_size), "results": {}}
@@ -666,11 +674,22 @@ def cmd_model_train(args):
             "cv": args.cv,
             "sliding_cv": args.sliding_cv,
             "tune": args.tune or "none",
+            "optuna_sampler": args.optuna_sampler,
+            "optuna_pruner": args.optuna_pruner,
         },
     )
 
     trainer = Trainer()
     tunable_params = tunable_params_for_args(args, spec)
+    optuna_summary = {
+        "enabled": bool(tunable_params),
+        "sampler": args.optuna_sampler,
+        "pruner": args.optuna_pruner,
+        "n_trials": args.trials if tunable_params else 0,
+        "objective": args.objective,
+        "best_score": "",
+        "best_params": {},
+    }
     if tunable_params:
         tuner = Tuner(
             model_cls=spec.model_cls,
@@ -678,12 +697,16 @@ def cmd_model_train(args):
             tunable_params=tunable_params,
             df=df,
             metric=args.objective,
+            sampler=args.optuna_sampler,
+            pruner=args.optuna_pruner,
         )
         with _spinner(f"Tuning {model_id} for {args.trials} trials..."):
-            study = tuner.tune(trials=args.trials)
+            study = tuner.tune(trials=args.trials, show_progress_bar=True)
         trials_df = _study_to_dataframe(study, args.objective)
         model_config["train"]["results"]["tune"] = trials_df
         model_config.update(**study.best_trial.params)
+        optuna_summary["best_score"] = study.best_value
+        optuna_summary["best_params"] = study.best_trial.params
         render_dataframe(trials_df, "Hyperparameter Tuning Results", max_rows=10)
 
     if args.cv:
@@ -716,6 +739,7 @@ def cmd_model_train(args):
     if isinstance(model, NeuralNetwork):
         model_config.update({"input_size": model.input_size, "num_classes": model.num_classes})
 
+    model_config["train"]["optuna"] = optuna_summary
     model_db.save_model(model=model, model_config=model_config)
     render_dataframe(fit_df, "Training Results", max_rows=10)
 
@@ -1177,10 +1201,11 @@ def _resolve_stats_columns(league: League, stats_arg: str) -> Optional[List[str]
 
 
 def _study_to_dataframe(study, metric: str) -> pd.DataFrame:
-    trials_df = study.trials_dataframe().drop(columns=["number", "datetime_start", "datetime_complete"], errors="ignore")
+    trials_df = study.trials_dataframe().drop(columns=["datetime_start", "datetime_complete"], errors="ignore")
     if "duration" in trials_df.columns:
         trials_df["duration"] = trials_df["duration"].dt.total_seconds() / 60
     trials_df = trials_df.rename(columns={
+        "number": "Trial",
         "value": metric,
         "duration": "Duration(m)",
         **{col: col.split("_", 1)[1] for col in trials_df.columns if col.startswith("params_")},

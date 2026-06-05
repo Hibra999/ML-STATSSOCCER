@@ -17,6 +17,7 @@ class Job:
     created_at: str
     updated_at: str
     result: Any = field(default_factory=dict)
+    progress: Any = field(default_factory=dict)
     error: str = ""
     traceback: str = ""
 
@@ -28,6 +29,7 @@ class Job:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "result": self.result,
+            "progress": self.progress,
             "error": self.error,
         }
 
@@ -38,13 +40,13 @@ class JobManager:
         self._jobs: Dict[str, Job] = {}
         self._lock = Lock()
 
-    def submit(self, message: str, fn: Callable, *args, **kwargs) -> Dict[str, Any]:
+    def submit(self, message: str, fn: Callable, *args, with_progress: bool = False, **kwargs) -> Dict[str, Any]:
         job_id = uuid.uuid4().hex
         now = self._now()
         job = Job(id=job_id, status="queued", message=message, created_at=now, updated_at=now)
         with self._lock:
             self._jobs[job_id] = job
-        self._executor.submit(self._run, job_id, fn, args, kwargs)
+        self._executor.submit(self._run, job_id, fn, args, kwargs, with_progress)
         return job.to_dict()
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
@@ -52,8 +54,10 @@ class JobManager:
             job = self._jobs.get(job_id)
             return None if job is None else job.to_dict()
 
-    def _run(self, job_id: str, fn: Callable, args: tuple, kwargs: dict):
+    def _run(self, job_id: str, fn: Callable, args: tuple, kwargs: dict, with_progress: bool):
         self._update(job_id, status="running")
+        if with_progress:
+            kwargs["progress_callback"] = lambda progress: self._update(job_id, progress=progress)
         try:
             result = fn(*args, **kwargs)
         except Exception as exc:
@@ -71,6 +75,7 @@ class JobManager:
             job_id: str,
             status: Optional[str] = None,
             result: Optional[Any] = None,
+            progress: Optional[Any] = None,
             error: Optional[str] = None,
             traceback_text: Optional[str] = None,
     ):
@@ -80,6 +85,8 @@ class JobManager:
                 job.status = status
             if result is not None:
                 job.result = result
+            if progress is not None:
+                job.progress = progress
             if error is not None:
                 job.error = error
             if traceback_text is not None:
