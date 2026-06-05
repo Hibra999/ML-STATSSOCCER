@@ -9,6 +9,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -90,8 +91,9 @@ DEFAULT_BROWSER_CONFIG = {
 }
 UPCOMING_FIXTURE_DAYS = 7
 DASHBOARD_FIXTURE_LIMIT = 5
+MEXICO_CITY_TZ = ZoneInfo("America/Mexico_City")
 PREDICT_FIXTURE_COLUMNS = ["Date", "Hora MX", "Home", "Away", "1", "X", "2"]
-DASHBOARD_FIXTURE_COLUMNS = ["Liga", "Pais", *PREDICT_FIXTURE_COLUMNS]
+DASHBOARD_FIXTURE_COLUMNS = ["Catalogo", "Liga", "Pais", *PREDICT_FIXTURE_COLUMNS]
 MODEL_LABELS_ES = {
     "ngboost": "NGBoost",
     "catboost": "CatBoost",
@@ -164,33 +166,29 @@ def dashboard_fixtures(limit: int = DASHBOARD_FIXTURE_LIMIT, days: int = UPCOMIN
     rows = []
     notes = []
 
-    for league_id in db.get_league_ids():
+    for league_index, league in enumerate(db.leagues, start=1):
         if len(rows) >= limit:
             break
-        league = db.index[league_id]
         if not league.fixture:
-            continue
-        league_df = db.load_league(league_id)
-        if league_df is None:
-            notes.append(f"{league_id}: datos locales no disponibles")
             continue
         try:
             fixture_df = scrape_upcoming_fixtures(
                 league=league,
-                league_df=league_df,
+                league_df=pd.DataFrame(),
                 days=days,
                 limit=limit - len(rows),
                 headless=None,
-                match_teams=True,
+                match_teams=False,
             )
         except Exception as exc:
-            notes.append(f"{league_id}: {clean_error_text(exc)}")
+            notes.append(f"{league_display_name(league)}: {clean_error_text(exc)}")
             continue
         if fixture_df.empty:
             continue
         fixture_df = fixture_df.copy()
         fixture_df.insert(0, "Pais", league.country)
-        fixture_df.insert(0, "Liga", league_id)
+        fixture_df.insert(0, "Liga", league_display_name(league))
+        fixture_df.insert(0, "Catalogo", league_index)
         rows.extend(fixture_df[DASHBOARD_FIXTURE_COLUMNS].to_dict(orient="records"))
 
     output_df = pd.DataFrame(rows, columns=DASHBOARD_FIXTURE_COLUMNS)
@@ -772,7 +770,8 @@ def scrape_upcoming_fixtures(
     if not league.fixture:
         return pd.DataFrame(columns=PREDICT_FIXTURE_COLUMNS)
 
-    target_dates = [date.today() + timedelta(days=offset) for offset in range(max(int(days or 1), 1))]
+    today_mx = datetime.now(tz=MEXICO_CITY_TZ).date()
+    target_dates = [today_mx + timedelta(days=offset) for offset in range(max(int(days or 1), 1))]
     footystats_dates = {
         target_date.strftime("%b %d").replace(" 0", " "): target_date
         for target_date in target_dates

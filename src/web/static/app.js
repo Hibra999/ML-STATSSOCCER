@@ -24,6 +24,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("refresh-btn").addEventListener("click", refreshAll);
   bindForms();
   setDefaultDates();
+  renderJobs();
   refreshAll();
   setInterval(pollJobs, 1800);
 });
@@ -61,12 +62,11 @@ async function refreshAll() {
     renderLeagues(leagues);
     fillConfig(config);
     renderDashboardFixtures(null);
+    loadDashboardFixtures();
+    renderJobs();
     if (leagues.length) {
       await refreshModelSelects();
       await loadData();
-      loadDashboardFixtures();
-    } else {
-      renderDashboardFixtures({ fixtures: { columns: [], rows: [], total: 0 }, notes: ["No hay ligas guardadas"], days: 7, limit: 5 });
     }
   } catch (error) {
     showError(error.message);
@@ -90,7 +90,11 @@ function renderDashboardFixtures(result) {
     notes.innerHTML = "";
     return;
   }
-  target.innerHTML = tableHtml(result.fixtures);
+  if (!result.fixtures || Number(result.fixtures.total || 0) === 0) {
+    target.innerHTML = `<div class="item"><div>No se encontraron partidos futuros en los proximos ${escapeHtml(result.days || 7)} dias</div></div>`;
+  } else {
+    target.innerHTML = tableHtml(result.fixtures);
+  }
   notes.innerHTML = (result.notes || []).slice(0, 4).map((note) => `<small>${escapeHtml(note)}</small>`).join("");
 }
 

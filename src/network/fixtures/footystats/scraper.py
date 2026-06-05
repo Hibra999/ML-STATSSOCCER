@@ -14,6 +14,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from src.network.netutils import check_internet_connection
 
 
+MEXICO_CITY_TIMEZONE = 'America/Mexico_City'
+
+
 def _build_chromium_options(headless: bool) -> ChromeOptions:
     options = ChromeOptions()
     options.add_argument('--incognito')
@@ -105,6 +108,16 @@ class FootyStatsScraper:
                 f'Navegador no implementado: "{browser}". '
                 f'Usa chrome, firefox, edge o brave.'
             )
+        self._set_mexico_city_timezone()
+
+    def _set_mexico_city_timezone(self):
+        try:
+            self._web_driver.execute_cdp_cmd(
+                'Emulation.setTimezoneOverride',
+                {'timezoneId': MEXICO_CITY_TIMEZONE},
+            )
+        except Exception:
+            logging.info('El navegador seleccionado no soporta override de zona horaria via CDP.')
 
     def load_page(self, fixture_url: str) -> bool:
         """Carga FootyStats y espera la tabla de partidos."""

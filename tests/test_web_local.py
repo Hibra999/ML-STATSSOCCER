@@ -34,6 +34,7 @@ def test_fastapi_app_imports_when_dependency_available():
     assert "/api/dashboard/fixtures" in paths
     assert "/api/leagues/{league_id}/fixtures/upcoming" in paths
     assert "/api/leagues/{league_id}/predict/manual" not in paths
+    assert "/favicon.ico" in paths
     assert "/assets" in paths
 
 
@@ -96,6 +97,7 @@ def test_predict_ui_uses_automatic_fixtures_only():
     assert "fixtures-browser" in index_source
     assert "fixtures-picker" in index_source
     assert "dashboard-fixtures" in index_source
+    assert "renderJobs();" in app_source
 
 
 def test_confusion_matrix_payload_for_result_target():
@@ -122,22 +124,17 @@ def test_fixture_rows_from_payload_requires_selected_rows():
         services.fixture_rows_from_payload([])
 
 
-def test_dashboard_fixtures_uses_saved_leagues_and_limits(monkeypatch):
+def test_dashboard_fixtures_uses_catalog_leagues_and_limits(monkeypatch):
     from src.web import services
 
     class FakeLeagueDatabase:
         def __init__(self):
-            self.index = {
-                "mx": SimpleNamespace(country="Mexico", fixture="https://example.test/fixtures")
-            }
-
-        def get_league_ids(self):
-            return ["mx"]
-
-        def load_league(self, league_id):
-            return pd.DataFrame({"Home": ["A"], "Away": ["B"]})
+            self.leagues = [
+                SimpleNamespace(country="Mexico", name="Liga-MX", fixture="https://example.test/fixtures")
+            ]
 
     def fake_scrape_upcoming_fixtures(**kwargs):
+        assert kwargs["match_teams"] is False
         return pd.DataFrame([
             {"Date": "2026-06-05", "Hora MX": "18:00", "Home": "A", "Away": "B", "1": 1.8, "X": 3.2, "2": 4.0},
             {"Date": "2026-06-06", "Hora MX": "20:00", "Home": "C", "Away": "D", "1": 2.1, "X": 3.1, "2": 3.4},
@@ -149,5 +146,6 @@ def test_dashboard_fixtures_uses_saved_leagues_and_limits(monkeypatch):
     result = services.dashboard_fixtures(limit=1, days=7)
 
     assert result["fixtures"]["total"] == 1
-    assert result["fixtures"]["rows"][0]["Liga"] == "mx"
+    assert result["fixtures"]["rows"][0]["Catalogo"] == 1
+    assert result["fixtures"]["rows"][0]["Liga"] == "Mexico / Liga-MX"
     assert result["fixtures"]["rows"][0]["Hora MX"] == "18:00"

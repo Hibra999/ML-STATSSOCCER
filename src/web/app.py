@@ -4,7 +4,7 @@ import os
 from typing import Any, Dict, Optional
 
 from fastapi import Body, FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -38,6 +38,10 @@ def create_app() -> FastAPI:
     @app.get("/")
     def index():
         return FileResponse("src/web/static/index.html")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return Response(status_code=204)
 
     @app.get("/api/health")
     def health():
