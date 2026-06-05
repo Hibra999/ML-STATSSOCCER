@@ -7,8 +7,7 @@ ML-STATSSOCCER es una aplicacion local para analisis y prediccion de partidos de
 - Gestion de ligas historicas.
 - Exploracion y exportacion de datasets.
 - Entrenamiento y evaluacion de modelos.
-- Prediccion manual de partidos.
-- Prediccion de fixtures desde archivo o scraping.
+- Prediccion automatica de futuros partidos desde scraping.
 - Analisis estadistico e interpretabilidad.
 - Configuracion local del navegador para scraping.
 
@@ -79,16 +78,14 @@ python cli.py league list --catalog
 python cli.py model list epl-2018
 ```
 
-Ejemplo de prediccion manual:
+Ejemplo de prediccion de fixtures:
 
 ```bash
-python cli.py predict manual epl-2018 \
+python cli.py predict fixtures epl-2018 \
   --model xgb-result \
-  --home Arsenal \
-  --away Chelsea \
-  --odd-1 2.10 \
-  --odd-x 3.40 \
-  --odd-2 3.10
+  --date 2026-06-05 \
+  --filters all \
+  --output exports/fixtures.csv
 ```
 
 ## Modelos Soportados

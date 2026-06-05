@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=20260605-2">
 </head>
 <body>
   <div class="app-shell">
@@ -37,15 +37,15 @@
       <section id="alert" class="alert hidden"></section>
 
       <section id="dashboard" class="view active">
+        <div class="panel">
+          <div class="panel-header"><h2>Dashboard de proximos partidos</h2></div>
+          <div id="dashboard-fixtures" class="output"></div>
+          <div id="dashboard-fixture-notes" class="fixture-notes"></div>
+        </div>
         <div class="metric-grid">
           <div class="metric"><span>Ligas</span><strong id="metric-leagues">0</strong></div>
           <div class="metric"><span>Modelos</span><strong id="metric-models">0</strong></div>
           <div class="metric"><span>Servidor</span><strong>Local</strong></div>
-        </div>
-        <div class="panel">
-          <div class="panel-header"><h2>Proximos 5 partidos</h2></div>
-          <div id="dashboard-fixtures" class="output"></div>
-          <div id="dashboard-fixture-notes" class="fixture-notes"></div>
         </div>
         <div class="panel">
           <div class="panel-header"><h2>Procesos</h2></div>
@@ -212,6 +212,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260605-2"></script>
 </body>
 </html>

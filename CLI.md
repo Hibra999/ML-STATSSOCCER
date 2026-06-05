@@ -91,14 +91,6 @@ python cli.py model evaluate epl-2018 \
 ## Predictions
 
 ```bash
-python cli.py predict manual epl-2018 \
-  --model epl-xgb-result \
-  --home Arsenal \
-  --away Chelsea \
-  --odd-1 2.10 \
-  --odd-x 3.40 \
-  --odd-2 3.10
-
 python cli.py predict fixtures epl-2018 \
   --model epl-xgb-result \
   --input fixtures.csv \

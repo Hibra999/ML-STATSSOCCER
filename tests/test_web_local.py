@@ -91,12 +91,14 @@ def test_predict_ui_uses_automatic_fixtures_only():
     index_source = open("src/web/static/index.html", "r", encoding="utf-8").read()
     app_source = open("src/web/static/app.js", "r", encoding="utf-8").read()
 
+    assert index_source.index("dashboard-fixtures") < index_source.index("metric-grid")
     assert "manual-form" not in index_source
     assert "predict/manual" not in app_source
     assert 'type="file"' not in index_source
     assert "fixtures-browser" in index_source
     assert "fixtures-picker" in index_source
     assert "dashboard-fixtures" in index_source
+    assert "/static/app.js?v=" in index_source
     assert "renderJobs();" in app_source
 
 

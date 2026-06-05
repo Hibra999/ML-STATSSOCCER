@@ -89,7 +89,7 @@ from src.network.leagues.downloaders.main import MainLeagueDownloader
 from src.network.leagues.league import League
 from src.preprocessing.selection import train_test_split
 from src.preprocessing.statistics import StatisticsEngine
-from src.preprocessing.utils.inputs import construct_inputs_by_fixture, construct_inputs_by_teams
+from src.preprocessing.utils.inputs import construct_inputs_by_fixture
 from src.preprocessing.utils.target import TargetType, construct_targets
 
 
@@ -298,19 +298,8 @@ def _build_model_parser(subparsers):
 
 
 def _build_predict_parser(subparsers):
-    predict = subparsers.add_parser("predict", help="Manual and fixture predictions.")
+    predict = subparsers.add_parser("predict", help="Predict upcoming fixtures.")
     predict_sub = predict.add_subparsers(dest="predict_command", required=True)
-
-    manual = predict_sub.add_parser("manual", help="Predict one manually entered match.")
-    manual.add_argument("league_id")
-    manual.add_argument("--model", dest="model_id", required=True)
-    manual.add_argument("--home")
-    manual.add_argument("--away")
-    manual.add_argument("--odd-1", type=float)
-    manual.add_argument("--odd-x", type=float)
-    manual.add_argument("--odd-2", type=float)
-    manual.add_argument("--output", help="Export prediction to CSV/XLSX.")
-    manual.set_defaults(handler=cmd_predict_manual)
 
     fixtures = predict_sub.add_parser("fixtures", help="Predict upcoming fixtures from FootyStats or a CSV file.")
     fixtures.add_argument("league_id")
@@ -830,44 +819,6 @@ def cmd_model_delete(args):
     confirm_or_abort(f'Delete model "{args.model_id}" from league "{args.league_id}"?', assume_yes=args.yes)
     model_db.delete_model(args.model_id)
     print_success(f'Model "{args.model_id}" deleted.')
-
-
-def cmd_predict_manual(args):
-    _, league, df = _load_league(args.league_id)
-    model_db = ModelDatabase(league_id=league.league_id)
-    model, config = _load_model(model_db, args.model_id)
-
-    home_teams = sorted(df["Home"].dropna().unique().tolist())
-    away_teams = sorted(df["Away"].dropna().unique().tolist())
-    home = args.home or prompt_choice("Home Teams", home_teams)
-    away = args.away or prompt_choice("Away Teams", away_teams)
-    if home not in home_teams:
-        raise CLIError(f'Unknown home team "{home}".')
-    if away not in away_teams:
-        raise CLIError(f'Unknown away team "{away}".')
-    if home == away:
-        raise CLIError("Home and away teams must be different.")
-
-    odd_1 = _valid_odd(args.odd_1 if args.odd_1 is not None else float(prompt_text("Odd 1", "1.50")))
-    odd_x = _valid_odd(args.odd_x if args.odd_x is not None else float(prompt_text("Odd X", "3.00")))
-    odd_2 = _valid_odd(args.odd_2 if args.odd_2 is not None else float(prompt_text("Odd 2", "2.50")))
-
-    match_df = pd.DataFrame({
-        "Date": [date.today().strftime("%Y-%m-%d")],
-        "Home": [home],
-        "Away": [away],
-        "1": [odd_1],
-        "X": [odd_x],
-        "2": [odd_2],
-    })
-    prepared_df = construct_inputs_by_teams(df=df, match_df=match_df)
-    y_prob = model.predict_proba(df=prepared_df).round(2)
-    y_pred = y_prob.argmax(axis=1)
-    output_df = prepared_df[["Date", "Season", "Week", "Home", "Away", "1", "X", "2"]].copy()
-    output_df = _append_prediction_columns(output_df, target_type=config["target_type"], y_pred=y_pred, y_prob=y_prob)
-    render_dataframe(output_df, "Manual Prediction", max_rows=5)
-    if args.output:
-        export_dataframe(output_df, args.output)
 
 
 def cmd_predict_fixtures(args):

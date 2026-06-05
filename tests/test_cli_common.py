@@ -39,6 +39,17 @@ def test_run_without_args_shows_web_help(capsys):
     assert "chat" not in captured.out.lower()
 
 
+def test_predict_cli_no_longer_exposes_manual(capsys):
+    parser = cli_app.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["predict", "--help"])
+
+    captured = capsys.readouterr()
+    assert "fixtures" in captured.out
+    assert "manual" not in captured.out.lower()
+
+
 def test_model_aliases_only_resolve_supported_boosting_models():
     assert normalize_model_key("ngb") == "ngboost"
     assert normalize_model_key("cat") == "catboost"

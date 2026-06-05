@@ -30,6 +30,13 @@ def create_app() -> FastAPI:
     app = FastAPI(title="ML-STATSSOCCER Web Local", docs_url="/api/docs", redoc_url=None)
     app.add_middleware(LocalOnlyMiddleware)
 
+    @app.middleware("http")
+    async def no_cache_static_assets(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+        return response
+
     services.OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory="src/web/static"), name="static")
     app.mount("/assets", StaticFiles(directory="storage"), name="assets")
