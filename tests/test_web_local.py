@@ -100,6 +100,7 @@ def test_predict_ui_uses_automatic_fixtures_only():
     assert "dashboard-fixtures" in index_source
     assert "/static/app.js?v=" in index_source
     assert "renderJobs();" in app_source
+    assert "dashboardFixtureSummaryHtml" in app_source
 
 
 def test_confusion_matrix_payload_for_result_target():
@@ -148,6 +149,26 @@ def test_dashboard_fixtures_uses_catalog_leagues_and_limits(monkeypatch):
     result = services.dashboard_fixtures(limit=1, days=7)
 
     assert result["fixtures"]["total"] == 1
+    assert result["summary"]["catalog_total"] == 1
+    assert result["summary"]["attempted"] == 1
+    assert result["summary"]["with_fixtures"] == 1
+    assert result["summary"]["shown"] == 1
     assert result["fixtures"]["rows"][0]["Catalogo"] == 1
     assert result["fixtures"]["rows"][0]["Liga"] == "Mexico / Liga-MX"
     assert result["fixtures"]["rows"][0]["Hora MX"] == "18:00"
+
+
+def test_dashboard_error_notes_are_grouped():
+    from src.web import services
+
+    notes = services.compact_dashboard_errors([
+        {"league": "Argentina / Primera-Division", "message": "No se pudo cargar FootyStats."},
+        {"league": "Belgium / Jupiler-League", "message": "No se pudo cargar FootyStats."},
+        {"league": "Brazil / Serie-A", "message": "No se pudo cargar FootyStats."},
+        {"league": "China / Super-League", "message": "No se pudo cargar FootyStats."},
+    ])
+
+    assert len(notes) == 1
+    assert notes[0].startswith("4 ligas fallaron")
+    assert "Argentina / Primera-Division" in notes[0]
+    assert "y 1 mas" in notes[0]

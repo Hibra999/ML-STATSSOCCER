@@ -163,14 +163,21 @@ def dashboard_fixtures(limit: int = DASHBOARD_FIXTURE_LIMIT, days: int = UPCOMIN
     db = LeagueDatabase()
     limit = min(max(int(limit or DASHBOARD_FIXTURE_LIMIT), 1), 25)
     days = min(max(int(days or UPCOMING_FIXTURE_DAYS), 1), 30)
+    catalog_total = sum(1 for league in db.leagues if league.fixture)
+    attempted = 0
+    failed = 0
+    empty = 0
+    with_fixtures = 0
+    found = 0
     rows = []
-    notes = []
+    errors = []
 
     for league_index, league in enumerate(db.leagues, start=1):
         if len(rows) >= limit:
             break
         if not league.fixture:
             continue
+        attempted += 1
         try:
             fixture_df = scrape_upcoming_fixtures(
                 league=league,
@@ -181,10 +188,14 @@ def dashboard_fixtures(limit: int = DASHBOARD_FIXTURE_LIMIT, days: int = UPCOMIN
                 match_teams=False,
             )
         except Exception as exc:
-            notes.append(f"{league_display_name(league)}: {clean_error_text(exc)}")
+            failed += 1
+            errors.append({"league": league_display_name(league), "message": clean_error_text(exc)})
             continue
         if fixture_df.empty:
+            empty += 1
             continue
+        with_fixtures += 1
+        found += int(fixture_df.shape[0])
         fixture_df = fixture_df.copy()
         fixture_df.insert(0, "Pais", league.country)
         fixture_df.insert(0, "Liga", league_display_name(league))
@@ -196,7 +207,16 @@ def dashboard_fixtures(limit: int = DASHBOARD_FIXTURE_LIMIT, days: int = UPCOMIN
         output_df = output_df.sort_values(["Date", "Hora MX", "Liga"], kind="stable").head(limit).reset_index(drop=True)
     return {
         "fixtures": table_payload(output_df, page=1, page_size=limit),
-        "notes": notes,
+        "notes": compact_dashboard_errors(errors),
+        "summary": {
+            "catalog_total": catalog_total,
+            "attempted": attempted,
+            "failed": failed,
+            "empty": empty,
+            "with_fixtures": with_fixtures,
+            "found": found,
+            "shown": int(output_df.shape[0]),
+        },
         "days": days,
         "limit": limit,
     }
@@ -983,6 +1003,18 @@ def normalize_optuna_choice(value: Any, allowed: set[str], label: str) -> str:
 
 def clean_error_text(exc: Exception) -> str:
     return re.sub(r"^(CLIError|ValueError|RuntimeError|NotImplementedError):\s*", "", f"{exc.__class__.__name__}: {exc}")
+
+
+def compact_dashboard_errors(errors: List[Dict[str, str]]) -> List[str]:
+    grouped: Dict[str, List[str]] = {}
+    for error in errors:
+        grouped.setdefault(error["message"], []).append(error["league"])
+    notes = []
+    for message, leagues in grouped.items():
+        examples = ", ".join(leagues[:3])
+        more = "" if len(leagues) <= 3 else f" y {len(leagues) - 3} mas"
+        notes.append(f"{len(leagues)} ligas fallaron: {message}. Ejemplos: {examples}{more}")
+    return notes
 
 
 def emit_training_progress(callback, stage: str, current: int, total: int, message: str, **extra):

@@ -135,6 +135,8 @@ class FootyStatsScraper:
                 EC.presence_of_element_located((By.CSS_SELECTOR, 'div.full-matches-table'))
             )
         except Exception as _:
+            if 'full-matches-table' in self._web_driver.page_source:
+                return True
             logging.info('Se agoto el tiempo de espera para cargar la tabla de partidos.')
             return False
 
@@ -165,10 +167,10 @@ class FootyStatsScraper:
             return matches[0] if matches else 'No disponible'
 
         tree = html.fromstring(self._web_driver.page_source)
-        table_elements = tree.xpath('//div[contains(@class, "full-matches-table mt1e")]')
+        table_elements = tree.xpath('//div[contains(@class, "full-matches-table")]')
 
         if len(table_elements) == 0:
-            raise RuntimeError('No se encontro la tabla "full-matches-table mt1e".')
+            raise RuntimeError('No se encontro la tabla "full-matches-table".')
 
         # Searching the requested table by date.
         formatted_date_str = f'{date_str} ~'
@@ -180,7 +182,7 @@ class FootyStatsScraper:
                 continue
 
             # if date_element.text == formatted_date_str:
-            if date_element.text_content().strip() == formatted_date_str:
+            if date_element.text_content().strip().startswith(formatted_date_str):
                 requested_table = table
                 break
 

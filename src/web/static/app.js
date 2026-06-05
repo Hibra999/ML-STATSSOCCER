@@ -95,7 +95,19 @@ function renderDashboardFixtures(result) {
   } else {
     target.innerHTML = tableHtml(result.fixtures);
   }
-  notes.innerHTML = (result.notes || []).slice(0, 4).map((note) => `<small>${escapeHtml(note)}</small>`).join("");
+  notes.innerHTML = dashboardFixtureSummaryHtml(result.summary) + (result.notes || []).map((note) => `<small>${escapeHtml(note)}</small>`).join("");
+}
+
+function dashboardFixtureSummaryHtml(summary) {
+  if (!summary) return "";
+  return `<small>
+    Catalogo ${escapeHtml(summary.catalog_total || 0)} ligas -
+    revisadas ${escapeHtml(summary.attempted || 0)} -
+    con partidos ${escapeHtml(summary.with_fixtures || 0)} -
+    encontrados ${escapeHtml(summary.found || 0)} -
+    mostrados ${escapeHtml(summary.shown || 0)} -
+    errores ${escapeHtml(summary.failed || 0)}
+  </small>`;
 }
 
 function bindForms() {
