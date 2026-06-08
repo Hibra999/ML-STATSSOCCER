@@ -34,6 +34,7 @@ imbalanced-learn==0.13.0
 joblib==1.5.1
 keras==2.15.0
 kiwisolver==1.4.8
+lanusstats==2.1.11
 Levenshtein==0.27.1
 lightgbm>=4.6.0
 libclang==18.1.1

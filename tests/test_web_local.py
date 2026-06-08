@@ -32,6 +32,10 @@ def test_fastapi_app_imports_when_dependency_available():
     assert "/api/health" in paths
     assert "/api/leagues" in paths
     assert "/api/dashboard/fixtures" in paths
+    assert "/api/worldcup/overview" in paths
+    assert "/api/worldcup/simulate" in paths
+    assert "/api/worldcup/lineups" in paths
+    assert "/api/worldcup/fixtures/{fixture_id}/lineups" in paths
     assert "/api/leagues/{league_id}/fixtures/upcoming" in paths
     assert "/api/leagues/{league_id}/predict/manual" not in paths
     assert "/favicon.ico" in paths
@@ -98,9 +102,122 @@ def test_predict_ui_uses_automatic_fixtures_only():
     assert "fixtures-browser" in index_source
     assert "fixtures-picker" in index_source
     assert "dashboard-fixtures" in index_source
+    assert "Mundial 2026" in index_source
+    assert "/api/worldcup/simulate" in app_source
+    assert "worldcup-lineup-fixture" in index_source
+    assert "worldcup-use-lineups" in index_source
     assert "/static/app.js?v=" in index_source
     assert "renderJobs();" in app_source
     assert "dashboardFixtureSummaryHtml" in app_source
+
+
+def test_worldcup_fallback_has_2026_groups_opener_and_bracket():
+    from src.worldcup.data import fallback_tournament_2026, group_stage_matches, groups_dataframe, knockout_matches
+
+    tournament = fallback_tournament_2026()
+    groups = groups_dataframe(tournament)
+    group_matches = group_stage_matches(tournament)
+    knockouts = knockout_matches(tournament)
+
+    assert groups.shape[0] == 48
+    assert group_matches[0]["date"] == "2026-06-11"
+    assert group_matches[0]["team1"] == "Mexico"
+    assert group_matches[0]["team2"] == "South Africa"
+    assert len(group_matches) == 72
+    assert len(knockouts) == 31
+
+
+def test_worldcup_match_probabilities_are_normalized():
+    from src.worldcup.data import FALLBACK_2026_GROUPS
+    from src.worldcup.model import WorldCupModel
+
+    teams = [team for group in FALLBACK_2026_GROUPS.values() for team in group]
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=teams)
+    probabilities = model.match_probabilities("Mexico", "South Africa")
+
+    assert probabilities["home"] + probabilities["draw"] + probabilities["away"] == pytest.approx(1, abs=0.01)
+    assert probabilities["over25"] + probabilities["under25"] == pytest.approx(1, abs=0.01)
+    assert probabilities["lambda1"] > 0
+    assert probabilities["lambda2"] > 0
+
+
+def test_worldcup_simulation_returns_advancement_probabilities():
+    from src.worldcup.data import FALLBACK_2026_GROUPS, fallback_tournament_2026
+    from src.worldcup.model import WorldCupModel
+    from src.worldcup.simulation import simulate_worldcup
+
+    tournament = fallback_tournament_2026()
+    teams = [team for group in FALLBACK_2026_GROUPS.values() for team in group]
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=teams)
+    result = simulate_worldcup(tournament, model, iterations=100, seed=7)
+
+    assert result["advancement"].shape[0] == 48
+    assert result["matches"].shape[0] == 72
+    assert "Pasa grupo %" in result["advancement"].columns
+    assert "Over 2.5 %" in result["matches"].columns
+    assert result["advancement"]["Campeon %"].sum() == pytest.approx(100, abs=0.01)
+
+
+def test_worldcup_lanus_lineup_normalization_extracts_starting_elevens():
+    from src.worldcup.lanus_provider import LINEUP_STATUSES, normalize_lanus_lineups
+
+    fixture = pd.Series({"No.": 1, "Fecha": "2026-06-11", "Grupo": "Group A", "Equipo 1": "Mexico", "Equipo 2": "South Africa"})
+    raw = {
+        "confirmed": True,
+        "home": {"formation": "4-3-3", "players": [_fake_lanus_player(index, False) for index in range(1, 12)] + [_fake_lanus_player(12, True)]},
+        "away": {"formation": "4-2-3-1", "players": [_fake_lanus_player(index, False) for index in range(21, 32)]},
+    }
+
+    result = normalize_lanus_lineups(raw, fixture=fixture, fixture_key="1", match_url="https://www.sofascore.com/test#id:1", fetched_at="2026-06-10T18:00:00+00:00")
+
+    assert result["status"] == LINEUP_STATUSES["official"]
+    assert result["starters_home"] == 11
+    assert result["starters_away"] == 11
+    assert len([player for player in result["players"] if player["team"] == "Mexico" and player["starter"]]) == 11
+    assert result["formation_home"] == "4-3-3"
+
+
+def test_worldcup_lineup_fallback_pending_without_match_url(tmp_path, monkeypatch):
+    from src.worldcup import lanus_provider
+    from src.worldcup.data import fallback_tournament_2026
+
+    monkeypatch.setattr(lanus_provider, "LINEUPS_ROOT", tmp_path)
+    monkeypatch.setattr(lanus_provider, "LINEUP_LINKS_FILE", tmp_path / "links.json")
+
+    result = lanus_provider.lineup_payload_for_fixture(fallback_tournament_2026(), fixture_id=1)
+
+    assert result["status"] == lanus_provider.LINEUP_STATUSES["pending"]
+    assert result["starters_home"] == 0
+    assert result["starters_away"] == 0
+    assert result["source"] == "unavailable:lineups"
+
+
+def test_worldcup_lineup_rating_adjustments_use_safe_cached_lineups(tmp_path, monkeypatch):
+    from src.worldcup import lanus_provider
+    from src.worldcup.data import fallback_tournament_2026
+
+    monkeypatch.setattr(lanus_provider, "LINEUPS_ROOT", tmp_path)
+    monkeypatch.setattr(lanus_provider, "LINEUP_LINKS_FILE", tmp_path / "links.json")
+    payload = {
+        "fixture_id": "1",
+        "date": "2026-06-11",
+        "status": lanus_provider.LINEUP_STATUSES["official"],
+        "home": "Mexico",
+        "away": "South Africa",
+        "players": [
+            {"team": "Mexico", "starter": True, "rating": 7.2} for _ in range(11)
+        ] + [
+            {"team": "South Africa", "starter": True, "rating": 6.2} for _ in range(11)
+        ],
+        "fetched_at": "2026-06-10T18:00:00+00:00",
+    }
+    lanus_provider.write_lineup_cache(lanus_provider.lineup_cache_path("1"), payload)
+
+    adjustments, notes = lanus_provider.lineup_rating_adjustments(fallback_tournament_2026())
+
+    assert adjustments["Mexico"] > 0
+    assert adjustments["South Africa"] < 0
+    assert notes
 
 
 def test_confusion_matrix_payload_for_result_target():
@@ -118,6 +235,17 @@ def test_confusion_matrix_payload_for_result_target():
         {"Real": "D", "Pred H": 0, "Pred D": 1, "Pred A": 0},
         {"Real": "A", "Pred H": 1, "Pred D": 0, "Pred A": 1},
     ]
+
+
+def _fake_lanus_player(index: int, substitute: bool):
+    return {
+        "player": {"id": index, "name": f"Player {index}", "position": "M"},
+        "shirtNumber": index,
+        "position": "M",
+        "substitute": substitute,
+        "captain": index == 1,
+        "statistics": {"rating": 7.1},
+    }
 
 
 def test_fixture_rows_from_payload_requires_selected_rows():

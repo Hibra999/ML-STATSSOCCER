@@ -66,6 +66,46 @@ def create_app() -> FastAPI:
     def model_specs():
         return _wrap(services.model_specs)
 
+    @app.get("/api/worldcup/overview")
+    def worldcup_overview(refresh: bool = False):
+        return _wrap(services.worldcup_overview, refresh)
+
+    @app.get("/api/worldcup/groups")
+    def worldcup_groups(refresh: bool = False):
+        return _wrap(services.worldcup_groups, refresh)
+
+    @app.get("/api/worldcup/fixtures")
+    def worldcup_fixtures(refresh: bool = False):
+        return _wrap(services.worldcup_fixtures, refresh)
+
+    @app.get("/api/worldcup/teams")
+    def worldcup_teams(refresh: bool = False):
+        return _wrap(services.worldcup_teams, refresh)
+
+    @app.get("/api/worldcup/players")
+    def worldcup_players(refresh: bool = False):
+        return _wrap(services.worldcup_players, refresh)
+
+    @app.get("/api/worldcup/lineups")
+    def worldcup_lineups(refresh: bool = False):
+        return _wrap(services.worldcup_lineups, refresh)
+
+    @app.get("/api/worldcup/fixtures/{fixture_id}/lineups")
+    def worldcup_fixture_lineup(fixture_id: str, refresh: bool = False):
+        return _wrap(services.worldcup_fixture_lineup, fixture_id, refresh)
+
+    @app.post("/api/worldcup/fixtures/{fixture_id}/lineups/refresh")
+    def worldcup_refresh_fixture_lineup(fixture_id: str, payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.worldcup_refresh_fixture_lineup, fixture_id, payload)
+
+    @app.post("/api/worldcup/fixtures/{fixture_id}/lineups/link")
+    def worldcup_link_fixture_lineup(fixture_id: str, payload: Dict[str, Any] = Body(...)):
+        return _wrap(services.worldcup_link_fixture_lineup, fixture_id, payload)
+
+    @app.post("/api/worldcup/simulate")
+    def worldcup_simulate(payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.worldcup_simulate, payload)
+
     @app.get("/api/leagues/catalog")
     def catalog_leagues():
         return _wrap(services.catalog_leagues)
