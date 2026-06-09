@@ -174,13 +174,19 @@ def dataset_status() -> Dict[str, Any]:
     files = list(discover_dataset_files(KAGGLE_ROOT))
     normalized = normalize_dataset_files(files)
     model_meta = read_model_metadata()
+    train_rows = labeled_train_row_count(normalized)
+    test_rows = labeled_test_row_count(normalized)
+    eval_strategy = evaluation_strategy(normalized)
     return {
         "dataset_slug": KAGGLE_DATASET_SLUG,
         "local_path": str(KAGGLE_ROOT),
         "files": [str(path) for path in files],
         "available": bool(files),
-        "train_rows": int(normalized["train"].shape[0] or normalized["team_train"].shape[0]),
-        "test_rows": int(normalized["test"].shape[0] or normalized["team_test"].shape[0]),
+        "train_rows": train_rows,
+        "test_rows": test_rows,
+        "eval_rows": test_rows if test_rows else planned_holdout_rows(train_rows),
+        "prediction_rows": int(normalized["team_prediction"].shape[0]),
+        "eval_strategy": eval_strategy,
         "team_feature_rows": int(normalized["team_features"].shape[0]),
         "target_column": normalized["target_column"],
         "team_columns": normalized["team_columns"],
@@ -216,12 +222,14 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
     )
     feature_store = normalized["team_features"]
     target_warning = ""
+    eval_strategy = "unavailable"
     if normalized["training_mode"] == "team_strength":
         effective_target = "team_strength"
         if train_config["training_target"] == "over_under_25":
             target_warning = "El dataset Kaggle de equipos no permite entrenar Over/Under 2.5; U/O queda con Poisson."
         x_train, y_train, feature_columns = build_team_training_matrix(normalized["team_train"])
         if normalized["team_test"].empty or "Label" not in normalized["team_test"].columns or normalized["team_test"]["Label"].dropna().empty:
+            eval_strategy = "holdout_from_train"
             x_train, x_eval, y_train, y_eval = safe_train_eval_split(
                 x_train,
                 y_train,
@@ -229,6 +237,7 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
                 random_state=train_config["seed"],
             )
         else:
+            eval_strategy = "test_file"
             x_eval, y_eval, _ = build_team_training_matrix(normalized["team_test"], feature_columns=feature_columns)
     else:
         effective_target = train_config["training_target"]
@@ -237,6 +246,7 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
             target_warning = "El dataset no tiene goles suficientes para entrenar Over/Under 2.5; U/O queda con Poisson."
         x_train, y_train, feature_columns = build_training_matrix(train_rows, base_model, feature_store, target=effective_target)
         if test_rows.empty:
+            eval_strategy = "holdout_from_train"
             x_train, x_eval, y_train, y_eval = safe_train_eval_split(
                 x_train,
                 y_train,
@@ -244,6 +254,7 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
                 random_state=train_config["seed"],
             )
         else:
+            eval_strategy = "test_file"
             x_eval, y_eval, _ = build_training_matrix(test_rows, base_model, feature_store, feature_columns=feature_columns, target=effective_target)
 
     if x_train.empty or pd.Series(y_train).dropna().empty:
@@ -282,6 +293,8 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "classes": label_classes,
         "encoded_classes": list(range(len(label_classes))),
         "mode": normalized["training_mode"],
+        "eval_strategy": eval_strategy,
+        "prediction_rows": int(normalized["team_prediction"].shape[0]),
         "effective_target": effective_target,
         "requested_target": train_config["training_target"],
         "target_column": normalized["target_column"],
@@ -302,6 +315,8 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "eval_rows": int(len(y_eval)),
         "source": KAGGLE_DATASET_SLUG,
         "mode": normalized["training_mode"],
+        "eval_strategy": eval_strategy,
+        "prediction_rows": int(normalized["team_prediction"].shape[0]),
         "effective_target": effective_target,
         "requested_target": train_config["training_target"],
         "model_type": train_config["model_type"],
@@ -378,27 +393,31 @@ def normalize_dataset_files(files: Iterable[Path]) -> Dict[str, Any]:
     team_feature_frames = []
     team_train_frames = []
     team_test_frames = []
+    team_prediction_frames = []
     target_column = ""
     team_columns: List[str] = []
     for path in files:
         raw = read_table(path)
         if raw.empty:
             continue
+        is_test_like = is_test_or_eval_file(path)
         standardized = standardize_match_rows(raw, source=str(path))
         team_features = extract_team_features(raw, source=str(path))
         if not team_features.empty:
             team_feature_frames.append(team_features)
         team_rows = standardize_team_target_rows(raw, source=str(path))
         if not team_rows.empty:
-            if "test" in path.name.lower() or "eval" in path.name.lower():
+            if is_test_like:
                 team_test_frames.append(team_rows)
             else:
                 team_train_frames.append(team_rows)
+        elif is_test_like and not team_features.empty:
+            team_prediction_frames.append(team_features)
         if not standardized.empty:
             all_frames.append(standardized)
             if "train" in path.name.lower():
                 train_frames.append(standardized)
-            elif "test" in path.name.lower() or "eval" in path.name.lower():
+            elif is_test_like:
                 test_frames.append(standardized)
             else:
                 train_frames.append(standardized)
@@ -413,6 +432,7 @@ def normalize_dataset_files(files: Iterable[Path]) -> Dict[str, Any]:
     test_df = pd.concat(test_frames, ignore_index=True) if test_frames else pd.DataFrame()
     team_train_df = pd.concat(team_train_frames, ignore_index=True) if team_train_frames else pd.DataFrame()
     team_test_df = pd.concat(team_test_frames, ignore_index=True) if team_test_frames else pd.DataFrame()
+    team_prediction_df = pd.concat(team_prediction_frames, ignore_index=True) if team_prediction_frames else pd.DataFrame()
     team_features_df = merge_team_features(team_feature_frames)
     training_mode = "match_result" if not train_df.empty else "team_strength" if not team_train_df.empty else ""
     preview_source = train_df if not train_df.empty else team_train_df if not team_train_df.empty else pd.concat(all_frames, ignore_index=True) if all_frames else pd.DataFrame()
@@ -422,6 +442,7 @@ def normalize_dataset_files(files: Iterable[Path]) -> Dict[str, Any]:
         "test": test_df,
         "team_train": team_train_df,
         "team_test": team_test_df,
+        "team_prediction": team_prediction_df,
         "team_features": team_features_df,
         "target_column": target_column,
         "team_columns": team_columns,
@@ -605,6 +626,35 @@ def match_feature_row(base_model: WorldCupModel, team_features: pd.DataFrame, ho
             row[f"kaggle_{safe}_away"] = away_value
             row[f"kaggle_{safe}_diff"] = home_value - away_value
     return row
+
+
+def labeled_train_row_count(normalized: Dict[str, Any]) -> int:
+    return int(normalized["train"].shape[0] or normalized["team_train"].shape[0])
+
+
+def labeled_test_row_count(normalized: Dict[str, Any]) -> int:
+    return int(normalized["test"].shape[0] or normalized["team_test"].shape[0])
+
+
+def evaluation_strategy(normalized: Dict[str, Any]) -> str:
+    if labeled_test_row_count(normalized) > 0:
+        return "test_file"
+    if labeled_train_row_count(normalized) > 0:
+        return "holdout_from_train"
+    return "unavailable"
+
+
+def planned_holdout_rows(train_rows: int, eval_size: float = 0.25) -> int:
+    if train_rows <= 0:
+        return 0
+    if train_rows < 4:
+        return train_rows
+    return max(1, int(round(train_rows * float(eval_size))))
+
+
+def is_test_or_eval_file(path: Path) -> bool:
+    name = path.name.lower()
+    return "test" in name or "eval" in name
 
 
 def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1142,6 +1192,8 @@ def save_hybrid_model(record: Dict[str, Any]) -> None:
         "classes": record.get("classes", []),
         "metrics": record.get("metrics", {}),
         "mode": record.get("mode", ""),
+        "eval_strategy": record.get("eval_strategy", ""),
+        "prediction_rows": record.get("prediction_rows", 0),
         "effective_target": record.get("effective_target", ""),
         "requested_target": record.get("requested_target", ""),
         "target_column": record.get("target_column", ""),
@@ -1183,6 +1235,8 @@ def read_model_metadata() -> Dict[str, Any]:
         "model_label": "",
         "effective_target": "",
         "requested_target": "",
+        "eval_strategy": "",
+        "prediction_rows": 0,
         "hardware": detect_hardware(),
         "tuning": {"enabled": False},
         "warnings": [],

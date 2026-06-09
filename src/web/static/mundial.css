@@ -583,12 +583,40 @@ h3 { font-size: 16px; }
 .compact-controls {
   grid-template-columns: repeat(3, minmax(130px, 1fr));
 }
+.dataset-summary,
+.model-state-grid,
 .prediction-grid.compact,
 .hardware-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(120px, 1fr));
   gap: 8px;
   margin-bottom: 0;
+}
+.dataset-summary {
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+}
+.model-state-grid {
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+}
+.dataset-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  min-height: 92px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+}
+.dataset-card span,
+.dataset-card small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.dataset-card strong {
+  color: var(--ink);
+  font-size: 20px;
+  line-height: 1.1;
 }
 .hardware-grid {
   grid-template-columns: repeat(5, minmax(110px, 1fr));
@@ -761,6 +789,9 @@ th {
   .hardware-grid {
     grid-template-columns: repeat(2, minmax(130px, 1fr));
   }
+  .model-state-grid {
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -783,6 +814,8 @@ th {
   .lineups-summary,
   .prediction-grid,
   .prediction-grid.compact,
+  .dataset-summary,
+  .model-state-grid,
   .hardware-grid,
   .champion-strip,
   .control-grid {

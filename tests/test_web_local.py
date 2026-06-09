@@ -165,6 +165,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "worldcup-n-jobs" in html_source
     assert "match-prob-breakdown" in html_source
     assert "training-model-params" in html_source
+    assert "training-model-state" in html_source
+    assert "dataset-summary" in html_source
     assert "predict-match-btn" in html_source
     assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
@@ -173,6 +175,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "trainingPayload" in app_source
     assert "predictionBreakdownTable" in app_source
     assert "paramsTable" in app_source
+    assert "evalStrategyLabel" in app_source
     assert "/api/mundial/predict-match" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
     assert "/api/worldcup/simulate" not in app_source
@@ -510,8 +513,12 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
 
     assert status["trainable"] is True
+    assert status["test_rows"] == 2
+    assert status["prediction_rows"] == 0
+    assert status["eval_strategy"] == "test_file"
     assert result["model"]["trained"] is True
     assert result["model"]["model_type"] == "xgboost"
+    assert result["model"]["eval_strategy"] == "test_file"
     assert result["model"]["hardware"]["actual_device"] in {"cpu", "cuda"}
     assert result["eval_rows"] == 2
     assert prediction["fixture"]["home"] == "Mexico"
@@ -560,8 +567,15 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
 
     assert status["training_mode"] == "team_strength"
     assert status["target_column"] == "quarter_finalist"
+    assert status["test_rows"] == 0
+    assert status["prediction_rows"] == 2
+    assert status["eval_rows"] > 0
+    assert status["eval_strategy"] == "holdout_from_train"
     assert result["mode"] == "team_strength"
+    assert result["eval_strategy"] == "holdout_from_train"
+    assert result["prediction_rows"] == 2
     assert result["model"]["target_column"] == "quarter_finalist"
+    assert result["model"]["eval_strategy"] == "holdout_from_train"
     assert result["model"]["model_label"] == "XGBoost"
     assert result["model"]["hardware"]["effective_n_jobs"] >= 1
     assert prediction["model_probs"]["ml"]

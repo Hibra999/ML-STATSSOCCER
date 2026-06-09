@@ -102,6 +102,7 @@ function setLoading() {
   document.getElementById("lineup-features-table").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("player-features-table").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-summary").innerHTML = loadingHtml("Dataset pendiente");
+  document.getElementById("training-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("training-hardware").innerHTML = loadingHtml("Hardware pendiente");
   document.getElementById("training-features").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
@@ -454,17 +455,11 @@ function renderTrainingStatus(payload) {
   renderTrainingControls(state.trainingOptions, model);
   renderHardware((model.hardware && model.trained) ? model.hardware : ((state.trainingOptions || {}).hardware || {}));
   document.getElementById("training-status").textContent = payload.available
-    ? `${payload.train_rows || 0} train - ${payload.test_rows || 0} test - ${model.trained ? model.model_label || "modelo entrenado" : "modelo pendiente"}`
+    ? `${payload.train_rows || 0} train etiquetado - ${evalStrategyLabel(payload.eval_strategy)} - ${payload.prediction_rows || 0} prediccion`
     : "Dataset Kaggle no descargado";
   document.getElementById("training-source").textContent = `${payload.dataset_slug || "Kaggle"} - ${payload.training_mode || "sin modo"}`;
-  document.getElementById("training-summary").innerHTML = [
-    predictionCard("Archivos", (payload.files || []).length),
-    predictionCard("Train", payload.train_rows || 0),
-    predictionCard("Test", payload.test_rows || 0),
-    predictionCard("Features equipo", payload.team_feature_rows || 0),
-    predictionCard("Modelo", model.trained ? (model.model_label || "Listo") : "Pendiente"),
-    predictionCard("Target", model.effective_target || payload.target_column || "-"),
-  ].join("");
+  document.getElementById("training-summary").innerHTML = datasetSummaryHtml(payload);
+  renderModelState(model, payload);
   renderTable("training-preview", payload.preview);
   renderTable("training-metrics", metricsTableFromModel(model));
   renderTrainingWarnings(model.warnings || []);
@@ -476,16 +471,51 @@ function renderTrainingResult(payload) {
   renderTable("training-metrics", payload.metrics_table);
   renderHardware(payload.hardware || {});
   renderTrainingWarnings(payload.warnings || []);
-  document.getElementById("training-summary").innerHTML = [
-    predictionCard("Train", payload.train_rows || 0),
-    predictionCard("Eval", payload.eval_rows || 0),
-    predictionCard("Features", (payload.features || []).length),
-    predictionCard("Clases", ((payload.model || {}).classes || []).join("/")),
-    predictionCard("Modelo", payload.model_type || "Listo"),
-    predictionCard("Target", payload.effective_target || ""),
-  ].join("");
+  document.getElementById("training-summary").innerHTML = datasetSummaryHtml({
+    ...(state.training || {}),
+    train_rows: payload.train_rows,
+    eval_rows: payload.eval_rows,
+    eval_strategy: payload.eval_strategy,
+    prediction_rows: payload.prediction_rows,
+    target_column: payload.effective_target,
+  });
+  renderModelState(payload.model || {}, payload);
   renderTable("training-features", featureImportanceTable(((payload.model || {}).top_features || [])));
   renderTable("training-model-params", paramsTable(payload.model || {}));
+}
+
+function datasetSummaryHtml(payload) {
+  const evalValue = payload.test_rows
+    ? `${payload.test_rows} filas test`
+    : `${payload.eval_rows || 0} holdout`;
+  return [
+    datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
+    datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
+    datasetCard("Evaluacion", evalValue, evalStrategyLabel(payload.eval_strategy)),
+    datasetCard("Prediccion 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
+    datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
+    datasetCard("Target", payload.target_column || "-", "label entrenable"),
+  ].join("");
+}
+
+function datasetCard(label, value, detail) {
+  return `<article class="dataset-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></article>`;
+}
+
+function renderModelState(model, payload) {
+  document.getElementById("training-model-state").innerHTML = [
+    predictionCard("Modelo", model.trained ? (model.model_label || payload.model_type || "Listo") : "Pendiente"),
+    predictionCard("Target efectivo", model.effective_target || payload.effective_target || "-"),
+    predictionCard("Eval", evalStrategyLabel(model.eval_strategy || payload.eval_strategy)),
+    predictionCard("Clases", ((model.classes || []).join("/") || "-")),
+  ].join("");
+}
+
+function evalStrategyLabel(strategy) {
+  if (strategy === "test_file") return "test etiquetado";
+  if (strategy === "holdout_from_train") return "holdout desde train";
+  if (strategy === "unavailable") return "sin evaluacion";
+  return strategy || "pendiente";
 }
 
 function renderTrainingControls(options, model) {
