@@ -550,6 +550,7 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
     fixture = result.get("fixture", {})
     probs = result.get("probabilities", {})
     expected = result.get("expected_goals", {})
+    sources = result.get("market_sources", {})
     return {
         "No.": fixture.get("id", ""),
         "Fecha": fixture.get("date", ""),
@@ -563,6 +564,8 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
         "Marcador": result.get("modal_score", ""),
         "Prediccion": result.get("prediction", ""),
         "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
+        "Fuente 1X2": (sources.get("result") or {}).get("source", ""),
+        "Fuente O/U": (sources.get("over_under_25") or {}).get("source", ""),
     }
 
 

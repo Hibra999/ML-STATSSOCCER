@@ -822,6 +822,7 @@ function renderUpcomingPredictions(result) {
   document.getElementById("upcoming-predictions").innerHTML = (result.predictions || []).map((prediction) => {
     const fixture = prediction.fixture || {};
     const probs = prediction.probabilities || {};
+    const sources = prediction.market_sources || {};
     const homeAsset = assetFor(fixture.home || "");
     const awayAsset = assetFor(fixture.away || "");
     return `<article class="upcoming-card">
@@ -840,6 +841,10 @@ function renderUpcomingPredictions(result) {
         <span>O2.5 <b>${escapeHtml(probs.over25 ?? "")}%</b></span>
         <span>U2.5 <b>${escapeHtml(probs.under25 ?? "")}%</b></span>
         <span>Score <b>${escapeHtml(prediction.modal_score || "")}</b></span>
+      </div>
+      <div class="source-strip">
+        <span>${marketBadgeText(sources.result, "1X2: Poisson")}</span>
+        <span>${marketBadgeText(sources.over_under_25, "O/U: Poisson")}</span>
       </div>
       <small>${escapeHtml((prediction.notes || []).join(" - "))}</small>
     </article>`;
@@ -880,12 +885,15 @@ async function runMatchPrediction() {
 function renderMatchPrediction(result) {
   const fixture = result.fixture || {};
   const probs = result.probabilities || {};
+  const sources = result.market_sources || {};
   document.getElementById("match-prediction").innerHTML = [
     predictionCard(`1 - ${fixture.home || "Local"}`, `${probs.home || 0}%`),
     predictionCard("X - Empate", `${probs.draw || 0}%`),
     predictionCard(`2 - ${fixture.away || "Visitante"}`, `${probs.away || 0}%`),
     predictionCard("Over 2.5", `${probs.over25 || 0}%`),
     predictionCard("Under 2.5", `${probs.under25 || 0}%`),
+    predictionCard("Fuente 1X2", marketSourceValue(sources.result, "Poisson")),
+    predictionCard("Fuente O/U", marketSourceValue(sources.over_under_25, "Poisson")),
   ].join("");
   renderTable("match-prediction-detail", objectTable({
     Partido: `${fixture.home || ""} vs ${fixture.away || ""}`,
@@ -894,6 +902,8 @@ function renderMatchPrediction(result) {
     Marcador: result.modal_score || "",
     "xG local": (result.expected_goals || {}).home || "",
     "xG visita": (result.expected_goals || {}).away || "",
+    "Fuente 1X2": marketSourceValue(sources.result, "Poisson"),
+    "Fuente O/U": marketSourceValue(sources.over_under_25, "Poisson"),
     Nota: (result.notes || []).join(" - "),
   }));
   renderTable("match-prob-breakdown", predictionBreakdownTable(result));
@@ -901,6 +911,7 @@ function renderMatchPrediction(result) {
 
 function predictionBreakdownTable(result) {
   const model = result.model_probs || {};
+  const sources = result.market_sources || {};
   const poisson = model.poisson || {};
   const poissonTotals = model.poisson_totals || {};
   const ml = model.ml || {};
@@ -941,7 +952,7 @@ function predictionBreakdownTable(result) {
       "2": final.away ?? "",
       Over: final.over25 ?? "",
       Under: final.under25 ?? "",
-      Peso: model.ml_weight ?? 0,
+      Peso: `1X2 ${marketSourceValue(sources.result, "Poisson")} / O/U ${marketSourceValue(sources.over_under_25, "Poisson")}`,
     },
   ];
   return { columns: ["Fuente", "1", "X", "2", "Over", "Under", "Peso"], rows, total: rows.length };
@@ -949,6 +960,16 @@ function predictionBreakdownTable(result) {
 
 function predictionCard(label, value) {
   return `<article class="prediction-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
+}
+
+function marketSourceValue(source, fallback) {
+  return (source && source.source) || fallback;
+}
+
+function marketBadgeText(source, fallback) {
+  if (!source || !source.source) return escapeHtml(fallback);
+  const model = source.model_name ? ` - ${source.model_name}` : "";
+  return `${escapeHtml(source.label || "")}: ${escapeHtml(source.source)}${escapeHtml(model)}`;
 }
 
 function trainingPayload() {

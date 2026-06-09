@@ -188,6 +188,10 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "upcoming-team" in app_source
     assert "flagHtml(homeAsset)" in app_source
     assert "flagHtml(awayAsset)" in app_source
+    assert "market_sources" in app_source
+    assert "Fuente 1X2" in app_source
+    assert "Fuente O/U" in app_source
+    assert "source-strip" in app_source
     assert "predict-match-btn" in html_source
     assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
@@ -558,6 +562,9 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
     assert prediction["model_probs"]["ml_weight"] == 0.5
     assert prediction["model_probs"]["model_id"] == "mex-test"
+    assert prediction["market_sources"]["result"]["source"] == "ML + Poisson"
+    assert prediction["market_sources"]["over_under_25"]["source"] == "Poisson"
+    assert prediction["market_sources"]["over_under_25"]["uses_ml"] is False
     assert set(prediction["model_probs"]) >= {"poisson", "poisson_totals", "ml", "over_under_ml"}
     assert catalog["active_model_id"] == "mex-test"
     assert any(item["model_id"] == "mex-test" for item in catalog["models"])
@@ -571,6 +578,8 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert over_result["effective_target"] == "over_under_25"
     assert over_prediction["model_probs"]["over_under_ml"]
     assert over_prediction["model_probs"]["over_under_weight"] == 0.5
+    assert over_prediction["market_sources"]["result"]["source"] == "Poisson"
+    assert over_prediction["market_sources"]["over_under_25"]["source"] == "ML + Poisson"
 
 
 def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatch):

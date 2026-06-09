@@ -369,6 +369,7 @@ def predict_match_payload(
     totals_weight = ml_weight if over_under_ml else 0.0
     blended = blend_probabilities(base_probs, result_ml, result_weight)
     blended_totals = blend_total_probabilities(base_totals, over_under_ml, totals_weight)
+    market_sources = market_sources_payload(result_ml, over_under_ml, ml_outputs)
     return {
         "fixture": {
             "id": str(fixture.get("No.", "")),
@@ -396,7 +397,10 @@ def predict_match_payload(
             "over_under_weight": round(float(totals_weight), 3),
             "model_id": ml_outputs.get("model_id", ""),
             "model_name": ml_outputs.get("model_name", ""),
+            "result_source": market_sources["result"]["source"],
+            "over_under_source": market_sources["over_under_25"]["source"],
         },
+        "market_sources": market_sources,
         "expected_goals": {
             "home": round(poisson["lambda1"], 3),
             "away": round(poisson["lambda2"], 3),
@@ -1217,6 +1221,28 @@ def blend_total_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, 
         output[label] = base_probs.get(label, 0.0) * (1.0 - weight) + ml_probs.get(label, base_probs.get(label, 0.0)) * weight
     total = max(sum(output.values()), 1e-9)
     return {label: value / total for label, value in output.items()}
+
+
+def market_sources_payload(result_ml: Dict[str, float], over_under_ml: Dict[str, float], ml_outputs: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    model_name = str(ml_outputs.get("model_name") or "").strip()
+    result_uses_ml = bool(result_ml)
+    over_under_uses_ml = bool(over_under_ml)
+    return {
+        "result": {
+            "label": "1X2",
+            "source": "ML + Poisson" if result_uses_ml else "Poisson",
+            "uses_ml": result_uses_ml,
+            "model_name": model_name if result_uses_ml else "",
+            "detail": f"1X2 mezcla el modelo {model_name} con Elo/Poisson." if result_uses_ml else "1X2 calculado solo con Elo/Poisson.",
+        },
+        "over_under_25": {
+            "label": "O/U 2.5",
+            "source": "ML + Poisson" if over_under_uses_ml else "Poisson",
+            "uses_ml": over_under_uses_ml,
+            "model_name": model_name if over_under_uses_ml else "",
+            "detail": f"O/U 2.5 mezcla el modelo {model_name} con Poisson." if over_under_uses_ml else "O/U 2.5 calculado con Poisson; no hay modelo O/U activo para este target.",
+        },
+    }
 
 
 def classification_metrics(clf, x_train, y_train, x_eval, y_eval) -> Dict[str, Dict[str, float]]:
