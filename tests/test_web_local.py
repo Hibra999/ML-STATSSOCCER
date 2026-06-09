@@ -100,6 +100,13 @@ def test_web_model_specs_only_expose_boosting_models():
     assert all(spec["tunables"] for spec in specs)
 
 
+def test_requirements_use_windows_tensorflow_io_marker():
+    source = open("requirements.txt", "r", encoding="utf-8").read()
+
+    assert 'tensorflow-io-gcs-filesystem==0.37.1; platform_system != "Windows"' in source
+    assert 'tensorflow-io-gcs-filesystem==0.31.0; platform_system == "Windows"' in source
+
+
 def test_training_progress_payload_shape():
     from src.web import services
 
