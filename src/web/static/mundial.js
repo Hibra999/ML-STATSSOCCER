@@ -254,7 +254,7 @@ function renderModelsCatalog(payload) {
   const activeId = (payload && payload.active_model_id) || state.activeModelId || "";
   state.models = models;
   state.activeModelId = activeId;
-  const options = models.map((model) => `<option value="${escapeAttr(model.model_id)}">${escapeHtml(model.model_name || model.model_id)}${model.active ? " - activo" : ""}</option>`).join("");
+  const options = models.map((model) => `<option value="${escapeAttr(model.model_id)}">${escapeHtml(model.model_name || model.model_id)}${model.bundle ? " - 1X2 + O/U" : ""}${model.active ? " - activo" : ""}</option>`).join("");
   const selectHtml = options || `<option value="">Sin modelos entrenados</option>`;
   ["model-active-select", "upcoming-model-select"].forEach((id) => {
     const select = document.getElementById(id);
@@ -267,7 +267,7 @@ function renderModelsCatalog(payload) {
   document.getElementById("models-list").innerHTML = models.map((model) => `
     <article class="model-row ${model.active ? "active" : ""}">
       <div><strong>${escapeHtml(model.model_name || model.model_id)}</strong><small>${escapeHtml(model.model_id)} - ${escapeHtml(model.model_label || model.model_type || "")}</small></div>
-      <span>${escapeHtml(model.effective_target || "-")}</span>
+      <span>${escapeHtml(modelMarketLabel(model))}</span>
       <b>${model.active ? "Activo" : ""}</b>
     </article>`).join("") || loadingHtml("Entrena tu primer modelo Mundial");
 }
@@ -276,7 +276,7 @@ function renderActiveModel(model) {
   document.getElementById("active-model-state").innerHTML = [
     predictionCard("Activo", model && model.trained ? (model.model_name || model.model_id) : "Sin modelo"),
     predictionCard("Tipo", (model && (model.model_label || model.model_type)) || "-"),
-    predictionCard("Target", (model && model.effective_target) || "-"),
+    predictionCard("Mercados", modelMarketLabel(model || {})),
     predictionCard("Eval", evalStrategyLabel(model && model.eval_strategy)),
   ].join("");
 }
@@ -596,11 +596,31 @@ function renderTrainingResult(payload) {
 }
 
 function renderTrainingVisuals(model, payload) {
+  const markets = trainingMarketSections(model, payload);
   renderEtlFlow((model.etl_steps || payload.etl_steps || []));
-  renderMetricCards(model.metrics || payload.metrics || {});
-  renderConfusionMatrix(model.confusion_matrix || payload.confusion_matrix || {});
-  renderTuningFlow(model.tuning_trace || payload.tuning_trace || model.tuning || {});
-  renderFeatureList(model.top_features || []);
+  renderMetricCards(markets);
+  renderConfusionMatrix(markets);
+  renderTuningFlow(markets);
+  renderFeatureList(markets);
+}
+
+function trainingMarketSections(model, payload) {
+  const markets = (model && model.markets) || (payload && payload.markets) || {};
+  const keys = ["result", "over_under_25"].filter((key) => markets[key]);
+  if (keys.length) {
+    return keys.map((key) => ({ key, label: markets[key].label || marketLabel(key), ...markets[key] }));
+  }
+  const target = (model && (model.effective_target || model.requested_target)) || (payload && (payload.effective_target || payload.requested_target)) || "result";
+  return [{
+    key: target === "over_under_25" ? "over_under_25" : "result",
+    label: marketLabel(target),
+    metrics: (model && model.metrics) || (payload && payload.metrics) || {},
+    confusion_matrix: (model && model.confusion_matrix) || (payload && payload.confusion_matrix) || {},
+    tuning_trace: (model && model.tuning_trace) || (payload && payload.tuning_trace) || (model && model.tuning) || {},
+    top_features: (model && model.top_features) || [],
+    train_rows: payload && payload.train_rows,
+    eval_rows: payload && payload.eval_rows,
+  }];
 }
 
 function datasetSummaryHtml(payload) {
@@ -624,10 +644,28 @@ function datasetCard(label, value, detail) {
 function renderModelState(model, payload) {
   document.getElementById("training-model-state").innerHTML = [
     predictionCard("Modelo", model.trained ? (model.model_label || payload.model_type || "Listo") : "Pendiente"),
-    predictionCard("Target efectivo", model.effective_target || payload.effective_target || "-"),
+    predictionCard("Mercados", modelMarketLabel(model.trained ? model : payload)),
     predictionCard("Eval", evalStrategyLabel(model.eval_strategy || payload.eval_strategy)),
     predictionCard("Clases", ((model.classes || []).join("/") || "-")),
   ].join("");
+}
+
+function modelMarketLabel(model) {
+  if (!model) return "-";
+  if (model.bundle || model.market_mode === "dual_markets" || model.requested_target === "dual_markets") {
+    return model.market_models && !model.market_models.over_under_25 ? "1X2 + O/U Poisson" : "1X2 + O/U 2.5";
+  }
+  const target = model.effective_target || model.requested_target || model.training_target || "";
+  if (target === "over_under_25") return "O/U 2.5";
+  if (target === "team_strength") return "1X2 team-strength";
+  if (target === "result") return "1X2";
+  return target || "-";
+}
+
+function marketLabel(key) {
+  if (key === "over_under_25") return "O/U 2.5";
+  if (key === "team_strength") return "1X2 team-strength";
+  return "1X2";
 }
 
 function evalStrategyLabel(strategy) {
@@ -644,9 +682,14 @@ function renderTrainingControls(options, model) {
   if (!modelSelect.options.length) {
     modelSelect.innerHTML = models.map((item) => `<option value="${escapeAttr(item.key)}">${escapeHtml(item.label)}</option>`).join("");
   }
+  const targetSelect = document.getElementById("worldcup-target");
+  if (targetSelect && !targetSelect.dataset.loaded && (options.targets || []).length) {
+    targetSelect.innerHTML = options.targets.map((item) => `<option value="${escapeAttr(item.key)}">${escapeHtml(item.label)}</option>`).join("");
+    targetSelect.dataset.loaded = "true";
+  }
   const selectedModel = model.model_type || (options.defaults || {}).model_type || modelSelect.value || "xgboost";
   modelSelect.value = selectedModel;
-  const target = model.requested_target || (options.defaults || {}).training_target || "result";
+  const target = model.requested_target || (model.trained ? (options.defaults || {}).training_target : "dual_markets") || "dual_markets";
   document.getElementById("worldcup-target").value = target;
   const modelId = model.model_id || autoWorldcupModelId(selectedModel, target);
   const modelIdInput = document.getElementById("worldcup-model-id");
@@ -708,7 +751,7 @@ function applyModelDefaults(modelKey, force) {
 
 function autoWorldcupModelId(modelKey, target) {
   const shortModel = { xgboost: "xgb", lightgbm: "lgbm", catboost: "cat", ngboost: "ngb" }[modelKey] || modelKey || "model";
-  const shortTarget = target === "over_under_25" ? "uo25" : "result";
+  const shortTarget = target === "dual_markets" ? "dual" : target === "over_under_25" ? "uo25" : "result";
   return `mundial-${shortModel}-${shortTarget}`;
 }
 
@@ -742,18 +785,32 @@ function renderEtlFlow(steps) {
     </article>`).join("") || loadingHtml("ETL pendiente");
 }
 
-function renderMetricCards(metrics) {
-  const evalMetrics = (metrics && (metrics.eval || metrics.Eval)) || {};
-  const rows = ["Accuracy", "F1", "Precision", "Recall"].map((key) => predictionCard(key, evalMetrics[key] ?? "-"));
-  document.getElementById("training-metric-cards").innerHTML = rows.join("");
+function renderMetricCards(markets) {
+  const sections = Array.isArray(markets) ? markets : [{ label: "Evaluacion", metrics: markets || {} }];
+  document.getElementById("training-metric-cards").innerHTML = sections.map((market) => {
+    const evalMetrics = (market.metrics && (market.metrics.eval || market.metrics.Eval)) || {};
+    const rows = ["Accuracy", "F1", "Precision", "Recall"].map((key) => predictionCard(key, evalMetrics[key] ?? "-")).join("");
+    return `<section class="market-panel"><header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml((market.train_rows ?? "-"))} train / ${escapeHtml((market.eval_rows ?? "-"))} eval</small></header><div class="market-card-grid">${rows}</div></section>`;
+  }).join("");
 }
 
 function renderConfusionMatrix(payload) {
+  if (Array.isArray(payload)) {
+    document.getElementById("training-confusion-matrix").innerHTML = payload.map((market) => `
+      <section class="market-panel">
+        <header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml(market.effective_target || "")}</small></header>
+        ${confusionMatrixHtml(market.confusion_matrix || {})}
+      </section>`).join("");
+    return;
+  }
+  document.getElementById("training-confusion-matrix").innerHTML = confusionMatrixHtml(payload || {});
+}
+
+function confusionMatrixHtml(payload) {
   const labels = payload.labels || [];
   const matrix = payload.matrix || [];
   if (!labels.length || !matrix.length) {
-    document.getElementById("training-confusion-matrix").innerHTML = loadingHtml("Matriz pendiente");
-    return;
+    return loadingHtml("Matriz pendiente");
   }
   const maxValue = Math.max(...matrix.flat().map((value) => Number(value) || 0), 1);
   const header = `<div></div>${labels.map((label) => `<strong>${escapeHtml(label)}</strong>`).join("")}`;
@@ -765,20 +822,44 @@ function renderConfusionMatrix(payload) {
       return `<span class="confusion-cell${correct}" style="--intensity:${escapeAttr(intensity)}"><b>${escapeHtml(value)}</b></span>`;
     }).join("")}
   `).join("");
-  document.getElementById("training-confusion-matrix").innerHTML = `<div class="confusion-grid" style="grid-template-columns: 120px repeat(${labels.length}, minmax(82px, 1fr))">${header}${rows}</div>`;
+  return `<div class="confusion-grid" style="grid-template-columns: 120px repeat(${labels.length}, minmax(82px, 1fr))">${header}${rows}</div>`;
 }
 
 function renderTuningFlow(trace) {
+  if (Array.isArray(trace)) {
+    document.getElementById("training-tuning-flow").innerHTML = trace.map((market) => `
+      <section class="market-panel">
+        <header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml(market.model_id || "")}</small></header>
+        ${tuningFlowHtml(market.tuning_trace || market.tuning || {})}
+      </section>`).join("");
+    return;
+  }
+  document.getElementById("training-tuning-flow").innerHTML = tuningFlowHtml(trace || {});
+}
+
+function tuningFlowHtml(trace) {
   const steps = trace.steps || [];
   const head = trace.enabled
     ? `<div class="tuning-head"><strong>Best ${escapeHtml(trace.objective || "")}: ${escapeHtml(trace.best_value ?? "")}</strong><small>Trial ${escapeHtml(trace.best_trial ?? "")} - ${escapeHtml(trace.trials ?? "")} trials</small></div>`
     : `<div class="tuning-head"><strong>Fine-tuning desactivado</strong><small>Se usaron parametros manuales/default.</small></div>`;
   const items = steps.map((step) => `<article class="tuning-step ${escapeAttr(step.status || "info")}"><strong>${escapeHtml(step.name || "")}</strong><small>${escapeHtml(step.detail || "")}</small></article>`).join("");
-  document.getElementById("training-tuning-flow").innerHTML = head + `<div class="tuning-steps">${items}</div>`;
+  return head + `<div class="tuning-steps">${items}</div>`;
 }
 
-function renderFeatureList(features) {
-  document.getElementById("training-features").innerHTML = (features || []).slice(0, 10).map((item) => `
+function renderFeatureList(markets) {
+  if (Array.isArray(markets)) {
+    document.getElementById("training-features").innerHTML = markets.map((market) => `
+      <section class="market-panel">
+        <header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml(market.model_id || "")}</small></header>
+        ${featureListHtml(market.top_features || [])}
+      </section>`).join("");
+    return;
+  }
+  document.getElementById("training-features").innerHTML = featureListHtml(markets || []);
+}
+
+function featureListHtml(features) {
+  return (features || []).slice(0, 10).map((item) => `
     <div class="feature-bar">
       <span>${escapeHtml(item.feature || "")}</span>
       <div><i style="width:${escapeAttr(Math.min(100, Math.max(2, Number(item.importance || 0) * 100)))}%"></i></div>
@@ -973,12 +1054,14 @@ function marketBadgeText(source, fallback) {
 }
 
 function trainingPayload() {
+  const marketMode = document.getElementById("worldcup-target").value || "dual_markets";
   const payload = {
     ...simulationPayload(),
     model_id: document.getElementById("worldcup-model-id").value || "",
     model_name: document.getElementById("worldcup-model-id").value || "",
     model_type: document.getElementById("worldcup-model-type").value || "xgboost",
-    training_target: document.getElementById("worldcup-target").value || "result",
+    market_mode: marketMode,
+    training_target: marketMode === "over_under_25" ? "over_under_25" : "result",
     device: document.getElementById("worldcup-device").value || "auto",
     n_jobs: Number(document.getElementById("worldcup-n-jobs").value || -1),
     tuning_enabled: document.getElementById("worldcup-tuning-enabled").checked,

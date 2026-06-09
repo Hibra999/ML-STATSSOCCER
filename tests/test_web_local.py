@@ -183,6 +183,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "training-etl-flow" in html_source
     assert "training-confusion-matrix" in html_source
     assert "training-tuning-flow" in html_source
+    assert "Ambos: 1X2 + O/U 2.5" in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-predictions" in html_source
     assert "upcoming-team" in app_source
@@ -206,6 +207,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "renderConfusionMatrix" in app_source
     assert "renderEtlFlow" in app_source
     assert "renderTuningFlow" in app_source
+    assert "dual_markets" in app_source
+    assert "market-panel" in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
     assert "/api/mundial/predict-match" in app_source
@@ -580,6 +583,28 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert over_prediction["model_probs"]["over_under_weight"] == 0.5
     assert over_prediction["market_sources"]["result"]["source"] == "Poisson"
     assert over_prediction["market_sources"]["over_under_25"]["source"] == "ML + Poisson"
+
+    dual_result = training.train_hybrid_model(
+        fallback_tournament_2026(),
+        payload={"seed": 7, "n_estimators": 5, "market_mode": "dual_markets", "model_id": "mex-dual"},
+    )
+    dual_prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
+    dual_catalog = training.list_worldcup_models()
+
+    assert dual_result["model"]["bundle"] is True
+    assert dual_result["model"]["market_mode"] == "dual_markets"
+    assert set(dual_result["model"]["market_models"]) == {"result", "over_under_25"}
+    assert dual_result["model"]["markets"]["result"]["confusion_matrix"]["matrix"]
+    assert dual_result["model"]["markets"]["over_under_25"]["confusion_matrix"]["matrix"]
+    assert dual_prediction["model_probs"]["model_id"] == "mex-dual"
+    assert dual_prediction["model_probs"]["ml"]
+    assert dual_prediction["model_probs"]["over_under_ml"]
+    assert dual_prediction["market_sources"]["result"]["source"] == "ML + Poisson"
+    assert dual_prediction["market_sources"]["over_under_25"]["source"] == "ML + Poisson"
+    assert dual_catalog["active_model_id"] == "mex-dual"
+    assert any(item["model_id"] == "mex-dual" and item["bundle"] for item in dual_catalog["models"])
+    assert not any(str(item["model_id"]).endswith("__result") for item in dual_catalog["models"])
+    assert not any(str(item["model_id"]).endswith("__uo25") for item in dual_catalog["models"])
 
 
 def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatch):

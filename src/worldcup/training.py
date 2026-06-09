@@ -93,6 +93,7 @@ def training_options() -> Dict[str, Any]:
         "targets": [
             {"key": "result", "label": "Resultado 1/X/2"},
             {"key": "over_under_25", "label": "Over/Under 2.5"},
+            {"key": "dual_markets", "label": "Ambos: 1X2 + O/U 2.5"},
         ],
         "hardware": detect_hardware(),
         "defaults": default_training_payload(),
@@ -134,6 +135,7 @@ def default_training_payload() -> Dict[str, Any]:
     return {
         "model_type": "xgboost",
         "training_target": "result",
+        "market_mode": "result",
         "device": "auto",
         "n_jobs": -1,
         "tuning_enabled": False,
@@ -202,6 +204,14 @@ def dataset_status() -> Dict[str, Any]:
 
 
 def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload or {}
+    train_config = training_config(payload)
+    if train_config["market_mode"] == "dual_markets":
+        return train_dual_market_model(tournament=tournament, payload=payload, train_config=train_config)
+    return train_single_hybrid_model(tournament=tournament, payload=payload)
+
+
+def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
     train_config = training_config(payload)
     model_id = train_config["model_id"]
@@ -312,6 +322,7 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
         "model_id": model_id,
         "model_name": train_config["model_name"],
+        "hidden_from_catalog": bool(payload.get("hidden_from_catalog", False)),
         "model_params": train_config["params"],
         "tuning": tuned,
         "tuning_trace": tuning_trace(tuned),
@@ -341,6 +352,130 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "tuning_trace": tuning_trace(tuned),
         "etl_steps": etl,
         "warnings": record["warnings"],
+    }
+
+
+def train_dual_market_model(
+        tournament: Dict[str, Any],
+        payload: Optional[Dict[str, Any]] = None,
+        train_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = dict(payload or {})
+    train_config = train_config or training_config(payload)
+    bundle_id = train_config["model_id"]
+    bundle_name = train_config["model_name"]
+    files = list(discover_dataset_files(KAGGLE_ROOT))
+    if not files:
+        raise WorldCupTrainingError("No hay dataset Kaggle local. Primero descarga el dataset.")
+    normalized = normalize_dataset_files(files)
+    if not normalized["trainable"]:
+        raise WorldCupTrainingError("El dataset no tiene columnas trainables de partido: equipos y resultado/winner.")
+
+    result_child_id = child_market_model_id(bundle_id, "result")
+    over_child_id = child_market_model_id(bundle_id, "over_under_25")
+    common_payload = dict(payload)
+    common_payload["market_mode"] = "result"
+
+    result_payload = {
+        **common_payload,
+        "training_target": "result",
+        "model_id": result_child_id,
+        "model_name": f"{bundle_name} - 1X2",
+        "hidden_from_catalog": True,
+    }
+    result_result = train_single_hybrid_model(tournament=tournament, payload=result_payload)
+    result_record = load_hybrid_model(result_child_id) or {}
+
+    warnings: List[str] = []
+    market_results = {"result": market_training_summary(result_record, result_result, "1X2")}
+    market_models = {"result": result_child_id}
+
+    can_train_over_under = normalized["training_mode"] == "match_result" and has_over_under_target(normalized["train"])
+    over_result: Optional[Dict[str, Any]] = None
+    over_record: Dict[str, Any] = {}
+    if can_train_over_under:
+        over_payload = {
+            **common_payload,
+            "training_target": "over_under_25",
+            "model_id": over_child_id,
+            "model_name": f"{bundle_name} - O/U 2.5",
+            "hidden_from_catalog": True,
+        }
+        try:
+            over_result = train_single_hybrid_model(tournament=tournament, payload=over_payload)
+            over_record = load_hybrid_model(over_child_id) or {}
+            if over_record.get("effective_target") == "over_under_25":
+                market_results["over_under_25"] = market_training_summary(over_record, over_result, "O/U 2.5")
+                market_models["over_under_25"] = over_child_id
+            else:
+                warnings.append("No se guardo modelo O/U porque el dataset no produjo target Over/Under 2.5 valido.")
+                delete_model_files(over_child_id)
+        except Exception as exc:
+            warnings.append(f"O/U 2.5 no se pudo entrenar ({exc.__class__.__name__}: {exc}); ese mercado seguira con Poisson.")
+            delete_model_files(over_child_id)
+    else:
+        warnings.append("O/U 2.5 no se entreno: el dataset actual no trae goles suficientes; ese mercado seguira con Poisson.")
+
+    warnings.extend(result_record.get("warnings", []))
+    warnings.extend(over_record.get("warnings", []))
+    warnings = unique_strings(warnings)
+    trained_at = datetime.now(timezone.utc).isoformat()
+    bundle_record = {
+        "bundle": True,
+        "market_mode": "dual_markets",
+        "classifier": None,
+        "feature_columns": result_record.get("feature_columns", []),
+        "team_features": result_record.get("team_features", []),
+        "kaggle_files": [str(path) for path in files],
+        "history_source": result_record.get("history_source", over_record.get("history_source", "")),
+        "metrics": result_record.get("metrics", {}),
+        "confusion_matrix": result_record.get("confusion_matrix", {}),
+        "classes": result_record.get("classes", []),
+        "mode": normalized["training_mode"],
+        "eval_strategy": result_record.get("eval_strategy", ""),
+        "prediction_rows": int(normalized["team_prediction"].shape[0]),
+        "effective_target": "result+over_under_25" if "over_under_25" in market_models else "result",
+        "requested_target": "dual_markets",
+        "target_column": "result + over_under_25",
+        "model_type": train_config["model_type"],
+        "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
+        "model_id": bundle_id,
+        "model_name": bundle_name,
+        "model_params": train_config["params"],
+        "tuning": result_record.get("tuning", {}),
+        "tuning_trace": bundle_tuning_trace(market_results),
+        "etl_steps": bundle_etl_steps(result_record.get("etl_steps", []), market_models),
+        "hardware": result_record.get("hardware", detect_hardware()),
+        "warnings": warnings,
+        "top_features": result_record.get("top_features", []),
+        "markets": market_results,
+        "market_models": market_models,
+        "trained_at": trained_at,
+    }
+    save_hybrid_model(bundle_record, model_id=bundle_id)
+    model_meta = read_model_metadata(model_id=bundle_id)
+    return {
+        "model": model_meta,
+        "metrics": bundle_record["metrics"],
+        "confusion_matrix": bundle_record["confusion_matrix"],
+        "features": bundle_record["feature_columns"],
+        "train_rows": int(max(result_result.get("train_rows", 0), (over_result or {}).get("train_rows", 0))),
+        "eval_rows": int(max(result_result.get("eval_rows", 0), (over_result or {}).get("eval_rows", 0))),
+        "source": KAGGLE_DATASET_SLUG,
+        "mode": normalized["training_mode"],
+        "eval_strategy": bundle_record["eval_strategy"],
+        "prediction_rows": int(normalized["team_prediction"].shape[0]),
+        "effective_target": bundle_record["effective_target"],
+        "requested_target": "dual_markets",
+        "model_id": bundle_id,
+        "model_type": train_config["model_type"],
+        "hardware": bundle_record["hardware"],
+        "tuning": bundle_record["tuning"],
+        "tuning_trace": bundle_record["tuning_trace"],
+        "etl_steps": bundle_record["etl_steps"],
+        "warnings": warnings,
+        "markets": market_results,
+        "market_models": market_models,
     }
 
 
@@ -694,12 +829,15 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     if device not in {"auto", "cpu", "cuda"}:
         device = "auto"
     target = normalize_training_target(payload.get("training_target", payload.get("target", "result")))
-    model_id = normalize_worldcup_model_id(payload.get("model_id") or default_model_id(model_key, target))
+    market_mode = normalize_market_mode(payload.get("market_mode", payload.get("training_target", target)), target)
+    default_target = "dual_markets" if market_mode == "dual_markets" else target
+    model_id = normalize_worldcup_model_id(payload.get("model_id") or default_model_id(model_key, default_target))
     return {
         "model_id": model_id,
         "model_name": str(payload.get("model_name") or model_id).strip() or model_id,
         "model_type": model_key,
         "training_target": target,
+        "market_mode": market_mode,
         "params": params,
         "seed": int(float(payload.get("seed", 2026) or 2026)),
         "n_jobs": n_jobs,
@@ -720,7 +858,7 @@ def default_model_id(model_key: str, target: str) -> str:
         "catboost": "cat",
         "ngboost": "ngb",
     }.get(model_key, model_key)
-    short_target = "uo25" if target == "over_under_25" else "result"
+    short_target = "dual" if target == "dual_markets" else "uo25" if target == "over_under_25" else "result"
     return f"mundial-{short_model}-{short_target}"
 
 
@@ -736,6 +874,15 @@ def normalize_worldcup_model_id(value: Any) -> str:
 
 def normalize_training_target(value: Any) -> str:
     key = str(value or "result").strip().lower().replace("-", "_")
+    if key in {"over_under", "over_under_25", "uo25", "u_o_25", "overunder25"}:
+        return "over_under_25"
+    return "result"
+
+
+def normalize_market_mode(value: Any, target: str = "result") -> str:
+    key = str(value or target or "result").strip().lower().replace("-", "_")
+    if key in {"dual", "dual_markets", "both", "ambos", "all", "result_over_under_25", "result_uo25"}:
+        return "dual_markets"
     if key in {"over_under", "over_under_25", "uo25", "u_o_25", "overunder25"}:
         return "over_under_25"
     return "result"
@@ -1116,6 +1263,55 @@ def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str, model_id
     record = load_hybrid_model(model_id=model_id)
     if not record:
         return {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
+    if record.get("bundle") and record.get("market_models"):
+        return predict_bundle_ml_outputs(base_model, home, away, record)
+    return predict_single_record_ml_outputs(base_model, home, away, record)
+
+
+def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    bundle_id = str(record.get("model_id") or active_worldcup_model_id() or "")
+    bundle_name = str(record.get("model_name") or bundle_id or "Bundle Mundial")
+    market_models = record.get("market_models") or {}
+    result_output = {"result": {}, "notes": []}
+    over_output = {"over_under_25": {}, "notes": []}
+    market_model_names: Dict[str, str] = {}
+
+    result_id = market_models.get("result")
+    if result_id:
+        result_record = load_hybrid_model(result_id)
+        if result_record:
+            result_output = predict_single_record_ml_outputs(base_model, home, away, result_record)
+            if result_output.get("result"):
+                market_model_names["result"] = result_output.get("model_name", "")
+
+    over_id = market_models.get("over_under_25")
+    if over_id:
+        over_record = load_hybrid_model(over_id)
+        if over_record:
+            over_output = predict_single_record_ml_outputs(base_model, home, away, over_record)
+            if over_output.get("over_under_25"):
+                market_model_names["over_under_25"] = over_output.get("model_name", "")
+
+    notes = []
+    result_notes = result_output.get("notes", [])
+    if over_output.get("over_under_25"):
+        result_notes = [note for note in result_notes if "Over/Under 2.5 viene de Poisson" not in str(note)]
+    notes.extend(result_notes)
+    notes.extend(over_output.get("notes", []))
+    if not over_output.get("over_under_25"):
+        notes.append("O/U 2.5 viene de Poisson porque el bundle activo no tiene hijo O/U entrenado.")
+    return {
+        "result": result_output.get("result", {}),
+        "over_under_25": over_output.get("over_under_25", {}),
+        "model_id": bundle_id,
+        "model_name": bundle_name,
+        "market_model_ids": {key: value for key, value in market_models.items() if value},
+        "market_model_names": market_model_names,
+        "notes": unique_strings(notes),
+    }
+
+
+def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away: str, record: Dict[str, Any]) -> Dict[str, Any]:
     active_id = str(record.get("model_id") or active_worldcup_model_id() or "")
     model_name = str(record.get("model_name") or active_id or record.get("model_label", "Kaggle"))
     if record.get("mode") == "team_strength":
@@ -1225,6 +1421,9 @@ def blend_total_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, 
 
 def market_sources_payload(result_ml: Dict[str, float], over_under_ml: Dict[str, float], ml_outputs: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     model_name = str(ml_outputs.get("model_name") or "").strip()
+    market_model_names = ml_outputs.get("market_model_names") or {}
+    result_model_name = str(market_model_names.get("result") or model_name).strip()
+    over_under_model_name = str(market_model_names.get("over_under_25") or model_name).strip()
     result_uses_ml = bool(result_ml)
     over_under_uses_ml = bool(over_under_ml)
     return {
@@ -1232,17 +1431,95 @@ def market_sources_payload(result_ml: Dict[str, float], over_under_ml: Dict[str,
             "label": "1X2",
             "source": "ML + Poisson" if result_uses_ml else "Poisson",
             "uses_ml": result_uses_ml,
-            "model_name": model_name if result_uses_ml else "",
-            "detail": f"1X2 mezcla el modelo {model_name} con Elo/Poisson." if result_uses_ml else "1X2 calculado solo con Elo/Poisson.",
+            "model_name": result_model_name if result_uses_ml else "",
+            "detail": f"1X2 mezcla el modelo {result_model_name} con Elo/Poisson." if result_uses_ml else "1X2 calculado solo con Elo/Poisson.",
         },
         "over_under_25": {
             "label": "O/U 2.5",
             "source": "ML + Poisson" if over_under_uses_ml else "Poisson",
             "uses_ml": over_under_uses_ml,
-            "model_name": model_name if over_under_uses_ml else "",
-            "detail": f"O/U 2.5 mezcla el modelo {model_name} con Poisson." if over_under_uses_ml else "O/U 2.5 calculado con Poisson; no hay modelo O/U activo para este target.",
+            "model_name": over_under_model_name if over_under_uses_ml else "",
+            "detail": f"O/U 2.5 mezcla el modelo {over_under_model_name} con Poisson." if over_under_uses_ml else "O/U 2.5 calculado con Poisson; no hay modelo O/U activo para este target.",
         },
     }
+
+
+def child_market_model_id(bundle_id: str, market: str) -> str:
+    suffix = "__uo25" if market == "over_under_25" else "__result"
+    return normalize_worldcup_model_id(f"{str(bundle_id)[:80 - len(suffix)]}{suffix}")
+
+
+def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], label: str) -> Dict[str, Any]:
+    return {
+        "label": label,
+        "model_id": record.get("model_id", result.get("model_id", "")),
+        "model_name": record.get("model_name", ""),
+        "model_type": record.get("model_type", result.get("model_type", "")),
+        "model_label": record.get("model_label", ""),
+        "effective_target": record.get("effective_target", result.get("effective_target", "")),
+        "requested_target": record.get("requested_target", result.get("requested_target", "")),
+        "metrics": record.get("metrics", result.get("metrics", {})),
+        "confusion_matrix": record.get("confusion_matrix", result.get("confusion_matrix", {})),
+        "classes": record.get("classes", []),
+        "eval_strategy": record.get("eval_strategy", result.get("eval_strategy", "")),
+        "train_rows": int(result.get("train_rows", 0) or 0),
+        "eval_rows": int(result.get("eval_rows", 0) or 0),
+        "tuning": record.get("tuning", result.get("tuning", {})),
+        "tuning_trace": record.get("tuning_trace", result.get("tuning_trace", {})),
+        "top_features": record.get("top_features", []),
+        "warnings": record.get("warnings", []),
+        "hardware": record.get("hardware", result.get("hardware", {})),
+    }
+
+
+def bundle_tuning_trace(markets: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    steps = []
+    enabled = False
+    for key, market in markets.items():
+        trace = market.get("tuning_trace") or market.get("tuning") or {}
+        enabled = enabled or bool(trace.get("enabled"))
+        detail = "desactivado"
+        if trace.get("enabled"):
+            detail = f"{trace.get('objective', 'F1')}={trace.get('best_value', '')} / trial {trace.get('best_trial', '')}"
+        steps.append({
+            "name": market.get("label") or key,
+            "status": "ok" if market.get("model_id") else "pending",
+            "detail": detail,
+        })
+    return {
+        "enabled": enabled,
+        "trials": sum(int((market.get("tuning_trace") or {}).get("trials", 0) or 0) for market in markets.values()),
+        "sampler": "por mercado",
+        "pruner": "por mercado",
+        "objective": "por mercado",
+        "best_value": "",
+        "best_trial": "",
+        "best_params": {},
+        "steps": steps,
+    }
+
+
+def bundle_etl_steps(base_steps: List[Dict[str, Any]], market_models: Dict[str, str]) -> List[Dict[str, Any]]:
+    steps = list(base_steps or [])
+    steps.append({
+        "name": "Bundle de mercados",
+        "status": "ok" if "over_under_25" in market_models else "info",
+        "detail": "Entrena 1X2 y O/U como clasificadores independientes bajo un solo modelo seleccionable.",
+        "count": len(market_models),
+    })
+    return steps
+
+
+def unique_strings(values: Iterable[Any]) -> List[str]:
+    seen = set()
+    output = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return output
 
 
 def classification_metrics(clf, x_train, y_train, x_eval, y_eval) -> Dict[str, Dict[str, float]]:
@@ -1392,6 +1669,15 @@ def active_model_state_path() -> Path:
     return WORLD_CUP_MODELS_ROOT / ACTIVE_MODEL_STATE_FILE
 
 
+def delete_model_files(model_id: Any) -> List[str]:
+    removed = []
+    for path in (worldcup_model_path(model_id), worldcup_model_meta_path(model_id)):
+        if path.exists():
+            path.unlink()
+            removed.append(str(path))
+    return removed
+
+
 def save_hybrid_model(record: Dict[str, Any], model_id: Optional[str] = None) -> None:
     WORLD_CUP_MODELS_ROOT.mkdir(parents=True, exist_ok=True)
     model_id = normalize_worldcup_model_id(model_id or record.get("model_id") or default_model_id(record.get("model_type", "xgboost"), record.get("requested_target", "result")))
@@ -1411,6 +1697,8 @@ def save_hybrid_model(record: Dict[str, Any], model_id: Optional[str] = None) ->
 def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Path) -> Dict[str, Any]:
     meta = {
         "trained": True,
+        "bundle": bool(record.get("bundle", False)),
+        "market_mode": record.get("market_mode", record.get("requested_target", "")),
         "model_id": model_id,
         "model_name": record.get("model_name") or model_id,
         "model_path": str(model_path),
@@ -1436,6 +1724,9 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "top_features": record.get("top_features", []),
         "kaggle_files": record.get("kaggle_files", []),
         "history_source": record.get("history_source", ""),
+        "hidden_from_catalog": bool(record.get("hidden_from_catalog", False)),
+        "markets": record.get("markets", {}),
+        "market_models": record.get("market_models", {}),
     }
     return meta
 
@@ -1461,6 +1752,8 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
             pass
     return {
         "trained": False,
+        "bundle": False,
+        "market_mode": "",
         "model_id": "",
         "model_name": "",
         "model_path": str(HYBRID_MODEL_FILE),
@@ -1481,6 +1774,9 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "etl_steps": [],
         "warnings": [],
         "top_features": [],
+        "hidden_from_catalog": False,
+        "markets": {},
+        "market_models": {},
     }
 
 
@@ -1496,6 +1792,8 @@ def list_worldcup_models() -> Dict[str, Any]:
         except Exception:
             continue
         if not isinstance(data, dict):
+            continue
+        if data.get("hidden_from_catalog"):
             continue
         model_id = normalize_worldcup_model_id(data.get("model_id") or path.stem)
         data["model_id"] = model_id
@@ -1542,11 +1840,12 @@ def delete_worldcup_model(model_id: Any) -> Dict[str, Any]:
     if model_id == LEGACY_MODEL_ID:
         raise WorldCupTrainingError("El modelo legacy no se borra desde la interfaz; entrena un modelo nuevo y activalo.")
     was_active = active_worldcup_model_id() == model_id
-    removed = []
-    for path in (worldcup_model_path(model_id), worldcup_model_meta_path(model_id)):
-        if path.exists():
-            path.unlink()
-            removed.append(str(path))
+    meta = read_model_metadata(model_id=model_id)
+    removed = delete_model_files(model_id)
+    if meta.get("bundle"):
+        for child_id in (meta.get("market_models") or {}).values():
+            if child_id:
+                removed.extend(delete_model_files(child_id))
     if not removed:
         raise WorldCupTrainingError(f'El modelo "{model_id}" no existe.')
     if HYBRID_MODEL_META_FILE.exists():

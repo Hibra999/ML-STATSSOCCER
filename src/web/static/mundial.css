@@ -770,10 +770,38 @@ h3 { font-size: 16px; }
   color: var(--muted);
   margin-top: 2px;
 }
-.metric-card-grid {
+.metric-card-grid,
+.market-card-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(100px, 1fr));
   gap: 8px;
+}
+.metric-card-grid {
+  grid-template-columns: 1fr;
+}
+.market-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+}
+.market-panel + .market-panel {
+  margin-top: 10px;
+}
+.market-panel header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+}
+.market-panel header strong {
+  color: var(--ink);
+}
+.market-panel header small {
+  color: var(--muted);
 }
 .confusion-wrap {
   overflow: auto;

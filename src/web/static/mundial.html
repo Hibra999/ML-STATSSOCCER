@@ -212,7 +212,7 @@
           <div class="control-grid compact-controls">
             <label>Nombre modelo<input id="worldcup-model-id" placeholder="mundial-xgb-result"></label>
             <label>Modelo<select id="worldcup-model-type"></select></label>
-            <label>Target<select id="worldcup-target"><option value="result">Resultado 1/X/2</option><option value="over_under_25">Over/Under 2.5</option></select></label>
+            <label>Mercados<select id="worldcup-target"><option value="dual_markets">Ambos: 1X2 + O/U 2.5</option><option value="result">Resultado 1/X/2</option><option value="over_under_25">Over/Under 2.5</option></select></label>
             <label>N estimadores<input id="worldcup-n-estimators" type="number" min="1" step="1"></label>
             <label>Learning rate<input id="worldcup-learning-rate" type="number" min="0.001" step="0.001"></label>
             <label>Max depth<input id="worldcup-max-depth" type="number" step="1"></label>
@@ -311,6 +311,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260609-4"></script>
+  <script src="/static/mundial.js?v=20260609-5"></script>
 </body>
 </html>
