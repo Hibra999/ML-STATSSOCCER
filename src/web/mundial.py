@@ -121,6 +121,10 @@ def create_mundial_app() -> FastAPI:
     def training_status():
         return _wrap(services.training_status)
 
+    @app.get("/api/mundial/training/options")
+    def training_options():
+        return _wrap(services.training_options)
+
     @app.post("/api/mundial/predict-match")
     def predict_match(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.predict_match, payload)

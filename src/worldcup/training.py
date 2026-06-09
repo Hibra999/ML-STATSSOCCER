@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 import pickle
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split as sklearn_train_test_split
 
+from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
 from src.worldcup.data import clean_team_name, load_historical_matches, tournament_fixtures_dataframe
 from src.worldcup.model import HOST_TEAMS, WorldCupModel
 
@@ -39,10 +41,106 @@ BASE_FEATURE_COLUMNS = [
 ]
 TARGET_LABELS = ["H", "D", "A"]
 TEAM_TARGET_COLUMNS = ["quarter_finalist", "semi_finalist", "finalist", "winner"]
+MODEL_PARAM_KEYS = [
+    "n_estimators",
+    "max_depth",
+    "min_child_weight",
+    "learning_rate",
+    "lambda_regularization",
+    "alpha_regularization",
+    "num_leaves",
+    "min_child_samples",
+    "minibatch_frac",
+    "natural_gradient",
+    "l2_leaf_reg",
+    "random_strength",
+]
+WORLD_CUP_MODEL_LABELS = {
+    "ngboost": "NGBoost",
+    "catboost": "CatBoost",
+    "lightgbm": "LightGBM",
+    "xgboost": "XGBoost",
+}
 
 
 class WorldCupTrainingError(RuntimeError):
     pass
+
+
+def training_options() -> Dict[str, Any]:
+    models = []
+    for key, spec in MODEL_SPECS.items():
+        tunables = {}
+        for param in tunable_param_names(spec):
+            if param in {"normalizer", "sampler", "calibrate_probabilities"}:
+                continue
+            try:
+                tunables[param] = spec.model_cls.get_suggest_param_values(param=param)
+            except ValueError:
+                continue
+        models.append({
+            "key": key,
+            "label": WORLD_CUP_MODEL_LABELS.get(key, spec.label),
+            "defaults": spec.defaults,
+            "tunables": tunables,
+            "supports_cuda": key in {"xgboost", "catboost", "lightgbm"},
+        })
+    return {
+        "models": json_safe(models),
+        "targets": [
+            {"key": "result", "label": "Resultado 1/X/2"},
+            {"key": "over_under_25", "label": "Over/Under 2.5"},
+        ],
+        "hardware": detect_hardware(),
+        "defaults": default_training_payload(),
+    }
+
+
+def detect_hardware() -> Dict[str, Any]:
+    cpu_count = int(os.cpu_count() or 1)
+    cuda_devices: List[str] = []
+    cuda_error = ""
+    if shutil.which("nvidia-smi"):
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "-L"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if result.returncode == 0:
+                cuda_devices = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            elif result.stderr:
+                cuda_error = result.stderr.strip().splitlines()[0]
+        except Exception as exc:
+            cuda_error = f"{exc.__class__.__name__}: {exc}"
+    else:
+        cuda_error = "nvidia-smi no disponible"
+    return {
+        "cpu_count": cpu_count,
+        "default_n_jobs": -1,
+        "cuda_available": bool(cuda_devices),
+        "cuda_devices": cuda_devices,
+        "cuda_error": cuda_error,
+        "device_default": "cuda" if cuda_devices else "cpu",
+    }
+
+
+def default_training_payload() -> Dict[str, Any]:
+    return {
+        "model_type": "xgboost",
+        "training_target": "result",
+        "device": "auto",
+        "n_jobs": -1,
+        "tuning_enabled": False,
+        "n_trials": 12,
+        "optuna_sampler": "tpe",
+        "optuna_pruner": "none",
+        "objective": "F1",
+        "tune_params": "all",
+        **MODEL_SPECS["xgboost"].defaults,
+    }
 
 
 def download_kaggle_dataset(force: bool = False) -> Dict[str, Any]:
@@ -95,6 +193,7 @@ def dataset_status() -> Dict[str, Any]:
 
 def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
+    train_config = training_config(payload)
     files = list(discover_dataset_files(KAGGLE_ROOT))
     if not files:
         raise WorldCupTrainingError("No hay dataset Kaggle local. Primero descarga el dataset.")
@@ -116,40 +215,63 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         max_goals=int(payload.get("max_goals", 10) or 10),
     )
     feature_store = normalized["team_features"]
+    target_warning = ""
     if normalized["training_mode"] == "team_strength":
+        effective_target = "team_strength"
+        if train_config["training_target"] == "over_under_25":
+            target_warning = "El dataset Kaggle de equipos no permite entrenar Over/Under 2.5; U/O queda con Poisson."
         x_train, y_train, feature_columns = build_team_training_matrix(normalized["team_train"])
         if normalized["team_test"].empty or "Label" not in normalized["team_test"].columns or normalized["team_test"]["Label"].dropna().empty:
-            x_train, x_eval, y_train, y_eval = sklearn_train_test_split(
+            x_train, x_eval, y_train, y_eval = safe_train_eval_split(
                 x_train,
                 y_train,
                 test_size=float(payload.get("eval_size", 0.25) or 0.25),
-                random_state=int(payload.get("seed", 2026) or 2026),
-                stratify=y_train if pd.Series(y_train).value_counts().min() >= 2 else None,
+                random_state=train_config["seed"],
             )
         else:
             x_eval, y_eval, _ = build_team_training_matrix(normalized["team_test"], feature_columns=feature_columns)
     else:
-        x_train, y_train, feature_columns = build_training_matrix(train_rows, base_model, feature_store)
+        effective_target = train_config["training_target"]
+        if effective_target == "over_under_25" and not has_over_under_target(train_rows):
+            effective_target = "result"
+            target_warning = "El dataset no tiene goles suficientes para entrenar Over/Under 2.5; U/O queda con Poisson."
+        x_train, y_train, feature_columns = build_training_matrix(train_rows, base_model, feature_store, target=effective_target)
         if test_rows.empty:
-            stratify = y_train if pd.Series(y_train).value_counts().min() >= 2 else None
-            x_train, x_eval, y_train, y_eval = sklearn_train_test_split(
+            x_train, x_eval, y_train, y_eval = safe_train_eval_split(
                 x_train,
                 y_train,
                 test_size=float(payload.get("eval_size", 0.25) or 0.25),
-                random_state=int(payload.get("seed", 2026) or 2026),
-                stratify=stratify,
+                random_state=train_config["seed"],
             )
         else:
-            x_eval, y_eval, _ = build_training_matrix(test_rows, base_model, feature_store, feature_columns=feature_columns)
+            x_eval, y_eval, _ = build_training_matrix(test_rows, base_model, feature_store, feature_columns=feature_columns, target=effective_target)
 
-    clf = RandomForestClassifier(
-        n_estimators=int(payload.get("n_estimators", 240) or 240),
-        random_state=int(payload.get("seed", 2026) or 2026),
-        class_weight="balanced_subsample",
-        min_samples_leaf=max(int(payload.get("min_samples_leaf", 2) or 2), 1),
+    if x_train.empty or pd.Series(y_train).dropna().empty:
+        raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
+    y_train_encoded, label_classes = encode_labels(y_train)
+    y_eval_encoded = encode_existing_labels(y_eval, label_classes)
+    tuned = tune_model_if_requested(train_config, x_train, y_train_encoded)
+    if tuned.get("best_params"):
+        train_config["params"].update(tuned["best_params"])
+    fit_result = fit_configured_classifier(
+        x_train=x_train,
+        y_train=y_train_encoded,
+        model_key=train_config["model_type"],
+        params=train_config["params"],
+        n_jobs=train_config["n_jobs"],
+        requested_device=train_config["device"],
+        seed=train_config["seed"],
+        num_classes=len(label_classes),
     )
-    clf.fit(x_train, y_train)
-    metrics = classification_metrics(clf, x_train, y_train, x_eval, y_eval)
+    clf = fit_result["classifier"]
+    metrics = classification_metrics(clf, x_train, y_train_encoded, x_eval, y_eval_encoded)
+    hardware = detect_hardware()
+    hardware.update({
+        "requested_device": train_config["device"],
+        "actual_device": fit_result["device"],
+        "n_jobs": train_config["n_jobs"],
+        "effective_n_jobs": effective_n_jobs(train_config["n_jobs"], hardware["cpu_count"]),
+    })
     record = {
         "classifier": clf,
         "feature_columns": feature_columns,
@@ -157,9 +279,19 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "kaggle_files": [str(path) for path in files],
         "history_source": history_source,
         "metrics": metrics,
-        "classes": list(clf.classes_),
+        "classes": label_classes,
+        "encoded_classes": list(range(len(label_classes))),
         "mode": normalized["training_mode"],
+        "effective_target": effective_target,
+        "requested_target": train_config["training_target"],
         "target_column": normalized["target_column"],
+        "model_type": train_config["model_type"],
+        "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
+        "model_params": train_config["params"],
+        "tuning": tuned,
+        "hardware": hardware,
+        "warnings": [warning for warning in [target_warning, *fit_result.get("warnings", [])] if warning],
+        "top_features": top_feature_importances(clf, feature_columns),
     }
     save_hybrid_model(record)
     return {
@@ -170,6 +302,12 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "eval_rows": int(len(y_eval)),
         "source": KAGGLE_DATASET_SLUG,
         "mode": normalized["training_mode"],
+        "effective_target": effective_target,
+        "requested_target": train_config["training_target"],
+        "model_type": train_config["model_type"],
+        "hardware": hardware,
+        "tuning": tuned,
+        "warnings": record["warnings"],
     }
 
 
@@ -187,10 +325,16 @@ def predict_match_payload(
     away_team = str(fixture.get("Equipo 2", away or ""))
     poisson = base_model.match_probabilities(home_team, away_team)
     base_probs = {"H": poisson["home"], "D": poisson["draw"], "A": poisson["away"]}
-    ml_probs, ml_note = ({}, "Modelo Kaggle no entrenado.")
+    base_totals = {"over25": poisson["over25"], "under25": poisson["under25"]}
+    ml_outputs = {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
     if use_ml_model:
-        ml_probs, ml_note = predict_ml_probs(base_model, home_team, away_team)
-    blended = blend_probabilities(base_probs, ml_probs, ml_weight if ml_probs else 0.0)
+        ml_outputs = predict_ml_outputs(base_model, home_team, away_team)
+    result_ml = ml_outputs.get("result", {})
+    over_under_ml = ml_outputs.get("over_under_25", {})
+    result_weight = ml_weight if result_ml else 0.0
+    totals_weight = ml_weight if over_under_ml else 0.0
+    blended = blend_probabilities(base_probs, result_ml, result_weight)
+    blended_totals = blend_total_probabilities(base_totals, over_under_ml, totals_weight)
     return {
         "fixture": {
             "id": str(fixture.get("No.", "")),
@@ -205,13 +349,17 @@ def predict_match_payload(
             "home": round(blended["H"] * 100.0, 2),
             "draw": round(blended["D"] * 100.0, 2),
             "away": round(blended["A"] * 100.0, 2),
-            "over25": round(poisson["over25"] * 100.0, 2),
-            "under25": round(poisson["under25"] * 100.0, 2),
+            "over25": round(blended_totals["over25"] * 100.0, 2),
+            "under25": round(blended_totals["under25"] * 100.0, 2),
         },
         "model_probs": {
             "poisson": {key: round(value * 100.0, 2) for key, value in base_probs.items()},
-            "ml": {key: round(value * 100.0, 2) for key, value in ml_probs.items()},
-            "ml_weight": round(float(ml_weight if ml_probs else 0.0), 3),
+            "poisson_totals": {key: round(value * 100.0, 2) for key, value in base_totals.items()},
+            "ml": {key: round(value * 100.0, 2) for key, value in result_ml.items()},
+            "over_under_ml": {key: round(value * 100.0, 2) for key, value in over_under_ml.items()},
+            "ml_weight": round(float(ml_weight if result_ml or over_under_ml else 0.0), 3),
+            "result_weight": round(float(result_weight), 3),
+            "over_under_weight": round(float(totals_weight), 3),
         },
         "expected_goals": {
             "home": round(poisson["lambda1"], 3),
@@ -219,7 +367,7 @@ def predict_match_payload(
         },
         "modal_score": f"{poisson['modal_g1']}-{poisson['modal_g2']}",
         "prediction": label_display(max(blended, key=blended.get), home_team, away_team),
-        "notes": [ml_note],
+        "notes": ml_outputs.get("notes", []),
     }
 
 
@@ -310,7 +458,15 @@ def standardize_match_rows(df: pd.DataFrame, source: str = "") -> pd.DataFrame:
             label = label_from_target(row.get(target_col), home, away)
         if label not in TARGET_LABELS:
             continue
-        rows.append({"Home": home, "Away": away, "Label": label, "Source": source})
+        record = {"Home": home, "Away": away, "Label": label, "Source": source}
+        if goals_home and goals_away:
+            try:
+                record["HG"] = float(row.get(goals_home))
+                record["AG"] = float(row.get(goals_away))
+                record["OverUnder25"] = int((record["HG"] + record["AG"]) >= 2.5)
+            except (TypeError, ValueError):
+                pass
+        rows.append(record)
     output = pd.DataFrame(rows)
     output.attrs["target_column"] = target_col or f"{goals_home}/{goals_away}"
     output.attrs["team_columns"] = [home_col, away_col]
@@ -401,8 +557,12 @@ def build_training_matrix(
         base_model: WorldCupModel,
         team_features: pd.DataFrame,
         feature_columns: Optional[List[str]] = None,
+        target: str = "result",
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
-    records = [match_feature_row(base_model, team_features, row["Home"], row["Away"]) for _, row in rows.iterrows()]
+    working = rows.copy()
+    if target == "over_under_25":
+        working = working[working["OverUnder25"].notna()] if "OverUnder25" in working.columns else working.iloc[0:0]
+    records = [match_feature_row(base_model, team_features, row["Home"], row["Away"]) for _, row in working.iterrows()]
     x = pd.DataFrame(records).fillna(0.0)
     if feature_columns is None:
         feature_columns = list(x.columns)
@@ -410,7 +570,9 @@ def build_training_matrix(
         if column not in x.columns:
             x[column] = 0.0
     x = x[feature_columns].astype(float)
-    return x, rows["Label"].astype(str), feature_columns
+    if target == "over_under_25":
+        return x, working["OverUnder25"].astype(int), feature_columns
+    return x, working["Label"].astype(str), feature_columns
 
 
 def match_feature_row(base_model: WorldCupModel, team_features: pd.DataFrame, home: str, away: str) -> Dict[str, float]:
@@ -445,10 +607,415 @@ def match_feature_row(base_model: WorldCupModel, team_features: pd.DataFrame, ho
     return row
 
 
+def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+    model_key = normalize_model_key(str(payload.get("model_type") or default_training_payload()["model_type"]))
+    spec = MODEL_SPECS[model_key]
+    params = dict(spec.defaults)
+    for key in MODEL_PARAM_KEYS:
+        if key in params and payload.get(key) not in {None, ""}:
+            params[key] = coerce_param(payload.get(key), params[key])
+    n_jobs = normalize_n_jobs(payload.get("n_jobs", -1))
+    device = str(payload.get("device") or "auto").strip().lower()
+    if device not in {"auto", "cpu", "cuda"}:
+        device = "auto"
+    return {
+        "model_type": model_key,
+        "training_target": normalize_training_target(payload.get("training_target", payload.get("target", "result"))),
+        "params": params,
+        "seed": int(float(payload.get("seed", 2026) or 2026)),
+        "n_jobs": n_jobs,
+        "device": device,
+        "tuning_enabled": bool(payload.get("tuning_enabled", False)),
+        "n_trials": max(int(float(payload.get("n_trials", payload.get("trials", 12)) or 12)), 1),
+        "optuna_sampler": str(payload.get("optuna_sampler") or "tpe"),
+        "optuna_pruner": str(payload.get("optuna_pruner") or "none"),
+        "objective": str(payload.get("objective") or "F1"),
+        "tune_params": payload.get("tune_params", payload.get("tune", "all")),
+    }
+
+
+def normalize_training_target(value: Any) -> str:
+    key = str(value or "result").strip().lower().replace("-", "_")
+    if key in {"over_under", "over_under_25", "uo25", "u_o_25", "overunder25"}:
+        return "over_under_25"
+    return "result"
+
+
+def coerce_param(value: Any, default: Any) -> Any:
+    if isinstance(default, bool):
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "si", "on"}
+        return bool(value)
+    if isinstance(default, int) and not isinstance(default, bool):
+        return int(float(value))
+    if isinstance(default, float):
+        return float(value)
+    return value
+
+
+def normalize_n_jobs(value: Any) -> int:
+    try:
+        n_jobs = int(float(value))
+    except (TypeError, ValueError):
+        n_jobs = -1
+    if n_jobs == 0 or n_jobs < -1:
+        return -1
+    return n_jobs
+
+
+def effective_n_jobs(n_jobs: int, cpu_count: int) -> int:
+    return cpu_count if n_jobs == -1 else max(1, min(int(n_jobs), int(cpu_count or 1)))
+
+
+def has_over_under_target(rows: pd.DataFrame) -> bool:
+    return "OverUnder25" in rows.columns and rows["OverUnder25"].dropna().shape[0] > 0
+
+
+def safe_train_eval_split(x: pd.DataFrame, y: pd.Series, test_size: float, random_state: int):
+    y_series = pd.Series(y).reset_index(drop=True)
+    if len(y_series) < 4 or y_series.nunique(dropna=True) < 2:
+        return x.copy(), x.copy(), y_series.copy(), y_series.copy()
+    test_count = max(1, int(round(len(y_series) * float(test_size))))
+    n_classes = int(y_series.nunique(dropna=True))
+    counts = y_series.value_counts()
+    stratify = None
+    if counts.min() >= 2 and test_count >= n_classes and (len(y_series) - test_count) >= n_classes:
+        stratify = y_series
+    try:
+        return sklearn_train_test_split(
+            x,
+            y_series,
+            test_size=float(test_size),
+            random_state=random_state,
+            stratify=stratify,
+        )
+    except ValueError:
+        return x.copy(), x.copy(), y_series.copy(), y_series.copy()
+
+
+def encode_labels(y: pd.Series) -> Tuple[pd.Series, List[Any]]:
+    values = pd.Series(y).reset_index(drop=True)
+    if values.astype(str).isin(TARGET_LABELS).all():
+        classes: List[Any] = [label for label in TARGET_LABELS if label in set(values.astype(str))]
+        mapping = {label: index for index, label in enumerate(classes)}
+        return values.astype(str).map(mapping).astype(int), classes
+    numeric = pd.to_numeric(values, errors="coerce")
+    if numeric.notna().all():
+        classes = sorted({int(value) for value in numeric.astype(int).tolist()})
+        mapping = {label: index for index, label in enumerate(classes)}
+        return numeric.astype(int).map(mapping).astype(int), classes
+    classes = sorted(values.astype(str).unique().tolist())
+    mapping = {label: index for index, label in enumerate(classes)}
+    return values.astype(str).map(mapping).astype(int), classes
+
+
+def encode_existing_labels(y: pd.Series, classes: List[Any]) -> pd.Series:
+    values = pd.Series(y).reset_index(drop=True)
+    mapping = {str(label): index for index, label in enumerate(classes)}
+    return values.map(lambda item: mapping.get(str(item), -1)).astype(int)
+
+
+def fit_configured_classifier(
+        x_train: pd.DataFrame,
+        y_train: pd.Series,
+        model_key: str,
+        params: Dict[str, Any],
+        n_jobs: int,
+        requested_device: str,
+        seed: int,
+        num_classes: int,
+) -> Dict[str, Any]:
+    device, device_warnings = resolve_device(model_key, requested_device)
+    try:
+        classifier = build_worldcup_classifier(
+            model_key=model_key,
+            params=params,
+            n_jobs=n_jobs,
+            device=device,
+            seed=seed,
+            num_classes=num_classes,
+        )
+        classifier.fit(x_train, y_train)
+        return {"classifier": classifier, "device": device, "warnings": device_warnings}
+    except Exception as exc:
+        if device == "cuda":
+            fallback = build_worldcup_classifier(
+                model_key=model_key,
+                params=params,
+                n_jobs=n_jobs,
+                device="cpu",
+                seed=seed,
+                num_classes=num_classes,
+            )
+            fallback.fit(x_train, y_train)
+            return {
+                "classifier": fallback,
+                "device": "cpu",
+                "warnings": [*device_warnings, f"CUDA fallo durante fit ({exc.__class__.__name__}); se reintento en CPU."],
+            }
+        raise
+
+
+def resolve_device(model_key: str, requested_device: str) -> Tuple[str, List[str]]:
+    hardware = detect_hardware()
+    warnings_out: List[str] = []
+    if model_key == "ngboost":
+        if requested_device == "cuda":
+            warnings_out.append("NGBoost no usa CUDA en esta integracion; se entreno en CPU.")
+        return "cpu", warnings_out
+    if requested_device == "cpu":
+        return "cpu", warnings_out
+    if requested_device in {"auto", "cuda"} and hardware["cuda_available"]:
+        return "cuda", warnings_out
+    if requested_device == "cuda":
+        warnings_out.append(f"CUDA no disponible ({hardware.get('cuda_error') or 'sin dispositivos'}); se entreno en CPU.")
+    return "cpu", warnings_out
+
+
+def build_worldcup_classifier(
+        model_key: str,
+        params: Dict[str, Any],
+        n_jobs: int,
+        device: str,
+        seed: int,
+        num_classes: int,
+):
+    if model_key == "xgboost":
+        from xgboost import XGBClassifier
+
+        kwargs = {
+            "booster": "gbtree",
+            "n_estimators": int(params.get("n_estimators", 100)),
+            "learning_rate": float(params.get("learning_rate", 0.3)),
+            "max_depth": int(params.get("max_depth", 6)),
+            "min_child_weight": int(params.get("min_child_weight", 1)),
+            "reg_lambda": float(params.get("lambda_regularization", 1.0)),
+            "reg_alpha": float(params.get("alpha_regularization", 0.0)),
+            "random_state": seed,
+            "n_jobs": n_jobs,
+            "eval_metric": "mlogloss" if num_classes > 2 else "logloss",
+        }
+        if num_classes > 2:
+            kwargs.update({"objective": "multi:softprob", "num_class": num_classes})
+        else:
+            kwargs["objective"] = "binary:logistic"
+        if device == "cuda":
+            kwargs.update({"tree_method": "hist", "device": "cuda"})
+        return XGBClassifier(**kwargs)
+    if model_key == "lightgbm":
+        from src.models.classifiers.boosting import WarningFreeLGBMClassifier
+
+        if WarningFreeLGBMClassifier is None:
+            raise WorldCupTrainingError("LightGBM no esta instalado. Ejecuta pip install -r requirements.txt.")
+        return WarningFreeLGBMClassifier(
+            objective="multiclass" if num_classes > 2 else "binary",
+            n_estimators=int(params.get("n_estimators", 300)),
+            num_leaves=int(params.get("num_leaves", 31)),
+            max_depth=int(params.get("max_depth", -1)),
+            learning_rate=float(params.get("learning_rate", 0.05)),
+            min_child_samples=int(params.get("min_child_samples", 20)),
+            reg_lambda=float(params.get("lambda_regularization", 0.0)),
+            reg_alpha=float(params.get("alpha_regularization", 0.0)),
+            random_state=seed,
+            n_jobs=n_jobs,
+            verbosity=-1,
+            device_type="gpu" if device == "cuda" else "cpu",
+        )
+    if model_key == "catboost":
+        from catboost import CatBoostClassifier
+
+        return CatBoostClassifier(
+            iterations=int(params.get("n_estimators", 300)),
+            depth=int(params.get("max_depth", 6)),
+            learning_rate=float(params.get("learning_rate", 0.05)),
+            l2_leaf_reg=float(params.get("l2_leaf_reg", 3.0)),
+            random_strength=float(params.get("random_strength", 1.0)),
+            loss_function="MultiClass" if num_classes > 2 else "Logloss",
+            random_seed=seed,
+            verbose=False,
+            allow_writing_files=False,
+            thread_count=n_jobs,
+            task_type="GPU" if device == "cuda" else "CPU",
+        )
+    if model_key == "ngboost":
+        from ngboost import NGBClassifier
+        from ngboost.distns import k_categorical
+        from sklearn.tree import DecisionTreeRegressor
+
+        return NGBClassifier(
+            Dist=k_categorical(num_classes),
+            Base=DecisionTreeRegressor(max_depth=int(params.get("max_depth", 3)), random_state=seed),
+            n_estimators=int(params.get("n_estimators", 300)),
+            learning_rate=float(params.get("learning_rate", 0.02)),
+            minibatch_frac=float(params.get("minibatch_frac", 1.0)),
+            natural_gradient=bool(params.get("natural_gradient", True)),
+            random_state=seed,
+            verbose=False,
+        )
+    raise WorldCupTrainingError(f'Modelo "{model_key}" no soportado para Mundial.')
+
+
+def tune_model_if_requested(config: Dict[str, Any], x_train: pd.DataFrame, y_train: pd.Series) -> Dict[str, Any]:
+    if not config.get("tuning_enabled"):
+        return {"enabled": False}
+    tunables = selected_tunables(config)
+    if not tunables:
+        return {"enabled": False, "warning": "No hay parametros tunables para este modelo."}
+    try:
+        import optuna
+    except ImportError as exc:
+        raise WorldCupTrainingError("Optuna no esta instalado. Ejecuta pip install -r requirements.txt.") from exc
+
+    x_fit, x_eval, y_fit, y_eval = safe_train_eval_split(
+        x_train,
+        y_train,
+        test_size=0.25,
+        random_state=config["seed"],
+    )
+    objective_name = normalize_metric_name(config["objective"])
+
+    def objective(trial):
+        trial_params = dict(config["params"])
+        for name, spec in tunables.items():
+            trial_params[name] = suggest_trial_value(trial, name, spec)
+        try:
+            fit_result = fit_configured_classifier(
+                x_train=x_fit,
+                y_train=y_fit,
+                model_key=config["model_type"],
+                params=trial_params,
+                n_jobs=config["n_jobs"],
+                requested_device=config["device"],
+                seed=config["seed"],
+                num_classes=int(pd.Series(y_train).nunique()),
+            )
+            pred = fit_result["classifier"].predict(x_eval)
+            return metric_score(y_eval, pred, objective_name)
+        except Exception as exc:
+            trial.set_user_attr("error", f"{exc.__class__.__name__}: {exc}")
+            return 0.0
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=build_optuna_sampler(optuna, config["optuna_sampler"], config["seed"]),
+        pruner=build_optuna_pruner(optuna, config["optuna_pruner"]),
+    )
+    study.optimize(objective, n_trials=config["n_trials"], show_progress_bar=False)
+    try:
+        best_value = round(float(study.best_value), 4)
+        best_trial = int(study.best_trial.number + 1)
+        best_params = dict(study.best_params)
+    except ValueError:
+        best_value = 0.0
+        best_trial = 0
+        best_params = {}
+    return {
+        "enabled": True,
+        "trials": config["n_trials"],
+        "sampler": config["optuna_sampler"],
+        "pruner": config["optuna_pruner"],
+        "objective": objective_name,
+        "best_value": best_value,
+        "best_trial": best_trial,
+        "best_params": best_params,
+    }
+
+
+def selected_tunables(config: Dict[str, Any]) -> Dict[str, Any]:
+    spec = MODEL_SPECS[config["model_type"]]
+    raw = config.get("tune_params", "all")
+    if isinstance(raw, str):
+        params = ["all"] if raw.strip().lower() in {"", "all"} else [item.strip() for item in raw.split(",") if item.strip()]
+    elif isinstance(raw, list):
+        params = raw
+    else:
+        params = ["all"]
+    candidates = tunable_param_names(spec) if params == ["all"] else params
+    output = {}
+    for param in candidates:
+        if param not in MODEL_PARAM_KEYS:
+            continue
+        try:
+            output[param] = spec.model_cls.get_suggest_param_values(param=param)
+        except ValueError:
+            continue
+    return output
+
+
+def suggest_trial_value(trial, name: str, spec: Any) -> Any:
+    if isinstance(spec, list):
+        return trial.suggest_categorical(name, spec)
+    low, high, step = spec["low"], spec["high"], spec["step"]
+    if isinstance(low, int) and isinstance(high, int):
+        return trial.suggest_int(name, low, high, step=step)
+    return trial.suggest_float(name, float(low), float(high), step=float(step))
+
+
+def build_optuna_sampler(optuna, name: str, seed: int):
+    key = str(name or "tpe").strip().lower().replace("_", "-")
+    if key == "random":
+        return optuna.samplers.RandomSampler(seed=seed)
+    if key in {"cmaes", "cma-es"}:
+        return optuna.samplers.CmaEsSampler(seed=seed)
+    return optuna.samplers.TPESampler(seed=seed)
+
+
+def build_optuna_pruner(optuna, name: str):
+    key = str(name or "none").strip().lower().replace("_", "-")
+    if key == "median":
+        return optuna.pruners.MedianPruner(n_startup_trials=5)
+    if key in {"successive-halving", "successivehalving", "sha"}:
+        return optuna.pruners.SuccessiveHalvingPruner()
+    return optuna.pruners.NopPruner()
+
+
+def normalize_metric_name(value: Any) -> str:
+    key = str(value or "F1").strip().lower()
+    if key == "accuracy":
+        return "Accuracy"
+    if key == "precision":
+        return "Precision"
+    if key == "recall":
+        return "Recall"
+    return "F1"
+
+
+def metric_score(y_true, y_pred, metric: str) -> float:
+    if metric == "Accuracy":
+        return float(accuracy_score(y_true, y_pred))
+    if metric == "Precision":
+        return float(precision_score(y_true, y_pred, average="macro", zero_division=0.0))
+    if metric == "Recall":
+        return float(recall_score(y_true, y_pred, average="macro", zero_division=0.0))
+    return float(f1_score(y_true, y_pred, average="macro", zero_division=0.0))
+
+
+def top_feature_importances(clf, feature_columns: List[str], limit: int = 12) -> List[Dict[str, Any]]:
+    values = None
+    if hasattr(clf, "feature_importances_"):
+        values = getattr(clf, "feature_importances_")
+    elif hasattr(clf, "get_feature_importance"):
+        try:
+            values = clf.get_feature_importance()
+        except Exception:
+            values = None
+    if values is None:
+        return []
+    pairs = []
+    for column, value in zip(feature_columns, np.asarray(values, dtype=float)):
+        pairs.append({"feature": column, "importance": round(float(value), 6)})
+    return sorted(pairs, key=lambda item: item["importance"], reverse=True)[:limit]
+
+
 def predict_ml_probs(base_model: WorldCupModel, home: str, away: str) -> Tuple[Dict[str, float], str]:
+    outputs = predict_ml_outputs(base_model, home, away)
+    return outputs.get("result", {}), " - ".join(outputs.get("notes", []))
+
+
+def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str) -> Dict[str, Any]:
     record = load_hybrid_model()
     if not record:
-        return {}, "Modelo Kaggle no entrenado."
+        return {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
     if record.get("mode") == "team_strength":
         home_strength = team_strength_score(record, home)
         away_strength = team_strength_score(record, away)
@@ -457,7 +1024,14 @@ def predict_ml_probs(base_model: WorldCupModel, home: str, away: str) -> Tuple[D
         home_share = 1.0 / (1.0 + np.exp(-diff * 4.0))
         home_prob = (1.0 - draw) * home_share
         away_prob = (1.0 - draw) * (1.0 - home_share)
-        return {"H": float(home_prob), "D": float(draw), "A": float(away_prob)}, f"Modelo Kaggle team-strength aplicado ({record.get('target_column', '')})."
+        return {
+            "result": {"H": float(home_prob), "D": float(draw), "A": float(away_prob)},
+            "over_under_25": {},
+            "notes": [
+                f"Modelo {record.get('model_label', 'Kaggle')} team-strength aplicado ({record.get('target_column', '')}).",
+                "Over/Under 2.5 viene de Poisson porque el dataset de equipos no contiene goles de partido.",
+            ],
+        }
     team_features = pd.DataFrame(record.get("team_features", []))
     x = pd.DataFrame([match_feature_row(base_model, team_features, home, away)])
     feature_columns = record.get("feature_columns", BASE_FEATURE_COLUMNS)
@@ -465,14 +1039,35 @@ def predict_ml_probs(base_model: WorldCupModel, home: str, away: str) -> Tuple[D
         if column not in x.columns:
             x[column] = 0.0
     x = x[feature_columns].fillna(0.0).astype(float)
-    clf = record["classifier"]
-    probabilities = clf.predict_proba(x)[0]
+    probabilities = np.asarray(record["classifier"].predict_proba(x)[0], dtype=float)
+    labels = [str(label) for label in record.get("classes", [])]
+    target = record.get("effective_target", "result")
+    if target == "over_under_25":
+        output = {"under25": 0.0, "over25": 0.0}
+        for label, probability in zip(labels, probabilities):
+            if str(label) in {"1", "True", "true"}:
+                output["over25"] += float(probability)
+            else:
+                output["under25"] += float(probability)
+        total = max(sum(output.values()), 1e-9)
+        return {
+            "result": {},
+            "over_under_25": {key: value / total for key, value in output.items()},
+            "notes": [f"Modelo {record.get('model_label', 'Kaggle')} aplicado a Over/Under 2.5."],
+        }
     output = {label: 0.0 for label in TARGET_LABELS}
-    for label, probability in zip(clf.classes_, probabilities):
+    for label, probability in zip(labels, probabilities):
         if label in output:
-            output[str(label)] = float(probability)
+            output[label] = float(probability)
     total = max(sum(output.values()), 1e-9)
-    return {key: value / total for key, value in output.items()}, "Modelo Kaggle aplicado."
+    return {
+        "result": {key: value / total for key, value in output.items()},
+        "over_under_25": {},
+        "notes": [
+            f"Modelo {record.get('model_label', 'Kaggle')} aplicado a 1X2.",
+            "Over/Under 2.5 viene de Poisson; entrena target U/O si el dataset trae goles.",
+        ],
+    }
 
 
 def team_strength_score(record: Dict[str, Any], team: str) -> float:
@@ -491,18 +1086,30 @@ def team_strength_score(record: Dict[str, Any], team: str) -> float:
     clf = record["classifier"]
     if hasattr(clf, "predict_proba"):
         probabilities = clf.predict_proba(x)[0]
-        class_values = list(clf.classes_)
-        if 1 in class_values:
-            return float(probabilities[class_values.index(1)])
-        if "1" in class_values:
-            return float(probabilities[class_values.index("1")])
-    return float(clf.predict(x)[0])
+        class_values = record.get("classes", [])
+        for target_value in (1, "1", True, "True", "true"):
+            if target_value in class_values:
+                return float(probabilities[class_values.index(target_value)])
+    encoded = int(clf.predict(x)[0])
+    classes = record.get("classes", [])
+    if 0 <= encoded < len(classes):
+        return 1.0 if str(classes[encoded]) in {"1", "True", "true"} else 0.0
+    return float(encoded)
 
 
 def blend_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, float], ml_weight: float) -> Dict[str, float]:
     weight = min(max(float(ml_weight or 0.0), 0.0), 1.0)
     output = {}
     for label in TARGET_LABELS:
+        output[label] = base_probs.get(label, 0.0) * (1.0 - weight) + ml_probs.get(label, base_probs.get(label, 0.0)) * weight
+    total = max(sum(output.values()), 1e-9)
+    return {label: value / total for label, value in output.items()}
+
+
+def blend_total_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, float], ml_weight: float) -> Dict[str, float]:
+    weight = min(max(float(ml_weight or 0.0), 0.0), 1.0)
+    output = {}
+    for label in ["over25", "under25"]:
         output[label] = base_probs.get(label, 0.0) * (1.0 - weight) + ml_probs.get(label, base_probs.get(label, 0.0)) * weight
     total = max(sum(output.values()), 1e-9)
     return {label: value / total for label, value in output.items()}
@@ -535,7 +1142,16 @@ def save_hybrid_model(record: Dict[str, Any]) -> None:
         "classes": record.get("classes", []),
         "metrics": record.get("metrics", {}),
         "mode": record.get("mode", ""),
+        "effective_target": record.get("effective_target", ""),
+        "requested_target": record.get("requested_target", ""),
         "target_column": record.get("target_column", ""),
+        "model_type": record.get("model_type", ""),
+        "model_label": record.get("model_label", ""),
+        "model_params": record.get("model_params", {}),
+        "tuning": record.get("tuning", {}),
+        "hardware": record.get("hardware", {}),
+        "warnings": record.get("warnings", []),
+        "top_features": record.get("top_features", []),
         "kaggle_files": record.get("kaggle_files", []),
         "history_source": record.get("history_source", ""),
     }
@@ -557,7 +1173,21 @@ def read_model_metadata() -> Dict[str, Any]:
                 return data
         except Exception:
             pass
-    return {"trained": False, "model_path": str(HYBRID_MODEL_FILE), "feature_count": 0, "classes": [], "metrics": {}}
+    return {
+        "trained": False,
+        "model_path": str(HYBRID_MODEL_FILE),
+        "feature_count": 0,
+        "classes": [],
+        "metrics": {},
+        "model_type": "",
+        "model_label": "",
+        "effective_target": "",
+        "requested_target": "",
+        "hardware": detect_hardware(),
+        "tuning": {"enabled": False},
+        "warnings": [],
+        "top_features": [],
+    }
 
 
 def select_prediction_fixture(tournament: Dict[str, Any], fixture_id: Optional[Any] = None, home: Optional[str] = None, away: Optional[str] = None) -> pd.Series:

@@ -62,6 +62,7 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/training/dataset" in paths
     assert "/api/mundial/training/train" in paths
     assert "/api/mundial/training/status" in paths
+    assert "/api/mundial/training/options" in paths
     assert "/api/mundial/predict-match" in paths
     assert "/api/mundial/procedure" in paths
     assert "/api/worldcup/overview" not in paths
@@ -151,15 +152,37 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-use-player-features" in html_source
     assert "sim-use-ml-model" in html_source
     assert "training-train" in html_source
+    assert "worldcup-model-type" in html_source
+    assert "worldcup-tuning-enabled" in html_source
+    assert "worldcup-device" in html_source
+    assert "worldcup-n-jobs" in html_source
+    assert "match-prob-breakdown" in html_source
+    assert "training-model-params" in html_source
     assert "predict-match-btn" in html_source
     assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
     assert "/api/mundial/player-features" in app_source
     assert "/api/mundial/training/train" in app_source
+    assert "trainingPayload" in app_source
+    assert "predictionBreakdownTable" in app_source
+    assert "paramsTable" in app_source
     assert "/api/mundial/predict-match" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
     assert "/api/worldcup/simulate" not in app_source
     assert "player-photo" in app_source
+
+
+def test_worldcup_training_options_expose_boosting_models_and_hardware():
+    from src.worldcup.training import training_options
+
+    options = training_options()
+    keys = {model["key"] for model in options["models"]}
+
+    assert keys == {"ngboost", "catboost", "lightgbm", "xgboost"}
+    assert options["hardware"]["cpu_count"] >= 1
+    assert options["hardware"]["default_n_jobs"] == -1
+    assert options["defaults"]["model_type"] == "xgboost"
+    assert options["defaults"]["training_target"] == "result"
 
 
 def test_worldcup_fallback_has_2026_groups_opener_and_bracket():
@@ -481,10 +504,23 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
 
     assert status["trainable"] is True
     assert result["model"]["trained"] is True
+    assert result["model"]["model_type"] == "xgboost"
+    assert result["model"]["hardware"]["actual_device"] in {"cpu", "cuda"}
     assert result["eval_rows"] == 2
     assert prediction["fixture"]["home"] == "Mexico"
     assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
     assert prediction["model_probs"]["ml_weight"] == 0.5
+    assert set(prediction["model_probs"]) >= {"poisson", "poisson_totals", "ml", "over_under_ml"}
+
+    over_result = training.train_hybrid_model(
+        fallback_tournament_2026(),
+        payload={"seed": 7, "n_estimators": 5, "training_target": "over_under_25"},
+    )
+    over_prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
+
+    assert over_result["effective_target"] == "over_under_25"
+    assert over_prediction["model_probs"]["over_under_ml"]
+    assert over_prediction["model_probs"]["over_under_weight"] == 0.5
 
 
 def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatch):
@@ -519,6 +555,8 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert status["target_column"] == "quarter_finalist"
     assert result["mode"] == "team_strength"
     assert result["model"]["target_column"] == "quarter_finalist"
+    assert result["model"]["model_label"] == "XGBoost"
+    assert result["model"]["hardware"]["effective_n_jobs"] >= 1
     assert prediction["model_probs"]["ml"]
     assert "team-strength" in prediction["notes"][0]
 

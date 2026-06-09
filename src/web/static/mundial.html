@@ -135,6 +135,10 @@
         <summary>Detalle prediccion partido</summary>
         <div id="match-prediction-detail"></div>
       </details>
+      <details class="data-drawer" open>
+        <summary>Desglose Poisson / ML</summary>
+        <div id="match-prob-breakdown"></div>
+      </details>
       <div id="champion-strip" class="champion-strip"></div>
       <div class="results-grid">
         <div>
@@ -153,21 +157,81 @@
         <h2>Entrenamiento Mundial</h2>
         <small id="training-source">Kaggle + Elo/Poisson</small>
       </div>
-      <div class="training-panel">
-        <div class="control-title">
-          <strong>Dataset Kaggle</strong>
-          <small id="training-status">Sin revisar</small>
-        </div>
-        <div class="actions-row">
-          <button id="training-refresh" type="button">Revisar dataset</button>
-          <button id="training-download" type="button">Descargar Kaggle</button>
-          <button id="training-train" class="primary" type="button">Entrenar hibrido</button>
-        </div>
+      <div class="model-flow">
+        <article class="flow-step">
+          <header><span>1</span><div><strong>Dataset Kaggle</strong><small id="training-status">Sin revisar</small></div></header>
+          <div class="actions-row">
+            <button id="training-refresh" type="button">Revisar dataset</button>
+            <button id="training-download" type="button">Descargar Kaggle</button>
+          </div>
+          <div id="training-summary" class="prediction-grid compact"></div>
+        </article>
+
+        <article class="flow-step">
+          <header><span>2</span><div><strong>Hardware</strong><small>CPU/CUDA y paralelismo</small></div></header>
+          <div id="training-hardware" class="hardware-grid"></div>
+          <div class="control-grid compact-controls">
+            <label>Device<select id="worldcup-device"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
+            <label>n_jobs<input id="worldcup-n-jobs" type="number" min="-1" step="1" value="-1"></label>
+          </div>
+        </article>
+
+        <article class="flow-step">
+          <header><span>3</span><div><strong>Modelo</strong><small>Boosting del proyecto principal</small></div></header>
+          <div class="control-grid compact-controls">
+            <label>Modelo<select id="worldcup-model-type"></select></label>
+            <label>Target<select id="worldcup-target"><option value="result">Resultado 1/X/2</option><option value="over_under_25">Over/Under 2.5</option></select></label>
+            <label>N estimadores<input id="worldcup-n-estimators" type="number" min="1" step="1"></label>
+            <label>Learning rate<input id="worldcup-learning-rate" type="number" min="0.001" step="0.001"></label>
+            <label>Max depth<input id="worldcup-max-depth" type="number" step="1"></label>
+          </div>
+        </article>
+
+        <article class="flow-step">
+          <header><span>4</span><div><strong>Fine-tuning Optuna</strong><small>Busqueda de hiperparametros</small></div></header>
+          <div class="control-grid compact-controls">
+            <label class="check"><input id="worldcup-tuning-enabled" type="checkbox"> Activar tuning</label>
+            <label>Trials<input id="worldcup-n-trials" type="number" min="1" step="1" value="12"></label>
+            <label>Metrica<select id="worldcup-objective"><option>F1</option><option>Accuracy</option><option>Precision</option><option>Recall</option></select></label>
+            <label>Sampler<select id="worldcup-optuna-sampler"><option value="tpe">TPE</option><option value="random">Random</option><option value="cmaes">CMA-ES</option></select></label>
+            <label>Pruner<select id="worldcup-optuna-pruner"><option value="none">None</option><option value="median">Median</option><option value="successive-halving">Successive Halving</option></select></label>
+            <label>Parametros<input id="worldcup-tune-params" value="all"></label>
+          </div>
+          <details class="inline-drawer">
+            <summary>Parametros avanzados por modelo</summary>
+            <div class="control-grid compact-controls">
+              <label>min_child_weight<input id="worldcup-min-child-weight" type="number" step="1"></label>
+              <label>lambda_regularization<input id="worldcup-lambda-regularization" type="number" step="0.1"></label>
+              <label>alpha_regularization<input id="worldcup-alpha-regularization" type="number" step="0.1"></label>
+              <label>num_leaves<input id="worldcup-num-leaves" type="number" step="1"></label>
+              <label>min_child_samples<input id="worldcup-min-child-samples" type="number" step="1"></label>
+              <label>minibatch_frac<input id="worldcup-minibatch-frac" type="number" step="0.05"></label>
+              <label class="check"><input id="worldcup-natural-gradient" type="checkbox"> natural_gradient</label>
+              <label>l2_leaf_reg<input id="worldcup-l2-leaf-reg" type="number" step="0.1"></label>
+              <label>random_strength<input id="worldcup-random-strength" type="number" step="0.1"></label>
+            </div>
+          </details>
+        </article>
+
+        <article class="flow-step">
+          <header><span>5</span><div><strong>Entrenar y auditar</strong><small>Metricas, features y warnings</small></div></header>
+          <div class="actions-row">
+            <button id="training-train" class="primary" type="button">Entrenar modelo Mundial</button>
+          </div>
+          <div id="training-warnings" class="status-strip"></div>
+        </article>
       </div>
-      <div id="training-summary" class="prediction-grid"></div>
       <details class="data-drawer" open>
         <summary>Metricas train/test</summary>
         <div id="training-metrics"></div>
+      </details>
+      <details class="data-drawer" open>
+        <summary>Features importantes</summary>
+        <div id="training-features"></div>
+      </details>
+      <details class="data-drawer">
+        <summary>Parametros finales del modelo</summary>
+        <div id="training-model-params"></div>
       </details>
       <details class="data-drawer">
         <summary>Preview dataset</summary>

@@ -38,6 +38,7 @@ from src.worldcup.training import (
     dataset_status,
     download_kaggle_dataset,
     predict_match_payload,
+    training_options as worldcup_training_options,
     train_hybrid_model,
 )
 
@@ -339,7 +340,13 @@ def training_dataset() -> Dict[str, Any]:
 
 
 def training_status() -> Dict[str, Any]:
-    return dataset_status()
+    status = dataset_status()
+    status["options"] = worldcup_training_options()
+    return status
+
+
+def training_options() -> Dict[str, Any]:
+    return worldcup_training_options()
 
 
 def training_train(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:

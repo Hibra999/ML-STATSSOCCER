@@ -7,8 +7,10 @@ const state = {
   lineups: [],
   playerFeatures: [],
   training: null,
+  trainingOptions: null,
   teamAssets: new Map(),
   defaultsApplied: false,
+  trainingControlsApplied: false,
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -35,6 +37,7 @@ function bindEvents() {
   document.getElementById("training-download").addEventListener("click", downloadTrainingDataset);
   document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
   document.getElementById("predict-match-btn").addEventListener("click", runMatchPrediction);
+  document.getElementById("worldcup-model-type").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
 }
 
 async function api(path, options = {}) {
@@ -67,6 +70,7 @@ async function loadAll(refresh) {
     state.players = players.players || [];
     state.playerFeatures = playerFeatures.rows || [];
     state.training = training;
+    state.trainingOptions = training.options || null;
     rebuildTeamAssets();
     applyDefaultConfig(overview.default_config || {});
     renderOverview(overview);
@@ -98,7 +102,11 @@ function setLoading() {
   document.getElementById("lineup-features-table").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("player-features-table").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-summary").innerHTML = loadingHtml("Dataset pendiente");
+  document.getElementById("training-hardware").innerHTML = loadingHtml("Hardware pendiente");
+  document.getElementById("training-features").innerHTML = loadingHtml("Features pendientes");
+  document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
   document.getElementById("match-prediction").innerHTML = loadingHtml("Prediccion pendiente");
+  document.getElementById("match-prob-breakdown").innerHTML = loadingHtml("Desglose pendiente");
 }
 
 function applyDefaultConfig(config) {
@@ -405,6 +413,7 @@ async function loadTrainingStatus() {
   try {
     const result = await api("/api/mundial/training/status");
     state.training = result;
+    state.trainingOptions = result.options || state.trainingOptions;
     renderTrainingStatus(result);
   } catch (error) {
     showError(error.message);
@@ -417,6 +426,7 @@ async function downloadTrainingDataset() {
   try {
     const result = await api("/api/mundial/training/download-kaggle", jsonOptions({ force: false }));
     state.training = result;
+    if (!state.trainingOptions) await loadTrainingStatus();
     renderTrainingStatus(result);
   } catch (error) {
     showError(error.message);
@@ -426,9 +436,9 @@ async function downloadTrainingDataset() {
 
 async function trainWorldCupModel() {
   clearAlert();
-  document.getElementById("training-status").textContent = "Entrenando modelo hibrido...";
+  document.getElementById("training-status").textContent = "Entrenando modelo Mundial...";
   try {
-    const result = await api("/api/mundial/training/train", jsonOptions(simulationPayload()));
+    const result = await api("/api/mundial/training/train", jsonOptions(trainingPayload()));
     renderTrainingResult(result);
     await loadTrainingStatus();
     document.getElementById("sim-use-ml-model").checked = true;
@@ -440,29 +450,136 @@ async function trainWorldCupModel() {
 
 function renderTrainingStatus(payload) {
   const model = payload.model || {};
+  state.trainingOptions = payload.options || state.trainingOptions;
+  renderTrainingControls(state.trainingOptions, model);
+  renderHardware((model.hardware && model.trained) ? model.hardware : ((state.trainingOptions || {}).hardware || {}));
   document.getElementById("training-status").textContent = payload.available
-    ? `${payload.train_rows || 0} train - ${payload.test_rows || 0} test - modelo ${model.trained ? "entrenado" : "pendiente"}`
+    ? `${payload.train_rows || 0} train - ${payload.test_rows || 0} test - ${model.trained ? model.model_label || "modelo entrenado" : "modelo pendiente"}`
     : "Dataset Kaggle no descargado";
+  document.getElementById("training-source").textContent = `${payload.dataset_slug || "Kaggle"} - ${payload.training_mode || "sin modo"}`;
   document.getElementById("training-summary").innerHTML = [
     predictionCard("Archivos", (payload.files || []).length),
     predictionCard("Train", payload.train_rows || 0),
     predictionCard("Test", payload.test_rows || 0),
     predictionCard("Features equipo", payload.team_feature_rows || 0),
-    predictionCard("Modelo", model.trained ? "Listo" : "Pendiente"),
+    predictionCard("Modelo", model.trained ? (model.model_label || "Listo") : "Pendiente"),
+    predictionCard("Target", model.effective_target || payload.target_column || "-"),
   ].join("");
   renderTable("training-preview", payload.preview);
   renderTable("training-metrics", metricsTableFromModel(model));
+  renderTrainingWarnings(model.warnings || []);
+  renderTable("training-features", featureImportanceTable(model.top_features || []));
+  renderTable("training-model-params", paramsTable(model));
 }
 
 function renderTrainingResult(payload) {
   renderTable("training-metrics", payload.metrics_table);
+  renderHardware(payload.hardware || {});
+  renderTrainingWarnings(payload.warnings || []);
   document.getElementById("training-summary").innerHTML = [
     predictionCard("Train", payload.train_rows || 0),
     predictionCard("Eval", payload.eval_rows || 0),
     predictionCard("Features", (payload.features || []).length),
     predictionCard("Clases", ((payload.model || {}).classes || []).join("/")),
-    predictionCard("Modelo", "Listo"),
+    predictionCard("Modelo", payload.model_type || "Listo"),
+    predictionCard("Target", payload.effective_target || ""),
   ].join("");
+  renderTable("training-features", featureImportanceTable(((payload.model || {}).top_features || [])));
+  renderTable("training-model-params", paramsTable(payload.model || {}));
+}
+
+function renderTrainingControls(options, model) {
+  if (!options) return;
+  const models = options.models || [];
+  const modelSelect = document.getElementById("worldcup-model-type");
+  if (!modelSelect.options.length) {
+    modelSelect.innerHTML = models.map((item) => `<option value="${escapeAttr(item.key)}">${escapeHtml(item.label)}</option>`).join("");
+  }
+  const selectedModel = model.model_type || (options.defaults || {}).model_type || modelSelect.value || "xgboost";
+  modelSelect.value = selectedModel;
+  const target = model.requested_target || (options.defaults || {}).training_target || "result";
+  document.getElementById("worldcup-target").value = target;
+  document.getElementById("worldcup-device").value = (model.hardware || {}).requested_device || (options.defaults || {}).device || "auto";
+  document.getElementById("worldcup-n-jobs").value = (model.hardware || {}).n_jobs ?? (options.defaults || {}).n_jobs ?? -1;
+  if (!state.trainingControlsApplied) {
+    document.getElementById("worldcup-n-trials").value = (options.defaults || {}).n_trials || 12;
+    document.getElementById("worldcup-objective").value = (options.defaults || {}).objective || "F1";
+    document.getElementById("worldcup-optuna-sampler").value = (options.defaults || {}).optuna_sampler || "tpe";
+    document.getElementById("worldcup-optuna-pruner").value = (options.defaults || {}).optuna_pruner || "none";
+    document.getElementById("worldcup-tune-params").value = (options.defaults || {}).tune_params || "all";
+    applyModelDefaults(selectedModel, false);
+    state.trainingControlsApplied = true;
+  }
+}
+
+function applyModelDefaults(modelKey, force) {
+  const models = ((state.trainingOptions || {}).models || []);
+  const model = models.find((item) => item.key === modelKey) || {};
+  const defaults = model.defaults || {};
+  const mapping = {
+    n_estimators: "worldcup-n-estimators",
+    learning_rate: "worldcup-learning-rate",
+    max_depth: "worldcup-max-depth",
+    min_child_weight: "worldcup-min-child-weight",
+    lambda_regularization: "worldcup-lambda-regularization",
+    alpha_regularization: "worldcup-alpha-regularization",
+    num_leaves: "worldcup-num-leaves",
+    min_child_samples: "worldcup-min-child-samples",
+    minibatch_frac: "worldcup-minibatch-frac",
+    l2_leaf_reg: "worldcup-l2-leaf-reg",
+    random_strength: "worldcup-random-strength",
+  };
+  Object.entries(mapping).forEach(([key, id]) => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    if (defaults[key] === undefined) {
+      input.value = "";
+      input.disabled = true;
+      return;
+    }
+    input.disabled = false;
+    if (force || input.value === "") input.value = defaults[key];
+  });
+  const natural = document.getElementById("worldcup-natural-gradient");
+  natural.disabled = defaults.natural_gradient === undefined;
+  natural.checked = Boolean(defaults.natural_gradient);
+}
+
+function renderHardware(hardware) {
+  const devices = hardware.cuda_devices || [];
+  document.getElementById("training-hardware").innerHTML = [
+    predictionCard("CPU cores", hardware.cpu_count || "-"),
+    predictionCard("CUDA", hardware.cuda_available ? "Disponible" : "No disponible"),
+    predictionCard("Device real", hardware.actual_device || hardware.device_default || "cpu"),
+    predictionCard("n_jobs", hardware.n_jobs ?? hardware.default_n_jobs ?? "-1"),
+    predictionCard("Threads", hardware.effective_n_jobs || hardware.cpu_count || "-"),
+  ].join("");
+  if (!hardware.cuda_available && hardware.cuda_error) {
+    document.getElementById("training-hardware").insertAdjacentHTML("beforeend", `<small class="hardware-note">${escapeHtml(hardware.cuda_error)}</small>`);
+  }
+  if (devices.length) {
+    document.getElementById("training-hardware").insertAdjacentHTML("beforeend", `<small class="hardware-note">${devices.map(escapeHtml).join(" | ")}</small>`);
+  }
+}
+
+function renderTrainingWarnings(warnings) {
+  document.getElementById("training-warnings").innerHTML = (warnings || []).map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
+}
+
+function featureImportanceTable(features) {
+  const rows = (features || []).map((item) => ({ Feature: item.feature, Importancia: item.importance }));
+  return { columns: rows.length ? ["Feature", "Importancia"] : [], rows, total: rows.length };
+}
+
+function paramsTable(model) {
+  const params = (model && model.model_params) || {};
+  const tuning = (model && model.tuning) || {};
+  const rows = Object.entries(params).map(([key, value]) => ({ Parametro: key, Valor: value }));
+  if (tuning.enabled) {
+    rows.push({ Parametro: "tuning.best_value", Valor: tuning.best_value ?? "" });
+    rows.push({ Parametro: "tuning.best_trial", Valor: tuning.best_trial ?? "" });
+  }
+  return { columns: rows.length ? ["Parametro", "Valor"] : [], rows, total: rows.length };
 }
 
 function metricsTableFromModel(model) {
@@ -499,9 +616,9 @@ function renderMatchPrediction(result) {
   const fixture = result.fixture || {};
   const probs = result.probabilities || {};
   document.getElementById("match-prediction").innerHTML = [
-    predictionCard(fixture.home || "Local", `${probs.home || 0}%`),
-    predictionCard("Empate", `${probs.draw || 0}%`),
-    predictionCard(fixture.away || "Visitante", `${probs.away || 0}%`),
+    predictionCard(`1 - ${fixture.home || "Local"}`, `${probs.home || 0}%`),
+    predictionCard("X - Empate", `${probs.draw || 0}%`),
+    predictionCard(`2 - ${fixture.away || "Visitante"}`, `${probs.away || 0}%`),
     predictionCard("Over 2.5", `${probs.over25 || 0}%`),
     predictionCard("Under 2.5", `${probs.under25 || 0}%`),
   ].join("");
@@ -514,10 +631,95 @@ function renderMatchPrediction(result) {
     "xG visita": (result.expected_goals || {}).away || "",
     Nota: (result.notes || []).join(" - "),
   }));
+  renderTable("match-prob-breakdown", predictionBreakdownTable(result));
+}
+
+function predictionBreakdownTable(result) {
+  const model = result.model_probs || {};
+  const poisson = model.poisson || {};
+  const poissonTotals = model.poisson_totals || {};
+  const ml = model.ml || {};
+  const overMl = model.over_under_ml || {};
+  const final = result.probabilities || {};
+  const rows = [
+    {
+      Fuente: "Poisson 1X2",
+      "1": poisson.H ?? "",
+      "X": poisson.D ?? "",
+      "2": poisson.A ?? "",
+      Over: poissonTotals.over25 ?? "",
+      Under: poissonTotals.under25 ?? "",
+      Peso: "base",
+    },
+    {
+      Fuente: "ML 1X2",
+      "1": ml.H ?? "",
+      "X": ml.D ?? "",
+      "2": ml.A ?? "",
+      Over: "",
+      Under: "",
+      Peso: model.result_weight ?? 0,
+    },
+    {
+      Fuente: "ML U/O 2.5",
+      "1": "",
+      "X": "",
+      "2": "",
+      Over: overMl.over25 ?? "",
+      Under: overMl.under25 ?? "",
+      Peso: model.over_under_weight ?? 0,
+    },
+    {
+      Fuente: "Final blend",
+      "1": final.home ?? "",
+      "X": final.draw ?? "",
+      "2": final.away ?? "",
+      Over: final.over25 ?? "",
+      Under: final.under25 ?? "",
+      Peso: model.ml_weight ?? 0,
+    },
+  ];
+  return { columns: ["Fuente", "1", "X", "2", "Over", "Under", "Peso"], rows, total: rows.length };
 }
 
 function predictionCard(label, value) {
   return `<article class="prediction-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
+}
+
+function trainingPayload() {
+  const payload = {
+    ...simulationPayload(),
+    model_type: document.getElementById("worldcup-model-type").value || "xgboost",
+    training_target: document.getElementById("worldcup-target").value || "result",
+    device: document.getElementById("worldcup-device").value || "auto",
+    n_jobs: Number(document.getElementById("worldcup-n-jobs").value || -1),
+    tuning_enabled: document.getElementById("worldcup-tuning-enabled").checked,
+    n_trials: Number(document.getElementById("worldcup-n-trials").value || 12),
+    objective: document.getElementById("worldcup-objective").value || "F1",
+    optuna_sampler: document.getElementById("worldcup-optuna-sampler").value || "tpe",
+    optuna_pruner: document.getElementById("worldcup-optuna-pruner").value || "none",
+    tune_params: document.getElementById("worldcup-tune-params").value || "all",
+  };
+  const numberFields = {
+    n_estimators: "worldcup-n-estimators",
+    learning_rate: "worldcup-learning-rate",
+    max_depth: "worldcup-max-depth",
+    min_child_weight: "worldcup-min-child-weight",
+    lambda_regularization: "worldcup-lambda-regularization",
+    alpha_regularization: "worldcup-alpha-regularization",
+    num_leaves: "worldcup-num-leaves",
+    min_child_samples: "worldcup-min-child-samples",
+    minibatch_frac: "worldcup-minibatch-frac",
+    l2_leaf_reg: "worldcup-l2-leaf-reg",
+    random_strength: "worldcup-random-strength",
+  };
+  Object.entries(numberFields).forEach(([key, id]) => {
+    const input = document.getElementById(id);
+    if (input && !input.disabled && input.value !== "") payload[key] = Number(input.value);
+  });
+  const natural = document.getElementById("worldcup-natural-gradient");
+  if (natural && !natural.disabled) payload.natural_gradient = natural.checked;
+  return payload;
 }
 
 function simulationPayload() {
