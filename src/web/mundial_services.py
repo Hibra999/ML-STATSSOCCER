@@ -92,23 +92,28 @@ class BlendedWorldCupModel:
         )
 
     def expected_goals(self, team1: str, team2: str):
-        return self.base_model.expected_goals(team1, team2)
+        lambda1, lambda2, _ = self._adjusted_lambdas(team1, team2)
+        return lambda1, lambda2
 
     def match_probabilities(self, team1: str, team2: str, max_goals: int | None = None) -> Dict[str, float]:
-        base = self.base_model.match_probabilities(team1, team2, max_goals=max_goals)
         ml = predict_ml_outputs(self.base_model, team1, team2, model_id=self.model_id)
+        lambda1, lambda2, adjusted = self._adjusted_lambdas(team1, team2, ml=ml)
+        base = poisson_probabilities_from_lambdas(
+            lambda1=lambda1,
+            lambda2=lambda2,
+            max_goals=int(max_goals if max_goals is not None else self.base_model.max_goals),
+        )
         result_ml = ml.get("result", {})
-        if not result_ml:
-            return base
-        weight = self.ml_weight
         output = dict(base)
-        output["home"] = base["home"] * (1.0 - weight) + result_ml.get("H", base["home"]) * weight
-        output["draw"] = base["draw"] * (1.0 - weight) + result_ml.get("D", base["draw"]) * weight
-        output["away"] = base["away"] * (1.0 - weight) + result_ml.get("A", base["away"]) * weight
-        total = max(output["home"] + output["draw"] + output["away"], 1e-9)
-        output["home"] /= total
-        output["draw"] /= total
-        output["away"] /= total
+        weight = min(max(self.ml_weight * 0.75, 0.0), 1.0)
+        if result_ml:
+            output["home"] = base["home"] * (1.0 - weight) + result_ml.get("H", base["home"]) * weight
+            output["draw"] = base["draw"] * (1.0 - weight) + result_ml.get("D", base["draw"]) * weight
+            output["away"] = base["away"] * (1.0 - weight) + result_ml.get("A", base["away"]) * weight
+            total = max(output["home"] + output["draw"] + output["away"], 1e-9)
+            output["home"] /= total
+            output["draw"] /= total
+            output["away"] /= total
         totals_ml = ml.get("over_under_25", {})
         if totals_ml:
             output["over25"] = base["over25"] * (1.0 - weight) + totals_ml.get("over25", base["over25"]) * weight
@@ -116,12 +121,16 @@ class BlendedWorldCupModel:
             total_goals = max(output["over25"] + output["under25"], 1e-9)
             output["over25"] /= total_goals
             output["under25"] /= total_goals
+        output["lambda1"] = adjusted["lambda1"]
+        output["lambda2"] = adjusted["lambda2"]
         return output
 
     def sample_score(self, team1: str, team2: str, rng: np.random.Generator):
         probabilities = self.match_probabilities(team1, team2)
         outcome = rng.choice(["home", "draw", "away"], p=[probabilities["home"], probabilities["draw"], probabilities["away"]])
-        goals1, goals2 = self.base_model.sample_score(team1, team2, rng)
+        lambda1, lambda2, _ = self._adjusted_lambdas(team1, team2)
+        goals1 = int(rng.poisson(lambda1))
+        goals2 = int(rng.poisson(lambda2))
         if outcome == "home" and goals1 <= goals2:
             goals1 = goals2 + 1
         elif outcome == "away" and goals2 <= goals1:
@@ -143,6 +152,73 @@ class BlendedWorldCupModel:
         if rng.random() <= win_share:
             return team1, team2, goals1, goals2
         return team2, team1, goals1, goals2
+
+    def _adjusted_lambdas(self, team1: str, team2: str, ml: Dict[str, Any] | None = None) -> Tuple[float, float, Dict[str, float]]:
+        base = self.base_model.match_probabilities(team1, team2)
+        ml = ml or predict_ml_outputs(self.base_model, team1, team2, model_id=self.model_id)
+        result_ml = ml.get("result", {}) or {}
+        totals_ml = ml.get("over_under_25", {}) or {}
+        lambda1 = float(base.get("lambda1", 1.0))
+        lambda2 = float(base.get("lambda2", 1.0))
+        total_goals = max(lambda1 + lambda2, 0.4)
+        home_share = lambda1 / total_goals
+        if totals_ml:
+            delta_total = float(totals_ml.get("over25", base.get("over25", 0.0))) - float(base.get("over25", 0.0))
+            total_scale = float(np.clip(math.exp(delta_total * 1.15), 0.78, 1.34))
+            total_goals *= 1.0 + (total_scale - 1.0) * self.ml_weight
+        if result_ml:
+            base_edge = float(base.get("home", 0.0)) - float(base.get("away", 0.0))
+            ml_edge = float(result_ml.get("H", base.get("home", 0.0))) - float(result_ml.get("A", base.get("away", 0.0)))
+            draw_delta = float(result_ml.get("D", base.get("draw", 0.0))) - float(base.get("draw", 0.0))
+            home_share = float(np.clip(home_share + (ml_edge - base_edge) * 0.38 * self.ml_weight, 0.18, 0.82))
+            total_goals *= float(np.clip(1.0 - draw_delta * 0.55 * self.ml_weight, 0.82, 1.22))
+        lambda1 = float(np.clip(total_goals * home_share, 0.2, 4.8))
+        lambda2 = float(np.clip(total_goals * (1.0 - home_share), 0.2, 4.8))
+        return lambda1, lambda2, {"lambda1": lambda1, "lambda2": lambda2}
+
+
+def poisson_probabilities_from_lambdas(lambda1: float, lambda2: float, max_goals: int) -> Dict[str, float]:
+    probs1 = [_poisson_pmf(goals, lambda1) for goals in range(max_goals + 1)]
+    probs2 = [_poisson_pmf(goals, lambda2) for goals in range(max_goals + 1)]
+    total = 0.0
+    home = 0.0
+    draw = 0.0
+    away = 0.0
+    over25 = 0.0
+    modal_score = (0, 0)
+    modal_prob = -1.0
+    for goals1, prob1 in enumerate(probs1):
+        for goals2, prob2 in enumerate(probs2):
+            prob = prob1 * prob2
+            total += prob
+            if goals1 > goals2:
+                home += prob
+            elif goals1 == goals2:
+                draw += prob
+            else:
+                away += prob
+            if goals1 + goals2 > 2.5:
+                over25 += prob
+            if prob > modal_prob:
+                modal_prob = prob
+                modal_score = (goals1, goals2)
+    total = max(total, 1e-9)
+    return {
+        "lambda1": float(lambda1),
+        "lambda2": float(lambda2),
+        "home": home / total,
+        "draw": draw / total,
+        "away": away / total,
+        "over25": over25 / total,
+        "under25": 1.0 - over25 / total,
+        "modal_g1": modal_score[0],
+        "modal_g2": modal_score[1],
+    }
+
+
+def _poisson_pmf(goals: int, rate: float) -> float:
+    safe_rate = max(float(rate), 1e-9)
+    return math.exp(-safe_rate) * (safe_rate ** int(goals)) / math.factorial(int(goals))
 COUNTRY_CODES = {
     "Algeria": "dz",
     "Argentina": "ar",
@@ -265,6 +341,9 @@ def fixtures(refresh: bool = False) -> Dict[str, Any]:
             "round": row.get("Ronda", ""),
             "group": row.get("Grupo", ""),
             "venue": row.get("Sede", ""),
+            "score_home": row.get("Goles 1", ""),
+            "score_away": row.get("Goles 2", ""),
+            "finished": str(row.get("Finalizado", "")).lower() == "si",
             "home": team_asset(home),
             "away": team_asset(away),
             "label": f"{home} vs {away}",
@@ -644,8 +723,14 @@ def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
         if adjustments:
             model = model.adjusted(adjustments)
     active_model = read_model_metadata(model_id=config["model_id"] or None)
+    hybrid_layers = ["Poisson base"]
     if config["use_ml_model"] and active_model.get("trained"):
         model = BlendedWorldCupModel(model, model_id=config["model_id"], ml_weight=float(config["ml_weight"]))
+        hybrid_layers.extend(["ML blend 1X2", "ML ajuste lambdas"])
+    if config["use_lineups"]:
+        hybrid_layers.append("XI pre-partido")
+    if config["use_player_features"]:
+        hybrid_layers.append("Features XI")
     result = simulate_worldcup(
         tournament=tournament,
         model=model,
@@ -665,6 +750,7 @@ def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
             "active_model": active_model,
             "lineup_notes": lineup_notes,
             "player_feature_notes": feature_notes,
+            "hybrid_layers": hybrid_layers,
             "anti_leakage": [
                 "Historico filtrado antes del 2026-06-11.",
                 "Alineaciones ignoradas si fueron obtenidas despues de la fecha del partido.",

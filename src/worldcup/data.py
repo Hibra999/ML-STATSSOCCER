@@ -212,6 +212,10 @@ def groups_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
 def tournament_fixtures_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
     rows = []
     for index, match in enumerate(tournament.get("matches", []), start=1):
+        score = match.get("score") or {}
+        ft = score.get("ft") if isinstance(score, dict) else None
+        goals_1 = ft[0] if isinstance(ft, list) and len(ft) == 2 else ""
+        goals_2 = ft[1] if isinstance(ft, list) and len(ft) == 2 else ""
         rows.append({
             "No.": match.get("num") or index,
             "Fecha": match.get("date", ""),
@@ -221,8 +225,11 @@ def tournament_fixtures_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
             "Equipo 1": clean_team_name(match.get("team1")),
             "Equipo 2": clean_team_name(match.get("team2")),
             "Sede": match.get("ground", ""),
+            "Goles 1": goals_1,
+            "Goles 2": goals_2,
+            "Finalizado": "Si" if goals_1 != "" and goals_2 != "" else "No",
         })
-    return pd.DataFrame(rows, columns=["No.", "Fecha", "Hora", "Ronda", "Grupo", "Equipo 1", "Equipo 2", "Sede"])
+    return pd.DataFrame(rows, columns=["No.", "Fecha", "Hora", "Ronda", "Grupo", "Equipo 1", "Equipo 2", "Sede", "Goles 1", "Goles 2", "Finalizado"])
 
 
 def teams_dataframe(tournament: Dict[str, Any], model=None) -> pd.DataFrame:

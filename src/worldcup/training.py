@@ -16,7 +16,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precisio
 from sklearn.model_selection import train_test_split as sklearn_train_test_split
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
-from src.worldcup.data import clean_team_name, load_historical_matches, tournament_fixtures_dataframe
+from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
 from src.worldcup.model import HOST_TEAMS, WorldCupModel
 
 
@@ -64,7 +64,7 @@ WORLD_CUP_MODEL_LABELS = {
     "lightgbm": "LightGBM",
     "xgboost": "XGBoost",
 }
-HISTORY_FEATURE_WINDOWS = (3, 5, 10)
+HISTORY_FEATURE_WINDOWS = (1, 2, 3, 5, 7, 10, 12)
 HISTORY_REFERENCE_DATE = "2026-06-11"
 WALK_FORWARD_ROOT = Path("storage") / "worldcup" / "walk_forward"
 WALK_FORWARD_MATCHES_FILE = WALK_FORWARD_ROOT / "matches.csv"
@@ -98,8 +98,6 @@ def training_options() -> Dict[str, Any]:
         "models": json_safe(models),
         "targets": [
             {"key": "dual_markets", "label": "Ambos: 1X2 + O/U 2.5"},
-            {"key": "result", "label": "Resultado 1/X/2"},
-            {"key": "over_under_25", "label": "Over/Under 2.5"},
         ],
         "hardware": detect_hardware(),
         "defaults": default_training_payload(),
@@ -189,6 +187,7 @@ def dataset_status() -> Dict[str, Any]:
     test_rows = labeled_test_row_count(normalized)
     eval_strategy = evaluation_strategy(normalized)
     walk_forward = walk_forward_status()
+    refresh_state = walk_forward_refresh_state()
     return {
         "dataset_slug": KAGGLE_DATASET_SLUG,
         "local_path": str(KAGGLE_ROOT),
@@ -206,6 +205,7 @@ def dataset_status() -> Dict[str, Any]:
         "etl_steps": etl_steps(files, normalized, eval_strategy),
         "trainable": bool(normalized["trainable"]),
         "walk_forward": walk_forward,
+        "walk_forward_refresh": refresh_state,
         "model": model_meta,
         "preview": normalized["preview"],
     }
@@ -214,9 +214,9 @@ def dataset_status() -> Dict[str, Any]:
 def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
     train_config = training_config(payload)
-    if train_config["market_mode"] == "dual_markets":
-        return train_dual_market_model(tournament=tournament, payload=payload, train_config=train_config)
-    return train_single_hybrid_model(tournament=tournament, payload=payload)
+    if train_config["market_mode"] != "dual_markets":
+        raise WorldCupTrainingError("Mundial 2026 entrena siempre el bundle dual 1X2 + O/U 2.5.")
+    return train_dual_market_model(tournament=tournament, payload=payload, train_config=train_config)
 
 
 def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -232,6 +232,15 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
     test_rows = normalized["test"].copy()
     if not normalized["trainable"]:
         raise WorldCupTrainingError("El dataset no tiene columnas trainables de partido: equipos y resultado/winner.")
+    walk_forward_mode = normalize_walk_forward_mode(payload.get("walk_forward_mode", "none"))
+    walk_forward_summary = supplemental_training_rows(
+        tournament=tournament,
+        mode=walk_forward_mode,
+        dataset_mode=normalized["training_mode"],
+    )
+    supplemental_rows = walk_forward_summary["rows"]
+    if not supplemental_rows.empty:
+        train_rows = pd.concat([train_rows, supplemental_rows], ignore_index=True)
 
     group_teams = teams_from_tournament(tournament)
     history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
@@ -246,6 +255,7 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
     feature_store = normalized["team_features"]
     history_team_features = build_history_feature_table(history_df)
     matchup_features = build_matchup_feature_table(history_df)
+    fixture_feature_rows = read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
     target_warning = ""
     eval_strategy = "unavailable"
     if normalized["training_mode"] == "team_strength":
@@ -275,6 +285,7 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
             feature_store,
             history_team_features=history_team_features,
             matchup_features=matchup_features,
+            fixture_feature_rows=fixture_feature_rows,
             target=effective_target,
         )
         if test_rows.empty:
@@ -293,6 +304,7 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
                 feature_store,
                 history_team_features=history_team_features,
                 matchup_features=matchup_features,
+                fixture_feature_rows=fixture_feature_rows,
                 feature_columns=feature_columns,
                 target=effective_target,
             )
@@ -357,8 +369,14 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
         "hardware": hardware,
         "warnings": [warning for warning in [target_warning, *fit_result.get("warnings", [])] if warning],
         "top_features": top_feature_importances(clf, feature_columns),
+        "walk_forward_mode": walk_forward_mode,
+        "walk_forward_summary": walk_forward_summary,
     }
+    if walk_forward_summary["warnings"]:
+        record["warnings"] = unique_strings([*record["warnings"], *walk_forward_summary["warnings"]])
     save_hybrid_model(record, model_id=model_id)
+    if walk_forward_summary["fixture_ids"]:
+        mark_walk_forward_ingested(walk_forward_summary["fixture_ids"], walk_forward_mode)
     return {
         "model": read_model_metadata(),
         "metrics": metrics,
@@ -379,6 +397,7 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
         "tuning_trace": tuning_trace(tuned),
         "etl_steps": etl,
         "warnings": record["warnings"],
+        "walk_forward": walk_forward_summary,
     }
 
 
@@ -447,6 +466,9 @@ def train_dual_market_model(
     warnings.extend(over_record.get("warnings", []))
     warnings = unique_strings(warnings)
     trained_at = datetime.now(timezone.utc).isoformat()
+    bundle_target_column = str(result_record.get("target_column") or "result")
+    if "over_under_25" in market_models and over_record.get("target_column"):
+        bundle_target_column = f"{bundle_target_column} + {over_record.get('target_column')}"
     bundle_record = {
         "bundle": True,
         "market_mode": "dual_markets",
@@ -465,7 +487,7 @@ def train_dual_market_model(
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
         "effective_target": "result+over_under_25" if "over_under_25" in market_models else "result",
         "requested_target": "dual_markets",
-        "target_column": "result + over_under_25",
+        "target_column": bundle_target_column,
         "model_type": train_config["model_type"],
         "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
         "model_id": bundle_id,
@@ -480,6 +502,8 @@ def train_dual_market_model(
         "markets": market_results,
         "market_models": market_models,
         "trained_at": trained_at,
+        "walk_forward_mode": result_record.get("walk_forward_mode", "none"),
+        "walk_forward_summary": result_record.get("walk_forward_summary", {}),
     }
     save_hybrid_model(bundle_record, model_id=bundle_id)
     model_meta = read_model_metadata(model_id=bundle_id)
@@ -505,6 +529,7 @@ def train_dual_market_model(
         "warnings": warnings,
         "markets": market_results,
         "market_models": market_models,
+        "walk_forward": bundle_record["walk_forward_summary"],
     }
 
 
@@ -526,7 +551,7 @@ def predict_match_payload(
     base_totals = {"over25": poisson["over25"], "under25": poisson["under25"]}
     ml_outputs = {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
     if use_ml_model:
-        ml_outputs = predict_ml_outputs(base_model, home_team, away_team, model_id=model_id)
+        ml_outputs = predict_ml_outputs(base_model, home_team, away_team, model_id=model_id, fixture_id=fixture.get("No."))
     result_ml = ml_outputs.get("result", {})
     over_under_ml = ml_outputs.get("over_under_25", {})
     result_weight = ml_weight if result_ml else 0.0
@@ -768,6 +793,7 @@ def build_training_matrix(
         team_features: pd.DataFrame,
         history_team_features: Optional[pd.DataFrame] = None,
         matchup_features: Optional[pd.DataFrame] = None,
+        fixture_feature_rows: Optional[pd.DataFrame] = None,
         feature_columns: Optional[List[str]] = None,
         target: str = "result",
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
@@ -782,6 +808,8 @@ def build_training_matrix(
             row["Away"],
             history_team_features=history_team_features,
             matchup_features=matchup_features,
+            fixture_feature_rows=fixture_feature_rows,
+            fixture_id=row.get("FixtureId"),
         )
         for _, row in working.iterrows()
     ]
@@ -804,6 +832,8 @@ def match_feature_row(
         away: str,
         history_team_features: Optional[pd.DataFrame] = None,
         matchup_features: Optional[pd.DataFrame] = None,
+        fixture_feature_rows: Optional[pd.DataFrame] = None,
+        fixture_id: Optional[Any] = None,
 ) -> Dict[str, float]:
     p_home = base_model.profile(home)
     p_away = base_model.profile(away)
@@ -840,6 +870,14 @@ def match_feature_row(
         prefix="history",
     )
     merge_matchup_feature_block(row, matchup_features if matchup_features is not None else pd.DataFrame(), home, away)
+    merge_fixture_feature_block(
+        row,
+        fixture_feature_rows if fixture_feature_rows is not None else pd.DataFrame(),
+        home,
+        away,
+        fixture_id=fixture_id,
+        prefix="xi",
+    )
     return row
 
 
@@ -889,6 +927,34 @@ def merge_matchup_feature_block(
             row[f"h2h_{normalize_column(column)}"] = float(value)
 
 
+def merge_fixture_feature_block(
+        row: Dict[str, float],
+        fixture_feature_rows: pd.DataFrame,
+        home: str,
+        away: str,
+        fixture_id: Optional[Any],
+        prefix: str,
+) -> None:
+    if fixture_feature_rows.empty or "fixture_id" not in fixture_feature_rows.columns:
+        return
+    if fixture_id in {"", None}:
+        return
+    fixture_key = str(fixture_id)
+    scoped = fixture_feature_rows[fixture_feature_rows["fixture_id"].astype(str) == fixture_key]
+    if scoped.empty or "Equipo" not in scoped.columns:
+        return
+    home_features = scoped[scoped["Equipo"].map(normalize_team_key) == normalize_team_key(home)]
+    away_features = scoped[scoped["Equipo"].map(normalize_team_key) == normalize_team_key(away)]
+    numeric_cols = [column for column in scoped.columns if column not in {"fixture_id", "Equipo", "Rival"} and pd.api.types.is_numeric_dtype(scoped[column])]
+    for column in numeric_cols:
+        home_value = float(home_features[column].iloc[0]) if not home_features.empty else 0.0
+        away_value = float(away_features[column].iloc[0]) if not away_features.empty else 0.0
+        safe = normalize_column(column)
+        row[f"{prefix}_{safe}_home"] = home_value
+        row[f"{prefix}_{safe}_away"] = away_value
+        row[f"{prefix}_{safe}_diff"] = home_value - away_value
+
+
 def build_history_feature_table(history_df: pd.DataFrame, reference_date: str = HISTORY_REFERENCE_DATE) -> pd.DataFrame:
     team_rows = team_history_rows(history_df)
     if team_rows.empty:
@@ -905,22 +971,44 @@ def build_history_feature_table(history_df: pd.DataFrame, reference_date: str = 
             "days_since_last_match": float(days_since),
             "recent_match_volume_365d": float(team_df[team_df["Date"] >= (reference_ts - pd.Timedelta(days=365))].shape[0]),
             "recent_match_volume_730d": float(team_df[team_df["Date"] >= (reference_ts - pd.Timedelta(days=730))].shape[0]),
+            "recent_match_volume_1095d": float(team_df[team_df["Date"] >= (reference_ts - pd.Timedelta(days=1095))].shape[0]),
         }
+        rest_days = team_df["Date"].diff().dt.days.dropna()
+        base["rest_days_avg"] = float(rest_days.mean()) if not rest_days.empty else 0.0
+        base["rest_days_std"] = float(rest_days.std(ddof=0)) if not rest_days.empty else 0.0
+        base["rest_days_last"] = float(rest_days.iloc[-1]) if not rest_days.empty else 0.0
+        base["last_result_points"] = float(team_df["Points"].iloc[-1]) if not team_df.empty else 0.0
+        base["last_goal_diff"] = float(team_df["GoalDiff"].iloc[-1]) if not team_df.empty else 0.0
+        base["last_goals_for"] = float(team_df["GF"].iloc[-1]) if not team_df.empty else 0.0
+        base["last_goals_against"] = float(team_df["GA"].iloc[-1]) if not team_df.empty else 0.0
         base.update(window_summary_features(team_df, len(team_df), prefix="all"))
         for window in HISTORY_FEATURE_WINDOWS:
             base.update(window_summary_features(team_df, window, prefix=f"last_{window}"))
+        base["trend_points_ppg_1_vs_5"] = base.get("last_1_points_ppg", 0.0) - base.get("last_5_points_ppg", 0.0)
         base["trend_points_ppg_3_vs_10"] = base.get("last_3_points_ppg", 0.0) - base.get("last_10_points_ppg", 0.0)
+        base["trend_points_ppg_5_vs_12"] = base.get("last_5_points_ppg", 0.0) - base.get("last_12_points_ppg", 0.0)
+        base["trend_goal_diff_1_vs_5"] = base.get("last_1_goal_diff_avg", 0.0) - base.get("last_5_goal_diff_avg", 0.0)
         base["trend_goal_diff_3_vs_10"] = base.get("last_3_goal_diff_avg", 0.0) - base.get("last_10_goal_diff_avg", 0.0)
         base["trend_win_rate_3_vs_10"] = base.get("last_3_win_rate", 0.0) - base.get("last_10_win_rate", 0.0)
         base["trend_clean_sheet_3_vs_10"] = base.get("last_3_clean_sheet_rate", 0.0) - base.get("last_10_clean_sheet_rate", 0.0)
         base["trend_over25_3_vs_10"] = base.get("last_3_over25_rate", 0.0) - base.get("last_10_over25_rate", 0.0)
+        base["trend_attack_2_vs_7"] = base.get("last_2_goals_for_avg", 0.0) - base.get("last_7_goals_for_avg", 0.0)
+        base["trend_attack_5_vs_12"] = base.get("last_5_goals_for_avg", 0.0) - base.get("last_12_goals_for_avg", 0.0)
+        base["trend_defense_2_vs_7"] = base.get("last_7_goals_against_avg", 0.0) - base.get("last_2_goals_against_avg", 0.0)
+        base["trend_defense_5_vs_12"] = base.get("last_12_goals_against_avg", 0.0) - base.get("last_5_goals_against_avg", 0.0)
+        base["trend_btts_3_vs_10"] = base.get("last_3_btts_rate", 0.0) - base.get("last_10_btts_rate", 0.0)
+        base["trend_under25_3_vs_10"] = base.get("last_3_under25_rate", 0.0) - base.get("last_10_under25_rate", 0.0)
+        base["volatility_goal_diff_short_vs_long"] = base.get("last_3_goal_diff_std", 0.0) - base.get("last_10_goal_diff_std", 0.0)
+        base["volatility_points_short_vs_long"] = base.get("last_3_points_std", 0.0) - base.get("last_10_points_std", 0.0)
+        base["form_reversion_points"] = base.get("all_points_ppg", 0.0) - base.get("last_3_points_ppg", 0.0)
+        base["form_reversion_goal_diff"] = base.get("all_goal_diff_avg", 0.0) - base.get("last_3_goal_diff_avg", 0.0)
         rows.append(base)
     return pd.DataFrame(rows).fillna(0.0)
 
 
 def team_history_rows(history_df: pd.DataFrame) -> pd.DataFrame:
     if history_df.empty:
-        return pd.DataFrame(columns=["Team", "Date", "GF", "GA", "GoalDiff", "Points", "Win", "Draw", "Loss", "Over25", "BTTS", "CleanSheet", "Scored"])
+        return pd.DataFrame(columns=["Team", "Date", "GF", "GA", "GoalDiff", "Points", "Win", "Draw", "Loss", "Over25", "Under25", "BTTS", "CleanSheet", "Scored"])
     working = history_df.copy()
     working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
     working = working[working["Date"].notna()].copy()
@@ -952,6 +1040,7 @@ def team_match_row(team: str, match_date: pd.Timestamp, gf: float, ga: float) ->
         "Draw": float(gf == ga),
         "Loss": float(gf < ga),
         "Over25": float((gf + ga) >= 3.0),
+        "Under25": float((gf + ga) < 3.0),
         "BTTS": float(gf > 0 and ga > 0),
         "CleanSheet": float(ga == 0),
         "Scored": float(gf > 0),
@@ -961,31 +1050,48 @@ def team_match_row(team: str, match_date: pd.Timestamp, gf: float, ga: float) ->
 def window_summary_features(team_df: pd.DataFrame, window: int, prefix: str) -> Dict[str, float]:
     if team_df.empty:
         return {
+            f"{prefix}_points_sum": 0.0,
             f"{prefix}_points_ppg": 0.0,
+            f"{prefix}_points_std": 0.0,
             f"{prefix}_goals_for_avg": 0.0,
+            f"{prefix}_goals_for_std": 0.0,
             f"{prefix}_goals_against_avg": 0.0,
+            f"{prefix}_goals_against_std": 0.0,
             f"{prefix}_goal_diff_avg": 0.0,
+            f"{prefix}_goal_diff_std": 0.0,
             f"{prefix}_win_rate": 0.0,
             f"{prefix}_draw_rate": 0.0,
             f"{prefix}_loss_rate": 0.0,
+            f"{prefix}_non_loss_rate": 0.0,
             f"{prefix}_over25_rate": 0.0,
+            f"{prefix}_under25_rate": 0.0,
             f"{prefix}_btts_rate": 0.0,
             f"{prefix}_clean_sheet_rate": 0.0,
             f"{prefix}_scoring_rate": 0.0,
+            f"{prefix}_weighted_points": 0.0,
         }
     recent = team_df.tail(int(window)).copy()
+    weights = np.linspace(1.0, 1.0 + max(len(recent) - 1, 0) * 0.12, num=len(recent)) if len(recent) else np.array([1.0])
     return {
+        f"{prefix}_points_sum": float(recent["Points"].sum()),
         f"{prefix}_points_ppg": float(recent["Points"].mean()),
+        f"{prefix}_points_std": float(recent["Points"].std(ddof=0)),
         f"{prefix}_goals_for_avg": float(recent["GF"].mean()),
+        f"{prefix}_goals_for_std": float(recent["GF"].std(ddof=0)),
         f"{prefix}_goals_against_avg": float(recent["GA"].mean()),
+        f"{prefix}_goals_against_std": float(recent["GA"].std(ddof=0)),
         f"{prefix}_goal_diff_avg": float(recent["GoalDiff"].mean()),
+        f"{prefix}_goal_diff_std": float(recent["GoalDiff"].std(ddof=0)),
         f"{prefix}_win_rate": float(recent["Win"].mean()),
         f"{prefix}_draw_rate": float(recent["Draw"].mean()),
         f"{prefix}_loss_rate": float(recent["Loss"].mean()),
+        f"{prefix}_non_loss_rate": float((recent["Win"] + recent["Draw"]).mean()),
         f"{prefix}_over25_rate": float(recent["Over25"].mean()),
+        f"{prefix}_under25_rate": float(recent["Under25"].mean()),
         f"{prefix}_btts_rate": float(recent["BTTS"].mean()),
         f"{prefix}_clean_sheet_rate": float(recent["CleanSheet"].mean()),
         f"{prefix}_scoring_rate": float(recent["Scored"].mean()),
+        f"{prefix}_weighted_points": float(np.average(recent["Points"], weights=weights)),
     }
 
 
@@ -996,7 +1102,7 @@ def build_matchup_feature_table(history_df: pd.DataFrame) -> pd.DataFrame:
     working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
     working = working[working["Date"].notna()].copy()
     rows: List[Dict[str, Any]] = []
-    grouped: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
+    grouped: Dict[Tuple[str, str], List[Tuple[pd.Timestamp, float, float]]] = {}
     for _, row in working.iterrows():
         home = clean_team_name(row.get("Team 1"))
         away = clean_team_name(row.get("Team 2"))
@@ -1006,24 +1112,37 @@ def build_matchup_feature_table(history_df: pd.DataFrame) -> pd.DataFrame:
         except (TypeError, ValueError):
             continue
         if home and away:
-            grouped.setdefault((normalize_team_key(home), normalize_team_key(away)), []).append((g1, g2))
-            grouped.setdefault((normalize_team_key(away), normalize_team_key(home)), []).append((g2, g1))
+            match_date = pd.Timestamp(row["Date"])
+            grouped.setdefault((normalize_team_key(home), normalize_team_key(away)), []).append((match_date, g1, g2))
+            grouped.setdefault((normalize_team_key(away), normalize_team_key(home)), []).append((match_date, g2, g1))
+    reference_ts = pd.Timestamp(HISTORY_REFERENCE_DATE)
     for (home_key, away_key), matches in grouped.items():
+        ordered_matches = sorted(matches, key=lambda item: item[0])
+        recent_matches = ordered_matches[-3:]
         total = float(len(matches))
-        home_goals = [item[0] for item in matches]
-        away_goals = [item[1] for item in matches]
+        home_goals = [item[1] for item in ordered_matches]
+        away_goals = [item[2] for item in ordered_matches]
+        last_date = ordered_matches[-1][0] if ordered_matches else None
         rows.append({
             "HomeKey": home_key,
             "AwayKey": away_key,
             "matches": total,
-            "home_win_rate": float(sum(1 for g1, g2 in matches if g1 > g2) / max(total, 1.0)),
-            "draw_rate": float(sum(1 for g1, g2 in matches if g1 == g2) / max(total, 1.0)),
-            "away_win_rate": float(sum(1 for g1, g2 in matches if g2 > g1) / max(total, 1.0)),
-            "goal_diff_avg": float(np.mean([g1 - g2 for g1, g2 in matches])),
+            "home_win_rate": float(sum(1 for _, g1, g2 in ordered_matches if g1 > g2) / max(total, 1.0)),
+            "draw_rate": float(sum(1 for _, g1, g2 in ordered_matches if g1 == g2) / max(total, 1.0)),
+            "away_win_rate": float(sum(1 for _, g1, g2 in ordered_matches if g2 > g1) / max(total, 1.0)),
+            "goal_diff_avg": float(np.mean([g1 - g2 for _, g1, g2 in ordered_matches])),
+            "goal_diff_std": float(np.std([g1 - g2 for _, g1, g2 in ordered_matches], ddof=0)),
             "goals_for_avg": float(np.mean(home_goals)),
             "goals_against_avg": float(np.mean(away_goals)),
-            "over25_rate": float(np.mean([(g1 + g2) >= 3.0 for g1, g2 in matches])),
-            "btts_rate": float(np.mean([(g1 > 0 and g2 > 0) for g1, g2 in matches])),
+            "over25_rate": float(np.mean([(g1 + g2) >= 3.0 for _, g1, g2 in ordered_matches])),
+            "under25_rate": float(np.mean([(g1 + g2) < 3.0 for _, g1, g2 in ordered_matches])),
+            "btts_rate": float(np.mean([(g1 > 0 and g2 > 0) for _, g1, g2 in ordered_matches])),
+            "days_since_last_h2h": float(max((reference_ts - last_date).days, 0)) if last_date is not None else 0.0,
+            "recent_3_matches": float(len(recent_matches)),
+            "recent_3_home_win_rate": float(np.mean([g1 > g2 for _, g1, g2 in recent_matches])) if recent_matches else 0.0,
+            "recent_3_draw_rate": float(np.mean([g1 == g2 for _, g1, g2 in recent_matches])) if recent_matches else 0.0,
+            "recent_3_goal_diff_avg": float(np.mean([g1 - g2 for _, g1, g2 in recent_matches])) if recent_matches else 0.0,
+            "recent_3_over25_rate": float(np.mean([(g1 + g2) >= 3.0 for _, g1, g2 in recent_matches])) if recent_matches else 0.0,
         })
     return pd.DataFrame(rows).fillna(0.0)
 
@@ -1069,7 +1188,10 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     if device not in {"auto", "cpu", "cuda"}:
         device = "auto"
     target = normalize_training_target(payload.get("training_target", payload.get("target", "result")))
-    market_mode = normalize_market_mode(payload.get("market_mode", payload.get("training_target", target)), target)
+    raw_market_mode = payload.get("market_mode")
+    if raw_market_mode in {None, ""}:
+        raw_market_mode = "dual_markets"
+    market_mode = normalize_market_mode(raw_market_mode, target)
     default_target = "dual_markets" if market_mode == "dual_markets" else target
     model_id = normalize_worldcup_model_id(payload.get("model_id") or default_model_id(model_key, default_target))
     return {
@@ -1128,6 +1250,15 @@ def normalize_market_mode(value: Any, target: str = "result") -> str:
     return "result"
 
 
+def normalize_walk_forward_mode(value: Any) -> str:
+    key = str(value or "none").strip().lower().replace("-", "_")
+    if key in {"result_plus_players", "players", "with_players", "player_features"}:
+        return "result_plus_players"
+    if key in {"result_only", "base", "match_only", "without_players"}:
+        return "result_only"
+    return "none"
+
+
 def coerce_param(value: Any, default: Any) -> Any:
     if isinstance(default, bool):
         if isinstance(value, str):
@@ -1156,6 +1287,205 @@ def effective_n_jobs(n_jobs: int, cpu_count: int) -> int:
 
 def has_over_under_target(rows: pd.DataFrame) -> bool:
     return "OverUnder25" in rows.columns and rows["OverUnder25"].dropna().shape[0] > 0
+
+
+def read_fixture_feature_rows() -> pd.DataFrame:
+    frame = read_optional_csv(WALK_FORWARD_TEAM_FEATURES_FILE)
+    if frame.empty:
+        return pd.DataFrame()
+    output = frame.copy()
+    if "fixture_id" not in output.columns and "Fixture" in output.columns:
+        output["fixture_id"] = output["Fixture"].astype(str)
+    object_cols = {"fixture_id", "Fixture", "Fecha", "Grupo", "Equipo", "Rival", "Prediction safe", "Formacion", "Fuente", "fetched_at"}
+    for column in output.columns:
+        if column in object_cols:
+            continue
+        output[column] = pd.to_numeric(output[column], errors="coerce")
+    return output
+
+
+def worldcup_played_fixture_rows(tournament: Dict[str, Any]) -> pd.DataFrame:
+    fixture_df = tournament_fixtures_dataframe(tournament)
+    if fixture_df.empty:
+        return pd.DataFrame(columns=fixture_df.columns)
+    working = fixture_df.copy()
+    working["_date"] = pd.to_datetime(working["Fecha"], errors="coerce")
+    today = pd.Timestamp.now(tz=None).normalize()
+    working = working[
+        working["Grupo"].astype(str).str.len().gt(0) &
+        working["Equipo 1"].astype(str).str.len().gt(1) &
+        working["Equipo 2"].astype(str).str.len().gt(1) &
+        working["_date"].notna() &
+        (working["_date"] < today)
+    ].copy()
+    return working.sort_values(["_date", "No."], kind="stable")
+
+
+def completed_worldcup_training_rows(tournament: Dict[str, Any]) -> pd.DataFrame:
+    fixture_df = tournament_fixtures_dataframe(tournament)
+    if fixture_df.empty or "Goles 1" not in fixture_df.columns or "Goles 2" not in fixture_df.columns:
+        return pd.DataFrame(columns=["FixtureId", "Home", "Away", "HG", "AG", "Label", "OverUnder25", "Source"])
+    working = fixture_df.copy()
+    working["HG"] = pd.to_numeric(working["Goles 1"], errors="coerce")
+    working["AG"] = pd.to_numeric(working["Goles 2"], errors="coerce")
+    working = working[
+        working["HG"].notna() &
+        working["AG"].notna() &
+        working["Equipo 1"].astype(str).str.len().gt(1) &
+        working["Equipo 2"].astype(str).str.len().gt(1) &
+        ~working["Equipo 1"].astype(str).str.match(r"^[123W][A-Z0-9/]+$") &
+        ~working["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
+    ].copy()
+    if working.empty:
+        return pd.DataFrame(columns=["FixtureId", "Home", "Away", "HG", "AG", "Label", "OverUnder25", "Source"])
+    working["Label"] = working.apply(lambda row: label_from_goals(row["HG"], row["AG"]), axis=1)
+    working["OverUnder25"] = ((working["HG"] + working["AG"]) >= 3.0).astype(int)
+    return pd.DataFrame({
+        "FixtureId": working["No."].astype(str),
+        "Home": working["Equipo 1"].map(clean_team_name),
+        "Away": working["Equipo 2"].map(clean_team_name),
+        "HG": working["HG"].astype(float),
+        "AG": working["AG"].astype(float),
+        "Label": working["Label"].astype(str),
+        "OverUnder25": working["OverUnder25"].astype(int),
+        "Source": "worldcup_2026_walk_forward",
+    })
+
+
+def player_ready_fixture_ids(fixture_features: pd.DataFrame) -> set[str]:
+    if fixture_features.empty or "fixture_id" not in fixture_features.columns:
+        return set()
+    usable = fixture_features.copy()
+    if "Prediction safe" in usable.columns:
+        usable = usable[usable["Prediction safe"].astype(str).str.lower() == "si"]
+    if "Titulares" in usable.columns:
+        usable = usable[pd.to_numeric(usable["Titulares"], errors="coerce").fillna(0) >= 11]
+    if "Stats conocidos" in usable.columns:
+        usable = usable[pd.to_numeric(usable["Stats conocidos"], errors="coerce").fillna(0) >= 10]
+    if usable.empty or "Equipo" not in usable.columns:
+        return set()
+    counts = usable.groupby("fixture_id")["Equipo"].nunique()
+    return {str(index) for index, value in counts.items() if int(value) >= 2}
+
+
+def supplemental_training_rows(
+        tournament: Dict[str, Any],
+        mode: str,
+        dataset_mode: str,
+) -> Dict[str, Any]:
+    normalized_mode = normalize_walk_forward_mode(mode)
+    empty = {
+        "mode": normalized_mode,
+        "rows": pd.DataFrame(),
+        "fixture_ids": [],
+        "added_rows": 0,
+        "warnings": [],
+    }
+    if normalized_mode == "none":
+        return empty
+    if dataset_mode != "match_result":
+        empty["warnings"] = ["El reentreno walk-forward solo aplica cuando el dataset Kaggle es de partidos (match_result)."]
+        return empty
+    completed = completed_worldcup_training_rows(tournament)
+    if completed.empty:
+        empty["warnings"] = ["No hay partidos 2026 con marcador oficial disponible para incorporar al reentreno."]
+        return empty
+    warnings: List[str] = []
+    if normalized_mode == "result_plus_players":
+        fixture_features = read_fixture_feature_rows()
+        ready_ids = player_ready_fixture_ids(fixture_features)
+        before = int(completed.shape[0])
+        completed = completed[completed["FixtureId"].astype(str).isin(ready_ids)].copy()
+        if completed.empty:
+            empty["warnings"] = ["No hay partidos cerrados con XI y stats pre-partido listos para reentreno enriquecido."]
+            return empty
+        if int(completed.shape[0]) < before:
+            warnings.append("Solo se incorporaron partidos con XI/stats pre-partido completos para el reentreno enriquecido.")
+    return {
+        "mode": normalized_mode,
+        "rows": completed.reset_index(drop=True),
+        "fixture_ids": completed["FixtureId"].astype(str).tolist(),
+        "added_rows": int(completed.shape[0]),
+        "warnings": warnings,
+    }
+
+
+def walk_forward_refresh_state() -> Dict[str, Any]:
+    tournament = fallback_tournament_2026()
+    cache_2026 = CACHE_ROOT / "worldcup_2026.json"
+    if cache_2026.exists():
+        try:
+            tournament, _ = load_tournament_2026(refresh=False)
+        except Exception:
+            tournament = fallback_tournament_2026()
+    played = worldcup_played_fixture_rows(tournament)
+    completed = completed_worldcup_training_rows(tournament)
+    matches = read_optional_csv(WALK_FORWARD_MATCHES_FILE)
+    fixture_features = read_fixture_feature_rows()
+    snapshot_ids = set(matches["fixture_id"].astype(str)) if not matches.empty and "fixture_id" in matches.columns else set()
+    included_result_ids = set()
+    included_player_ids = set()
+    if not matches.empty and "fixture_id" in matches.columns:
+        if "included_result_only_at" in matches.columns:
+            included_result_ids = set(matches[matches["included_result_only_at"].fillna("").astype(str).str.len() > 0]["fixture_id"].astype(str))
+        if "included_with_players_at" in matches.columns:
+            included_player_ids = set(matches[matches["included_with_players_at"].fillna("").astype(str).str.len() > 0]["fixture_id"].astype(str))
+    played_ids = set(played["No."].astype(str)) if not played.empty else set()
+    completed_ids = set(completed["FixtureId"].astype(str)) if not completed.empty else set()
+    player_ready_ids = player_ready_fixture_ids(fixture_features)
+    stale_ids = sorted(played_ids - snapshot_ids)
+    ready_result_ids = sorted(completed_ids - included_result_ids)
+    ready_player_ids = sorted((completed_ids & player_ready_ids) - included_player_ids)
+    latest_fixture = ""
+    if not played.empty:
+        latest = played.iloc[-1]
+        latest_fixture = f"{latest.get('Equipo 1', '')} vs {latest.get('Equipo 2', '')} ({latest.get('Fecha', '')})"
+    note = ""
+    if stale_ids:
+        note = f"Hay {len(stale_ids)} partidos ya jugados sin snapshot de XI/stats. Conviene recargar datos."
+    elif ready_player_ids:
+        note = f"Hay {len(ready_player_ids)} partidos listos para reentreno enriquecido."
+    elif ready_result_ids:
+        note = f"Hay {len(ready_result_ids)} partidos listos para reentreno base."
+    return {
+        "played_matches": int(len(played_ids)),
+        "completed_results": int(len(completed_ids)),
+        "snapshot_matches": int(len(snapshot_ids)),
+        "player_ready_matches": int(len(player_ready_ids)),
+        "stale_match_ids": stale_ids,
+        "ready_result_ids": ready_result_ids,
+        "ready_player_ids": ready_player_ids,
+        "ready_result_only": int(len(ready_result_ids)),
+        "ready_with_players": int(len(ready_player_ids)),
+        "requires_reload": bool(stale_ids),
+        "latest_played_fixture": latest_fixture,
+        "note": note,
+    }
+
+
+def mark_walk_forward_ingested(fixture_ids: List[str], mode: str) -> None:
+    if not fixture_ids:
+        return
+    normalized_mode = normalize_walk_forward_mode(mode)
+    if normalized_mode == "none":
+        return
+    timestamp = datetime.now(timezone.utc).isoformat()
+    rows = read_optional_csv(WALK_FORWARD_MATCHES_FILE)
+    if rows.empty:
+        rows = pd.DataFrame({"fixture_id": fixture_ids})
+    if "fixture_id" not in rows.columns:
+        rows["fixture_id"] = ""
+    rows["fixture_id"] = rows["fixture_id"].astype(str)
+    for fixture_id in fixture_ids:
+        key = str(fixture_id)
+        if key not in set(rows["fixture_id"]):
+            rows = pd.concat([rows, pd.DataFrame([{"fixture_id": key}])], ignore_index=True)
+        if normalized_mode == "result_plus_players":
+            rows.loc[rows["fixture_id"] == key, "included_with_players_at"] = timestamp
+        else:
+            rows.loc[rows["fixture_id"] == key, "included_result_only_at"] = timestamp
+    WALK_FORWARD_ROOT.mkdir(parents=True, exist_ok=True)
+    rows.to_csv(WALK_FORWARD_MATCHES_FILE, index=False)
 
 
 def safe_train_eval_split(x: pd.DataFrame, y: pd.Series, test_size: float, random_state: int):
@@ -1488,27 +1818,59 @@ def top_feature_importances(clf, feature_columns: List[str], limit: int = 12) ->
             values = None
     if values is None:
         return []
+    vector = feature_importance_vector(values, len(feature_columns))
     pairs = []
-    for column, value in zip(feature_columns, np.asarray(values, dtype=float)):
+    for column, value in zip(feature_columns, vector):
         pairs.append({"feature": column, "importance": round(float(value), 6)})
     return sorted(pairs, key=lambda item: item["importance"], reverse=True)[:limit]
 
 
-def predict_ml_probs(base_model: WorldCupModel, home: str, away: str, model_id: Optional[str] = None) -> Tuple[Dict[str, float], str]:
-    outputs = predict_ml_outputs(base_model, home, away, model_id=model_id)
+def feature_importance_vector(values: Any, feature_count: int) -> np.ndarray:
+    if feature_count <= 0:
+        return np.asarray([], dtype=float)
+    try:
+        array = np.asarray(values, dtype=float)
+        if array.ndim == 1:
+            output = array
+        elif array.ndim > 1 and array.shape[-1] == feature_count:
+            axes = tuple(range(array.ndim - 1))
+            output = np.mean(np.abs(array), axis=axes)
+        elif array.ndim > 1 and array.shape[0] == feature_count:
+            axes = tuple(range(1, array.ndim))
+            output = np.mean(np.abs(array), axis=axes)
+        else:
+            output = np.ravel(array)
+    except (TypeError, ValueError):
+        output = []
+        for raw in list(values)[:feature_count]:
+            try:
+                nested = np.asarray(raw, dtype=float)
+                scalar = float(np.mean(np.abs(nested))) if nested.ndim else float(nested.item())
+            except Exception:
+                scalar = 0.0
+            output.append(scalar)
+        output = np.asarray(output, dtype=float)
+    output = np.nan_to_num(np.asarray(output, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    if output.size < feature_count:
+        output = np.pad(output, (0, feature_count - output.size), constant_values=0.0)
+    return output[:feature_count]
+
+
+def predict_ml_probs(base_model: WorldCupModel, home: str, away: str, model_id: Optional[str] = None, fixture_id: Optional[Any] = None) -> Tuple[Dict[str, float], str]:
+    outputs = predict_ml_outputs(base_model, home, away, model_id=model_id, fixture_id=fixture_id)
     return outputs.get("result", {}), " - ".join(outputs.get("notes", []))
 
 
-def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str, model_id: Optional[str] = None) -> Dict[str, Any]:
+def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str, model_id: Optional[str] = None, fixture_id: Optional[Any] = None) -> Dict[str, Any]:
     record = load_hybrid_model(model_id=model_id)
     if not record:
         return {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
     if record.get("bundle") and record.get("market_models"):
-        return predict_bundle_ml_outputs(base_model, home, away, record)
-    return predict_single_record_ml_outputs(base_model, home, away, record)
+        return predict_bundle_ml_outputs(base_model, home, away, record, fixture_id=fixture_id)
+    return predict_single_record_ml_outputs(base_model, home, away, record, fixture_id=fixture_id)
 
 
-def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, record: Dict[str, Any]) -> Dict[str, Any]:
+def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, record: Dict[str, Any], fixture_id: Optional[Any] = None) -> Dict[str, Any]:
     bundle_id = str(record.get("model_id") or active_worldcup_model_id() or "")
     bundle_name = str(record.get("model_name") or bundle_id or "Bundle Mundial")
     market_models = record.get("market_models") or {}
@@ -1520,7 +1882,7 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
     if result_id:
         result_record = load_hybrid_model(result_id)
         if result_record:
-            result_output = predict_single_record_ml_outputs(base_model, home, away, result_record)
+            result_output = predict_single_record_ml_outputs(base_model, home, away, result_record, fixture_id=fixture_id)
             if result_output.get("result"):
                 market_model_names["result"] = result_output.get("model_name", "")
 
@@ -1528,7 +1890,7 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
     if over_id:
         over_record = load_hybrid_model(over_id)
         if over_record:
-            over_output = predict_single_record_ml_outputs(base_model, home, away, over_record)
+            over_output = predict_single_record_ml_outputs(base_model, home, away, over_record, fixture_id=fixture_id)
             if over_output.get("over_under_25"):
                 market_model_names["over_under_25"] = over_output.get("model_name", "")
 
@@ -1551,7 +1913,7 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
     }
 
 
-def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away: str, record: Dict[str, Any]) -> Dict[str, Any]:
+def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away: str, record: Dict[str, Any], fixture_id: Optional[Any] = None) -> Dict[str, Any]:
     active_id = str(record.get("model_id") or active_worldcup_model_id() or "")
     model_name = str(record.get("model_name") or active_id or record.get("model_label", "Kaggle"))
     if record.get("mode") == "team_strength":
@@ -1575,6 +1937,7 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
     team_features = pd.DataFrame(record.get("team_features", []))
     history_team_features = pd.DataFrame(record.get("history_team_features", []))
     matchup_features = pd.DataFrame(record.get("matchup_features", []))
+    fixture_feature_rows = read_fixture_feature_rows()
     x = pd.DataFrame([
         match_feature_row(
             base_model,
@@ -1583,6 +1946,8 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
             away,
             history_team_features=history_team_features,
             matchup_features=matchup_features,
+            fixture_feature_rows=fixture_feature_rows,
+            fixture_id=fixture_id,
         )
     ])
     feature_columns = record.get("feature_columns", BASE_FEATURE_COLUMNS)
@@ -1620,7 +1985,7 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
         "model_name": model_name,
         "notes": [
             f"Modelo {model_name} aplicado a 1X2.",
-            "Over/Under 2.5 viene de Poisson; entrena target U/O si el dataset trae goles.",
+            "Over/Under 2.5 viene de Poisson cuando no existe hijo O/U entrenado.",
         ],
     }
 
@@ -1986,6 +2351,8 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "hidden_from_catalog": bool(record.get("hidden_from_catalog", False)),
         "markets": record.get("markets", {}),
         "market_models": record.get("market_models", {}),
+        "walk_forward_mode": record.get("walk_forward_mode", "none"),
+        "walk_forward_summary": record.get("walk_forward_summary", {}),
     }
     return meta
 
@@ -2036,6 +2403,8 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "hidden_from_catalog": False,
         "markets": {},
         "market_models": {},
+        "walk_forward_mode": "none",
+        "walk_forward_summary": {},
     }
 
 
@@ -2284,14 +2653,16 @@ def walk_forward_status() -> Dict[str, int]:
     matches = read_optional_csv(WALK_FORWARD_MATCHES_FILE)
     players = read_optional_csv(WALK_FORWARD_PLAYERS_FILE)
     team_features = read_optional_csv(WALK_FORWARD_TEAM_FEATURES_FILE)
-    pending_results = int(matches[matches.get("status", "").astype(str) == "pending_result"].shape[0]) if not matches.empty and "status" in matches.columns else 0
-    ready_for_retrain = int(matches[matches.get("status", "").astype(str) == "ready_for_retrain"].shape[0]) if not matches.empty and "status" in matches.columns else 0
+    refresh_state = walk_forward_refresh_state()
+    pending_results = int(refresh_state["completed_results"] - refresh_state["ready_result_only"]) if refresh_state["completed_results"] else 0
+    ready_for_retrain = int(refresh_state["ready_result_only"])
     return {
         "matches": int(matches.shape[0]),
         "players": int(players.shape[0]),
         "team_rows": int(team_features.shape[0]),
         "pending_results": pending_results,
         "ready_for_retrain": ready_for_retrain,
+        "ready_with_players": int(refresh_state["ready_with_players"]),
     }
 
 
@@ -2333,6 +2704,14 @@ def capture_walk_forward_snapshot(payload: Dict[str, Any]) -> Dict[str, int]:
             subset=["fixture_id", "Equipo"],
         )
     status = "ready_for_retrain" if prediction_safe and stats_known >= 22 else "pending_result"
+    existing = read_optional_csv(WALK_FORWARD_MATCHES_FILE)
+    included_result_only_at = ""
+    included_with_players_at = ""
+    if not existing.empty and "fixture_id" in existing.columns:
+        current = existing[existing["fixture_id"].astype(str) == fixture_id]
+        if not current.empty:
+            included_result_only_at = str(current.iloc[-1].get("included_result_only_at", "") or "")
+            included_with_players_at = str(current.iloc[-1].get("included_with_players_at", "") or "")
     match_row = pd.DataFrame([{
         "fixture_id": fixture_id,
         "date": data.get("date", ""),
@@ -2347,6 +2726,8 @@ def capture_walk_forward_snapshot(payload: Dict[str, Any]) -> Dict[str, int]:
         "starters_away": starters_away,
         "stats_known": stats_known,
         "status": status,
+        "included_result_only_at": included_result_only_at,
+        "included_with_players_at": included_with_players_at,
     }])
     write_deduped_csv(WALK_FORWARD_MATCHES_FILE, match_row, subset=["fixture_id"])
     return walk_forward_status()
@@ -2388,6 +2769,12 @@ def json_safe(value: Any) -> Any:
         return {str(key): json_safe(val) for key, val in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [json_safe(item) for item in value]
+    if isinstance(value, pd.DataFrame):
+        return [json_safe(item) for item in value.astype(object).where(pd.notna(value), "").to_dict(orient="records")]
+    if isinstance(value, pd.Series):
+        return {str(key): json_safe(val) for key, val in value.to_dict().items()}
+    if isinstance(value, np.ndarray):
+        return [json_safe(item) for item in value.tolist()]
     if isinstance(value, (np.integer, np.floating)):
         return value.item()
     if isinstance(value, np.bool_):

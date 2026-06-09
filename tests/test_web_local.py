@@ -172,7 +172,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "switchWorldcupView" in app_source
     assert "data-section=\"predicciones\"" in html_source
     assert "Calendario" in html_source
-    assert "Modelo híbrido activo" in html_source
+    assert "Modelo existente" in html_source
     assert "Predicciones Futuras" in html_source
     assert "Entrenamiento y Modelo" in html_source
     assert "Algoritmo boosting" in html_source
@@ -183,6 +183,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "worldcup-clear-cache" in html_source
     assert "worldcup-model-id" in html_source
     assert "upcoming-model-select" in html_source
+    assert "hero-hardware" in html_source
     assert "sim-history-weight" in html_source
     assert "sim-recency-weight" in html_source
     assert "sim-host-advantage" in html_source
@@ -192,6 +193,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-use-player-features" in html_source
     assert "sim-use-ml-model" in html_source
     assert "training-train" in html_source
+    assert "training-retrain-base" in html_source
+    assert "training-retrain-players" in html_source
+    assert "training-walkforward-notice" in html_source
     assert "worldcup-model-type" in html_source
     assert "worldcup-tuning-enabled" in html_source
     assert "worldcup-device" in html_source
@@ -202,7 +206,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "training-etl-flow" in html_source
     assert "training-confusion-matrix" in html_source
     assert "training-tuning-flow" in html_source
-    assert "Ambos: 1X2 + O/U 2.5" in html_source
+    assert "Siempre 1X2 + O/U 2.5" in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-predictions" in html_source
     assert "hero-countdown" in html_source
@@ -215,6 +219,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "marketBadgeText" in app_source
     assert "source-strip" in app_source
     assert "predict-match-btn" not in html_source
+    assert "worldcup-target" not in html_source
     assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
     assert "/api/mundial/player-features" in app_source
@@ -231,6 +236,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "dual_markets" in app_source
     assert "hibrido" in app_source
     assert "market-panel" in app_source
+    assert "renderWalkForwardNotice" in app_source
+    assert "renderHeroHardware" in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
     assert "renderHeroCountdown" in app_source
@@ -252,7 +259,7 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert options["defaults"]["model_type"] == "xgboost"
     assert options["defaults"]["training_target"] == "result"
     assert options["defaults"]["market_mode"] == "dual_markets"
-    assert options["targets"][0]["key"] == "dual_markets"
+    assert [target["key"] for target in options["targets"]] == ["dual_markets"]
     assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
 
 
@@ -592,23 +599,11 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert prediction["model_probs"]["ml_weight"] == 0.5
     assert prediction["model_probs"]["model_id"] == "mex-test"
     assert prediction["market_sources"]["result"]["source"] == "ML + Poisson"
-    assert prediction["market_sources"]["over_under_25"]["source"] == "Poisson"
-    assert prediction["market_sources"]["over_under_25"]["uses_ml"] is False
+    assert prediction["market_sources"]["over_under_25"]["source"] == "ML + Poisson"
+    assert prediction["market_sources"]["over_under_25"]["uses_ml"] is True
     assert set(prediction["model_probs"]) >= {"poisson", "poisson_totals", "ml", "over_under_ml"}
     assert catalog["active_model_id"] == "mex-test"
     assert any(item["model_id"] == "mex-test" for item in catalog["models"])
-
-    over_result = training.train_hybrid_model(
-        fallback_tournament_2026(),
-        payload={"seed": 7, "n_estimators": 5, "training_target": "over_under_25", "model_id": "mex-uo"},
-    )
-    over_prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
-
-    assert over_result["effective_target"] == "over_under_25"
-    assert over_prediction["model_probs"]["over_under_ml"]
-    assert over_prediction["model_probs"]["over_under_weight"] == 0.5
-    assert over_prediction["market_sources"]["result"]["source"] == "Poisson"
-    assert over_prediction["market_sources"]["over_under_25"]["source"] == "ML + Poisson"
 
     dual_result = training.train_hybrid_model(
         fallback_tournament_2026(),
@@ -631,6 +626,29 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert any(item["model_id"] == "mex-dual" and item["bundle"] for item in dual_catalog["models"])
     assert not any(str(item["model_id"]).endswith("__result") for item in dual_catalog["models"])
     assert not any(str(item["model_id"]).endswith("__uo25") for item in dual_catalog["models"])
+
+
+def test_worldcup_training_rejects_single_market_requests(tmp_path, monkeypatch):
+    from src.worldcup import training
+    from src.worldcup.data import fallback_tournament_2026
+
+    monkeypatch.setattr(training, "KAGGLE_ROOT", tmp_path / "kaggle")
+    monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", tmp_path / "models")
+    monkeypatch.setattr(training, "HYBRID_MODEL_FILE", tmp_path / "models" / "hybrid.pkl")
+    monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
+    training.KAGGLE_ROOT.mkdir(parents=True)
+    pd.DataFrame([
+        {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
+        {"home_team": "South Africa", "away_team": "Mexico", "home_goals": 1, "away_goals": 1},
+        {"home_team": "Mexico", "away_team": "Canada", "home_goals": 1, "away_goals": 2},
+        {"home_team": "Canada", "away_team": "South Africa", "home_goals": 0, "away_goals": 1},
+    ]).to_csv(training.KAGGLE_ROOT / "train.csv", index=False)
+
+    with pytest.raises(training.WorldCupTrainingError, match="bundle dual"):
+        training.train_hybrid_model(
+            fallback_tournament_2026(),
+            payload={"seed": 7, "n_estimators": 5, "training_target": "over_under_25", "market_mode": "over_under_25"},
+        )
 
 
 def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatch):
@@ -735,6 +753,7 @@ def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp
     monkeypatch.setattr(mundial_services, "PLAYER_STATS_ROOT", stats_root)
     monkeypatch.setattr(mundial_services, "SOFASCORE_ROOT", sofascore_root)
     monkeypatch.setattr(mundial_services, "WALK_FORWARD_ROOT", walk_root)
+    monkeypatch.setattr(training, "CACHE_ROOT", cache_root)
     monkeypatch.setattr(training, "KAGGLE_ROOT", kaggle_root)
     monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", models_root)
     monkeypatch.setattr(training, "HYBRID_MODEL_FILE", models_root / "hybrid.pkl")
@@ -782,6 +801,72 @@ def test_worldcup_match_feature_row_includes_history_trend_and_h2h_features():
     assert "history_trend_goal_diff_3_vs_10_diff" in row
     assert "h2h_matches" in row
     assert row["h2h_matches"] >= 1
+
+
+def test_worldcup_feature_importance_vector_handles_nested_ngboost_shape():
+    from src.worldcup import training
+
+    raw = [
+        np.array([0.12, -0.08]),
+        np.array([0.03, 0.01]),
+        np.array([-0.2, 0.15]),
+    ]
+
+    vector = training.feature_importance_vector(raw, 3)
+    top = training.top_feature_importances(type("Fake", (), {"feature_importances_": raw})(), ["a", "b", "c"])
+
+    assert vector.shape == (3,)
+    assert np.all(vector >= 0)
+    assert top[0]["feature"] == "c"
+    assert top[0]["importance"] > 0
+
+
+def test_worldcup_ngboost_dual_training_with_tuning_completes(tmp_path, monkeypatch):
+    pytest.importorskip("ngboost")
+
+    from src.worldcup import training
+    from src.worldcup.data import fallback_tournament_2026
+
+    monkeypatch.setattr(training, "KAGGLE_ROOT", tmp_path / "kaggle")
+    monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", tmp_path / "models")
+    monkeypatch.setattr(training, "HYBRID_MODEL_FILE", tmp_path / "models" / "hybrid.pkl")
+    monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
+    training.KAGGLE_ROOT.mkdir(parents=True)
+    pd.DataFrame([
+        {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
+        {"home_team": "South Africa", "away_team": "Mexico", "home_goals": 1, "away_goals": 1},
+        {"home_team": "Mexico", "away_team": "Canada", "home_goals": 1, "away_goals": 2},
+        {"home_team": "Canada", "away_team": "South Africa", "home_goals": 0, "away_goals": 1},
+        {"home_team": "Canada", "away_team": "Mexico", "home_goals": 0, "away_goals": 0},
+        {"home_team": "South Africa", "away_team": "Canada", "home_goals": 2, "away_goals": 2},
+    ]).to_csv(training.KAGGLE_ROOT / "train.csv", index=False)
+    pd.DataFrame([
+        {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 3, "away_goals": 1},
+        {"home_team": "Canada", "away_team": "Mexico", "home_goals": 0, "away_goals": 0},
+    ]).to_csv(training.KAGGLE_ROOT / "test.csv", index=False)
+    pd.DataFrame([
+        {"Team": "Mexico", "Rank": 14, "Goals": 10},
+        {"Team": "South Africa", "Rank": 60, "Goals": 5},
+        {"Team": "Canada", "Rank": 35, "Goals": 7},
+    ]).to_csv(training.KAGGLE_ROOT / "teams.csv", index=False)
+
+    result = training.train_hybrid_model(
+        fallback_tournament_2026(),
+        payload={
+            "seed": 7,
+            "model_type": "ngboost",
+            "model_id": "ngb-dual",
+            "market_mode": "dual_markets",
+            "tuning_enabled": True,
+            "n_trials": 4,
+            "n_estimators": 10,
+        },
+    )
+
+    assert result["model"]["trained"] is True
+    assert result["model"]["bundle"] is True
+    assert result["model"]["markets"]["result"]["top_features"]
+    assert result["model"]["markets"]["over_under_25"]["top_features"]
 
 
 def test_mundial_lineup_payload_adds_visual_positions_and_photos():

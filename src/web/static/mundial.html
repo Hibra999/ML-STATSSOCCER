@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260609-8">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260609-9">
 </head>
 <body>
   <header class="topbar">
@@ -32,6 +32,7 @@
         <h1>Mundial 2026</h1>
         <p id="hero-meta">Cargando fixture inaugural...</p>
         <div id="hero-countdown" class="hero-countdown"></div>
+        <div id="hero-hardware" class="hero-hardware"></div>
         <div class="hero-match" id="hero-match"></div>
       </div>
       <div class="hero-metrics">
@@ -121,21 +122,107 @@
         <h2>Entrenamiento y Modelo</h2>
         <small id="training-source">Kaggle + Elo/Poisson + boosting seleccionado</small>
       </div>
-      <div class="model-management-grid">
-        <article class="visual-panel compact-panel">
-          <header><h3>Modelo híbrido activo</h3><small>Catálogo local Mundial</small></header>
+      <div class="training-stack">
+        <article class="visual-panel training-band">
+          <header><h3>1. ETL y estado de datos</h3><small id="training-status">Sin revisar</small></header>
+          <div class="actions-row">
+            <button id="training-refresh" type="button">Revisar dataset</button>
+            <button id="training-download" type="button">Descargar Kaggle</button>
+            <button id="refresh-btn" type="button">Actualizar datos</button>
+          </div>
+          <div id="training-walkforward-notice" class="status-strip"></div>
+          <div id="training-summary" class="dataset-summary"></div>
+          <div id="training-hardware" class="hardware-compact"></div>
+          <div id="training-etl-flow" class="etl-flow"></div>
+        </article>
+
+        <article class="visual-panel training-band">
+          <header><h3>2. Modelo existente</h3><small>Catálogo local Mundial</small></header>
           <div class="model-loader">
             <select id="model-active-select"></select>
             <button id="model-load" class="primary" type="button">Cargar modelo</button>
-            <button id="model-delete" type="button">Borrar</button>
+            <button id="model-delete" type="button">Borrar modelo</button>
             <button id="worldcup-clear-cache" type="button">Limpiar Mundial</button>
           </div>
-          <div id="active-model-state" class="model-state-grid"></div>
+          <div id="active-model-state" class="model-state-grid compact-state"></div>
           <div id="models-list" class="models-list"></div>
         </article>
-        <article class="visual-panel compact-panel">
-          <header><h3>Ajustes Monte Carlo</h3><small id="model-source">Elo + Poisson + ML híbrido</small></header>
-          <div class="control-grid compact-controls">
+
+        <article class="visual-panel training-band">
+          <header><h3>3. Entrenar bundle dual</h3><small>Siempre 1X2 + O/U 2.5 con el boosting elegido</small></header>
+          <div class="control-grid training-main-grid">
+            <label>Nombre modelo<input id="worldcup-model-id" placeholder="mundial-xgb-hibrido"></label>
+            <label>Algoritmo boosting<select id="worldcup-model-type"></select></label>
+            <label>Device<select id="worldcup-device"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
+            <label>n_jobs<input id="worldcup-n-jobs" type="number" min="-1" step="1" value="-1"></label>
+            <label>N estimadores<input id="worldcup-n-estimators" type="number" min="1" step="1"></label>
+            <label>Learning rate<input id="worldcup-learning-rate" type="number" min="0.001" step="0.001"></label>
+            <label>Max depth<input id="worldcup-max-depth" type="number" step="1"></label>
+          </div>
+          <div class="training-inline-grid">
+            <section class="inline-drawer padded">
+              <header class="mini-heading"><strong>Optuna / fine-tuning</strong><small>Búsqueda de hiperparámetros</small></header>
+              <div class="control-grid compact-controls">
+                <label class="check"><input id="worldcup-tuning-enabled" type="checkbox"> Activar tuning</label>
+                <label>Trials<input id="worldcup-n-trials" type="number" min="1" step="1" value="12"></label>
+                <label>Metrica<select id="worldcup-objective"><option>F1</option><option>Accuracy</option><option>Precision</option><option>Recall</option></select></label>
+                <label>Sampler<select id="worldcup-optuna-sampler"><option value="tpe">TPE</option><option value="random">Random</option><option value="cmaes">CMA-ES</option></select></label>
+                <label>Pruner<select id="worldcup-optuna-pruner"><option value="none">None</option><option value="median">Median</option><option value="successive-halving">Successive Halving</option></select></label>
+                <label>Parametros<input id="worldcup-tune-params" value="all"></label>
+              </div>
+            </section>
+            <section class="inline-drawer padded">
+              <header class="mini-heading"><strong>Parámetros avanzados</strong><small>Solo se usan si aplican al boosting</small></header>
+              <div class="control-grid compact-controls">
+                <label>min_child_weight<input id="worldcup-min-child-weight" type="number" step="1"></label>
+                <label>lambda_regularization<input id="worldcup-lambda-regularization" type="number" step="0.1"></label>
+                <label>alpha_regularization<input id="worldcup-alpha-regularization" type="number" step="0.1"></label>
+                <label>num_leaves<input id="worldcup-num-leaves" type="number" step="1"></label>
+                <label>min_child_samples<input id="worldcup-min-child-samples" type="number" step="1"></label>
+                <label>minibatch_frac<input id="worldcup-minibatch-frac" type="number" step="0.05"></label>
+                <label class="check"><input id="worldcup-natural-gradient" type="checkbox"> natural_gradient</label>
+                <label>l2_leaf_reg<input id="worldcup-l2-leaf-reg" type="number" step="0.1"></label>
+                <label>random_strength<input id="worldcup-random-strength" type="number" step="0.1"></label>
+              </div>
+            </section>
+          </div>
+          <div class="actions-row training-actions">
+            <button id="training-train" class="primary" type="button">Entrenar híbrido Mundial</button>
+            <button id="training-retrain-base" type="button">Reentrenar con partido nuevo</button>
+            <button id="training-retrain-players" type="button">Reentrenar con partido + jugadores</button>
+          </div>
+          <div id="training-model-state" class="model-state-grid"></div>
+          <div id="training-warnings" class="status-strip"></div>
+        </article>
+
+        <article class="visual-panel training-band">
+          <header><h3>4. Evaluación y features</h3><small>Métricas por mercado, tuning y top features</small></header>
+          <div class="training-visual-grid">
+            <article class="visual-panel nested-panel">
+              <header><h3>Evaluación</h3><small>Métricas y matriz de confusión</small></header>
+              <div id="training-metric-cards" class="metric-card-grid"></div>
+              <div id="training-confusion-matrix" class="confusion-wrap"></div>
+            </article>
+            <article class="visual-panel nested-panel">
+              <header><h3>Fine-tuning</h3><small>Optuna y mejores parámetros</small></header>
+              <div id="training-tuning-flow" class="tuning-flow"></div>
+            </article>
+            <article class="visual-panel nested-panel">
+              <header><h3>Features</h3><small>Importancia y parámetros finales</small></header>
+              <div id="training-features"></div>
+            </article>
+            <article class="visual-panel nested-panel">
+              <header><h3>Resumen tabular</h3><small>Métricas, parámetros y preview</small></header>
+              <div id="training-metrics"></div>
+              <div id="training-model-params"></div>
+              <div id="training-preview"></div>
+            </article>
+          </div>
+        </article>
+
+        <article class="visual-panel training-band">
+          <header><h3>5. Simulación Monte Carlo</h3><small id="model-source">Elo + Poisson + ML híbrido</small></header>
+          <div class="control-grid compact-controls simulation-grid">
             <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
             <label>Seed<input id="sim-seed" type="number" value="2026"></label>
             <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
@@ -151,105 +238,10 @@
           </div>
           <div class="actions-row">
             <button id="simulate-btn" class="primary" type="button">Simular torneo</button>
-            <button id="refresh-btn" type="button">Actualizar datos</button>
           </div>
           <div id="simulation-summary" class="status-strip"></div>
         </article>
       </div>
-      <div class="model-flow">
-        <article class="flow-step">
-          <header><span>1</span><div><strong>Dataset Kaggle</strong><small id="training-status">Sin revisar</small></div></header>
-          <div class="actions-row">
-            <button id="training-refresh" type="button">Revisar dataset</button>
-            <button id="training-download" type="button">Descargar Kaggle</button>
-          </div>
-          <div id="training-summary" class="dataset-summary"></div>
-        </article>
-
-        <article class="flow-step">
-          <header><span>2</span><div><strong>Hardware</strong><small>CPU/CUDA y paralelismo</small></div></header>
-          <div id="training-hardware" class="hardware-grid"></div>
-          <div class="control-grid compact-controls">
-            <label>Device<select id="worldcup-device"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
-            <label>n_jobs<input id="worldcup-n-jobs" type="number" min="-1" step="1" value="-1"></label>
-          </div>
-        </article>
-
-        <article class="flow-step">
-          <header><span>3</span><div><strong>Boosting del híbrido</strong><small>El algoritmo seleccionado entrena 1X2 y O/U</small></div></header>
-          <div class="control-grid compact-controls">
-            <label>Nombre modelo<input id="worldcup-model-id" placeholder="mundial-xgb-hibrido"></label>
-            <label>Algoritmo boosting<select id="worldcup-model-type"></select></label>
-            <label>Mercados<select id="worldcup-target"><option value="dual_markets">Ambos: 1X2 + O/U 2.5</option><option value="result">Resultado 1/X/2</option><option value="over_under_25">Over/Under 2.5</option></select></label>
-            <label>N estimadores<input id="worldcup-n-estimators" type="number" min="1" step="1"></label>
-            <label>Learning rate<input id="worldcup-learning-rate" type="number" min="0.001" step="0.001"></label>
-            <label>Max depth<input id="worldcup-max-depth" type="number" step="1"></label>
-          </div>
-        </article>
-
-        <article class="flow-step">
-          <header><span>4</span><div><strong>Fine-tuning Optuna</strong><small>Busqueda de hiperparametros</small></div></header>
-          <div class="control-grid compact-controls">
-            <label class="check"><input id="worldcup-tuning-enabled" type="checkbox"> Activar tuning</label>
-            <label>Trials<input id="worldcup-n-trials" type="number" min="1" step="1" value="12"></label>
-            <label>Metrica<select id="worldcup-objective"><option>F1</option><option>Accuracy</option><option>Precision</option><option>Recall</option></select></label>
-            <label>Sampler<select id="worldcup-optuna-sampler"><option value="tpe">TPE</option><option value="random">Random</option><option value="cmaes">CMA-ES</option></select></label>
-            <label>Pruner<select id="worldcup-optuna-pruner"><option value="none">None</option><option value="median">Median</option><option value="successive-halving">Successive Halving</option></select></label>
-            <label>Parametros<input id="worldcup-tune-params" value="all"></label>
-          </div>
-          <details class="inline-drawer">
-            <summary>Parametros avanzados por modelo</summary>
-            <div class="control-grid compact-controls">
-              <label>min_child_weight<input id="worldcup-min-child-weight" type="number" step="1"></label>
-              <label>lambda_regularization<input id="worldcup-lambda-regularization" type="number" step="0.1"></label>
-              <label>alpha_regularization<input id="worldcup-alpha-regularization" type="number" step="0.1"></label>
-              <label>num_leaves<input id="worldcup-num-leaves" type="number" step="1"></label>
-              <label>min_child_samples<input id="worldcup-min-child-samples" type="number" step="1"></label>
-              <label>minibatch_frac<input id="worldcup-minibatch-frac" type="number" step="0.05"></label>
-              <label class="check"><input id="worldcup-natural-gradient" type="checkbox"> natural_gradient</label>
-              <label>l2_leaf_reg<input id="worldcup-l2-leaf-reg" type="number" step="0.1"></label>
-              <label>random_strength<input id="worldcup-random-strength" type="number" step="0.1"></label>
-            </div>
-          </details>
-        </article>
-
-        <article class="flow-step">
-          <header><span>5</span><div><strong>Entrenar y auditar</strong><small>Metricas, features y warnings</small></div></header>
-          <div class="actions-row">
-            <button id="training-train" class="primary" type="button">Entrenar híbrido Mundial</button>
-          </div>
-          <div id="training-model-state" class="model-state-grid"></div>
-          <div id="training-warnings" class="status-strip"></div>
-        </article>
-      </div>
-      <div class="training-visual-grid">
-        <article class="visual-panel">
-          <header><h3>Proceso ETL</h3><small>Ingesta, limpieza y anti-leakage</small></header>
-          <div id="training-etl-flow" class="etl-flow"></div>
-        </article>
-        <article class="visual-panel">
-          <header><h3>Evaluacion</h3><small>Metricas y matriz de confusion</small></header>
-          <div id="training-metric-cards" class="metric-card-grid"></div>
-          <div id="training-confusion-matrix" class="confusion-wrap"></div>
-        </article>
-        <article class="visual-panel">
-          <header><h3>Fine-tuning</h3><small>Optuna y mejores parametros</small></header>
-          <div id="training-tuning-flow" class="tuning-flow"></div>
-        </article>
-        <article class="visual-panel">
-          <header><h3>Features</h3><small>Importancia y parametros finales</small></header>
-          <div id="training-features"></div>
-        </article>
-      </div>
-      <details class="data-drawer">
-        <summary>Metricas y parametros en tabla</summary>
-        <div id="training-metrics"></div>
-        <div id="training-model-params"></div>
-      </details>
-      <details class="data-drawer">
-        <summary>Preview dataset</summary>
-        <div id="training-preview"></div>
-      </details>
       <div id="champion-strip" class="champion-strip"></div>
       <div class="results-grid">
         <div>
@@ -290,6 +282,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260609-8"></script>
+  <script src="/static/mundial.js?v=20260609-9"></script>
 </body>
 </html>

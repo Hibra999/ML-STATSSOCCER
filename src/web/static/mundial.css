@@ -179,6 +179,11 @@ h3 { font-size: 16px; }
   gap: 10px;
   flex-wrap: wrap;
 }
+.hero-hardware {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
 .countdown-chip {
   min-width: 74px;
   padding: 10px 12px;
@@ -606,6 +611,13 @@ h3 { font-size: 16px; }
 .training-panel {
   grid-template-columns: minmax(220px, 1fr) auto;
 }
+.training-stack {
+  display: grid;
+  gap: 14px;
+}
+.training-band {
+  min-height: auto;
+}
 .model-flow {
   display: grid;
   grid-template-columns: repeat(2, minmax(320px, 1fr));
@@ -626,6 +638,27 @@ h3 { font-size: 16px; }
   grid-template-columns: minmax(0, 1fr) auto auto auto;
   gap: 8px;
   align-items: end;
+}
+.training-main-grid {
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+}
+.training-inline-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  gap: 12px;
+}
+.mini-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 12px;
+}
+.mini-heading small {
+  color: var(--muted);
+}
+.inline-drawer.padded {
+  padding: 12px;
 }
 .models-list {
   display: grid;
@@ -705,6 +738,9 @@ h3 { font-size: 16px; }
 .model-state-grid {
   grid-template-columns: repeat(4, minmax(120px, 1fr));
 }
+.compact-state {
+  grid-template-columns: repeat(4, minmax(100px, 1fr));
+}
 .dataset-card {
   display: grid;
   gap: 6px;
@@ -727,6 +763,11 @@ h3 { font-size: 16px; }
 }
 .hardware-grid {
   grid-template-columns: repeat(5, minmax(110px, 1fr));
+}
+.hardware-compact {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 8px;
 }
 .inline-drawer {
   border: 1px solid var(--line);
@@ -768,6 +809,16 @@ h3 { font-size: 16px; }
   display: grid;
   grid-template-columns: repeat(2, minmax(320px, 1fr));
   gap: 14px;
+}
+.nested-panel {
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+}
+.simulation-grid {
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
 }
 .visual-panel {
   display: grid;
@@ -924,6 +975,9 @@ h3 { font-size: 16px; }
   height: 100%;
   border-radius: inherit;
   background: var(--green);
+}
+.training-actions {
+  justify-content: flex-start;
 }
 .upcoming-grid {
   display: grid;
@@ -1133,6 +1187,7 @@ th {
   .prediction-dock,
   .training-panel,
   .clean-dock,
+  .training-inline-grid,
   .model-flow,
   .model-management-grid,
   .training-visual-grid,
@@ -1157,6 +1212,11 @@ th {
     grid-template-columns: repeat(3, minmax(110px, 1fr));
   }
   .hardware-grid {
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+  }
+  .hardware-compact,
+  .training-main-grid,
+  .simulation-grid {
     grid-template-columns: repeat(2, minmax(130px, 1fr));
   }
   .model-state-grid {
@@ -1187,9 +1247,13 @@ th {
   .dataset-summary,
   .model-state-grid,
   .hardware-grid,
+  .hardware-compact,
   .champion-strip,
   .upcoming-grid,
-  .control-grid {
+  .control-grid,
+  .training-main-grid,
+  .simulation-grid,
+  .training-inline-grid {
     grid-template-columns: 1fr;
   }
   .metric-card-grid,

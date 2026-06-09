@@ -44,9 +44,10 @@ function bindEvents() {
   document.getElementById("training-refresh").addEventListener("click", loadTrainingStatus);
   document.getElementById("training-download").addEventListener("click", downloadTrainingDataset);
   document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
+  document.getElementById("training-retrain-base").addEventListener("click", () => trainWorldCupModel("result_only"));
+  document.getElementById("training-retrain-players").addEventListener("click", () => trainWorldCupModel("result_plus_players"));
   document.getElementById("upcoming-predict-btn").addEventListener("click", runUpcomingPredictions);
   document.getElementById("worldcup-model-type").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
-  document.getElementById("worldcup-target").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
   document.getElementById("worldcup-model-id").addEventListener("input", (event) => { event.target.dataset.autofilled = "false"; });
 }
 
@@ -167,6 +168,7 @@ function renderOverview(overview) {
     <span class="versus">VS</span>
     ${matchTeamHtml(highlight.away || {}, "away")}`;
   renderHeroCountdown(overview.countdown_target, overview.countdown_state, highlight);
+  renderHeroHardware((state.trainingOptions || {}).hardware || {});
   document.getElementById("hero-next-grid").innerHTML = (overview.next_matches || []).map((fixture) => heroNextCardHtml(fixture)).join("")
     || `<article class="hero-next-card empty"><strong>Sin más partidos cargados</strong><small>El calendario adicional aparecerá aquí.</small></article>`;
 }
@@ -221,7 +223,7 @@ function renderFixtures() {
       <div class="fixture-meta"><span>${escapeHtml(fixture.date)} ${escapeHtml(fixture.time || "")}</span><span>${escapeHtml(fixture.group || fixture.round)}</span></div>
       <div class="fixture-teams">
         <div class="fixture-team">${flagHtml(fixture.home)}<strong>${escapeHtml(fixture.home.name)}</strong></div>
-        <span>vs</span>
+        <span>${fixture.finished ? `${escapeHtml(fixture.score_home)}-${escapeHtml(fixture.score_away)}` : "vs"}</span>
         <div class="fixture-team">${flagHtml(fixture.away)}<strong>${escapeHtml(fixture.away.name)}</strong></div>
       </div>
       <small>${escapeHtml(fixture.venue || "Sede por confirmar")}</small>
@@ -299,6 +301,17 @@ function heroNextCardHtml(fixture) {
     </div>
     <small>${escapeHtml([fixture.time || "", fixture.venue || ""].filter(Boolean).join(" - ") || "Sede pendiente")}</small>
   </article>`;
+}
+
+function renderHeroHardware(hardware) {
+  const container = document.getElementById("hero-hardware");
+  if (!container) return;
+  container.innerHTML = [
+    countdownChip("Device", hardware.actual_device || hardware.device_default || "cpu"),
+    countdownChip("CUDA", hardware.cuda_available ? "Si" : "No"),
+    countdownChip("n_jobs", hardware.n_jobs ?? hardware.default_n_jobs ?? "-1"),
+    countdownChip("Threads", hardware.effective_n_jobs || hardware.cpu_count || "-"),
+  ].join("");
 }
 
 async function loadModelsCatalog() {
@@ -626,11 +639,16 @@ async function downloadTrainingDataset() {
   }
 }
 
-async function trainWorldCupModel() {
+async function trainWorldCupModel(walkForwardMode = "none") {
   clearAlert();
-  document.getElementById("training-status").textContent = "Entrenando híbrido Mundial...";
+  const modeLabel = walkForwardMode === "result_plus_players"
+    ? "Reentrenando con partido + jugadores..."
+    : walkForwardMode === "result_only"
+      ? "Reentrenando con partido nuevo..."
+      : "Entrenando híbrido Mundial...";
+  document.getElementById("training-status").textContent = modeLabel;
   try {
-    const result = await api("/api/mundial/models/train", jsonOptions(trainingPayload()));
+    const result = await api("/api/mundial/models/train", jsonOptions(trainingPayload(walkForwardMode)));
     renderTrainingResult(result);
     await loadTrainingStatus();
     if (result.models) renderModelsCatalog(result.models);
@@ -646,12 +664,15 @@ function renderTrainingStatus(payload) {
   const model = payload.model || {};
   state.trainingOptions = payload.options || state.trainingOptions;
   renderTrainingControls(state.trainingOptions, model);
-  renderHardware((model.hardware && model.trained) ? model.hardware : ((state.trainingOptions || {}).hardware || {}));
+  const hardware = (model.hardware && model.trained) ? model.hardware : ((state.trainingOptions || {}).hardware || {});
+  renderHardware(hardware);
+  renderHeroHardware(hardware);
   document.getElementById("training-status").textContent = payload.available
     ? `${payload.train_rows || 0} train etiquetado - ${evalStrategyLabel(payload.eval_strategy)} - ${payload.prediction_rows || 0} predicción`
     : "Dataset Kaggle no descargado";
   document.getElementById("training-source").textContent = `${payload.dataset_slug || "Kaggle"} - ${payload.training_mode || "sin modo"}`;
   document.getElementById("training-summary").innerHTML = datasetSummaryHtml(payload);
+  renderWalkForwardNotice(payload.walk_forward_refresh || {});
   renderModelState(model, payload);
   renderTable("training-preview", payload.preview);
   renderTable("training-metrics", metricsTableFromModel(model));
@@ -663,7 +684,9 @@ function renderTrainingStatus(payload) {
 function renderTrainingResult(payload) {
   renderTable("training-metrics", payload.metrics_table);
   renderHardware(payload.hardware || {});
+  renderHeroHardware(payload.hardware || {});
   renderTrainingWarnings(payload.warnings || []);
+  renderWalkForwardNotice(((state.training || {}).walk_forward_refresh) || {});
   document.getElementById("training-summary").innerHTML = datasetSummaryHtml({
     ...(state.training || {}),
     train_rows: payload.train_rows,
@@ -710,13 +733,14 @@ function datasetSummaryHtml(payload) {
     ? `${payload.test_rows} filas test`
     : `${payload.eval_rows || 0} holdout`;
   const walkForward = payload.walk_forward || {};
+  const refresh = payload.walk_forward_refresh || {};
   return [
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
     datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
     datasetCard("Evaluacion", evalValue, evalStrategyLabel(payload.eval_strategy)),
     datasetCard("Predicción 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
-    datasetCard("Walk-forward", walkForward.matches || 0, `${walkForward.ready_for_retrain || 0} listos / ${walkForward.pending_results || 0} pendientes`),
+    datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} base / ${refresh.ready_with_players || 0} con jugadores`),
     datasetCard("Target", payload.target_column || "-", "label entrenable"),
   ].join("");
 }
@@ -730,7 +754,7 @@ function renderModelState(model, payload) {
     predictionCard("Modelo", model.trained ? (model.model_label || payload.model_type || "Listo") : "Pendiente"),
     predictionCard("Mercados", modelMarketLabel(model.trained ? model : payload)),
     predictionCard("Eval", evalStrategyLabel(model.eval_strategy || payload.eval_strategy)),
-    predictionCard("Clases", ((model.classes || []).join("/") || "-")),
+    predictionCard("Walk-forward", walkForwardModeLabel((model.walk_forward_mode || (model.walk_forward_summary || {}).mode || "none"))),
   ].join("");
 }
 
@@ -744,6 +768,12 @@ function modelMarketLabel(model) {
   if (target === "team_strength") return "1X2 team-strength";
   if (target === "result") return "1X2";
   return target || "-";
+}
+
+function walkForwardModeLabel(mode) {
+  if (mode === "result_plus_players") return "Partido + jugadores";
+  if (mode === "result_only") return "Partido base";
+  return "Sin incremental";
 }
 
 function marketLabel(key) {
@@ -766,16 +796,9 @@ function renderTrainingControls(options, model) {
   if (!modelSelect.options.length) {
     modelSelect.innerHTML = models.map((item) => `<option value="${escapeAttr(item.key)}">${escapeHtml(item.label)}</option>`).join("");
   }
-  const targetSelect = document.getElementById("worldcup-target");
-  if (targetSelect && !targetSelect.dataset.loaded && (options.targets || []).length) {
-    targetSelect.innerHTML = options.targets.map((item) => `<option value="${escapeAttr(item.key)}">${escapeHtml(item.label)}</option>`).join("");
-    targetSelect.dataset.loaded = "true";
-  }
   const selectedModel = model.model_type || (options.defaults || {}).model_type || modelSelect.value || "xgboost";
   modelSelect.value = selectedModel;
-  const target = model.requested_target || (model.trained ? (options.defaults || {}).training_target : "dual_markets") || "dual_markets";
-  document.getElementById("worldcup-target").value = target;
-  const modelId = model.model_id || autoWorldcupModelId(selectedModel, target);
+  const modelId = model.model_id || autoWorldcupModelId(selectedModel);
   const modelIdInput = document.getElementById("worldcup-model-id");
   if (modelIdInput && (!modelIdInput.value || modelIdInput.dataset.autofilled !== "false")) {
     modelIdInput.value = modelId;
@@ -825,26 +848,24 @@ function applyModelDefaults(modelKey, force) {
   const natural = document.getElementById("worldcup-natural-gradient");
   natural.disabled = defaults.natural_gradient === undefined;
   natural.checked = Boolean(defaults.natural_gradient);
-  const target = document.getElementById("worldcup-target").value || "result";
   const modelIdInput = document.getElementById("worldcup-model-id");
   if (modelIdInput && (force || !modelIdInput.value || modelIdInput.dataset.autofilled !== "false")) {
-    modelIdInput.value = autoWorldcupModelId(modelKey, target);
+    modelIdInput.value = autoWorldcupModelId(modelKey);
     modelIdInput.dataset.autofilled = "true";
   }
 }
 
-function autoWorldcupModelId(modelKey, target) {
+function autoWorldcupModelId(modelKey) {
   const shortModel = { xgboost: "xgb", lightgbm: "lgbm", catboost: "cat", ngboost: "ngb" }[modelKey] || modelKey || "model";
-  const shortTarget = target === "dual_markets" ? "hibrido" : target === "over_under_25" ? "uo25" : "result";
-  return `mundial-${shortModel}-${shortTarget}`;
+  return `mundial-${shortModel}-hibrido`;
 }
 
 function renderHardware(hardware) {
   const devices = hardware.cuda_devices || [];
   document.getElementById("training-hardware").innerHTML = [
-    predictionCard("CPU cores", hardware.cpu_count || "-"),
-    predictionCard("CUDA", hardware.cuda_available ? "Disponible" : "No disponible"),
+    predictionCard("CPU", hardware.cpu_count || "-"),
     predictionCard("Device real", hardware.actual_device || hardware.device_default || "cpu"),
+    predictionCard("CUDA", hardware.cuda_available ? "Si" : "No"),
     predictionCard("n_jobs", hardware.n_jobs ?? hardware.default_n_jobs ?? "-1"),
     predictionCard("Threads", hardware.effective_n_jobs || hardware.cpu_count || "-"),
   ].join("");
@@ -858,6 +879,20 @@ function renderHardware(hardware) {
 
 function renderTrainingWarnings(warnings) {
   document.getElementById("training-warnings").innerHTML = (warnings || []).map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
+}
+
+function renderWalkForwardNotice(refresh) {
+  const container = document.getElementById("training-walkforward-notice");
+  if (!container) return;
+  const items = [];
+  if (refresh.requires_reload) items.push(`Recarga pendiente: ${refresh.stale_match_ids?.length || 0} partidos jugados sin snapshot.`);
+  if (refresh.ready_result_only) items.push(`Reentreno base listo: ${refresh.ready_result_only}`);
+  if (refresh.ready_with_players) items.push(`Reentreno + jugadores listo: ${refresh.ready_with_players}`);
+  if (refresh.latest_played_fixture) items.push(`Último jugado: ${refresh.latest_played_fixture}`);
+  if (refresh.note && !items.includes(refresh.note)) items.push(refresh.note);
+  container.innerHTML = items.map((item) => `<span>${escapeHtml(item)}</span>`).join("") || `<span>Sin alertas de walk-forward.</span>`;
+  const playersButton = document.getElementById("training-retrain-players");
+  if (playersButton) playersButton.disabled = !(refresh.ready_with_players > 0);
 }
 
 function renderEtlFlow(steps) {
@@ -1050,15 +1085,15 @@ function marketBadgeText(source, fallback) {
   return `${escapeHtml(source.label || "")}: ${escapeHtml(source.source)}${escapeHtml(model)}`;
 }
 
-function trainingPayload() {
-  const marketMode = document.getElementById("worldcup-target").value || "dual_markets";
+function trainingPayload(walkForwardMode = "none") {
   const payload = {
     ...simulationPayload(),
     model_id: document.getElementById("worldcup-model-id").value || "",
     model_name: document.getElementById("worldcup-model-id").value || "",
     model_type: document.getElementById("worldcup-model-type").value || "xgboost",
-    market_mode: marketMode,
-    training_target: marketMode === "over_under_25" ? "over_under_25" : "result",
+    market_mode: "dual_markets",
+    training_target: "result",
+    walk_forward_mode: walkForwardMode,
     device: document.getElementById("worldcup-device").value || "auto",
     n_jobs: Number(document.getElementById("worldcup-n-jobs").value || -1),
     tuning_enabled: document.getElementById("worldcup-tuning-enabled").checked,
@@ -1114,8 +1149,9 @@ function renderSimulation(result) {
   const lineupState = config.use_lineups ? "11 activo" : "11 off";
   const featureState = config.use_player_features ? "features XI activas" : "features XI off";
   const mlState = config.use_ml_model ? "ML híbrido activo" : "ML híbrido off";
+  const layers = (summary.hybrid_layers || []).join(" + ");
   document.getElementById("simulation-summary").textContent =
-    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState} - ${mlState}`;
+    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState} - ${mlState} - ${layers}`;
   const rows = (result.advancement && result.advancement.rows) || [];
   const topChampions = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 8);
   document.getElementById("champion-strip").innerHTML = topChampions.map((row) => {
