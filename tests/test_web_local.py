@@ -156,6 +156,7 @@ def test_predict_ui_uses_automatic_fixtures_only():
 def test_mundial_ui_is_standalone_and_personalizable():
     html_source = open("src/web/static/mundial.html", "r", encoding="utf-8").read()
     app_source = open("src/web/static/mundial.js", "r", encoding="utf-8").read()
+    css_source = open("src/web/static/mundial.css", "r", encoding="utf-8").read()
 
     assert "Mundial 2026" in html_source
     assert "Datos y procedimiento" not in html_source
@@ -200,8 +201,10 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-use-player-features" in html_source
     assert "sim-use-ml-model" in html_source
     assert "training-train" in html_source
-    assert "worldcup-training-progress" in html_source
-    assert "worldcup-simulation-progress" in html_source
+    assert "worldcup-training-progress" not in html_source
+    assert "worldcup-simulation-progress" not in html_source
+    assert "worldcup-progress" not in css_source
+    assert "renderWorldcupJobProgress" not in app_source
     assert "training-retrain-base" in html_source
     assert "training-retrain-players" in html_source
     assert "training-walkforward-notice" in html_source
@@ -220,7 +223,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Siempre 1X2 + O/U 2.5" in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-predictions" in html_source
-    assert "hero-countdown" in html_source
+    assert "hero-countdown-vs" in app_source
     assert "hero-next-grid" in html_source
     assert "simulation-summary" in html_source
     assert "upcoming-team" in app_source
@@ -250,6 +253,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "market-panel" in app_source
     assert "renderWalkForwardNotice" in app_source
     assert "renderHeroHardware" in app_source
+    assert "XGBoost" in app_source
+    assert "Numba" in app_source
+    assert "Detectado" in app_source
     assert "trackWorldcupJob" in app_source
     assert "/api/jobs/${jobId}" in app_source
     assert "runUpcomingPredictions" in app_source

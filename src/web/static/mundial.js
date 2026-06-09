@@ -19,13 +19,6 @@ const state = {
   newModelMode: false,
 };
 
-const jobLabels = {
-  queued: "En cola",
-  running: "En proceso",
-  succeeded: "Completado",
-  failed: "Error",
-};
-
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
   loadAll(false);
@@ -137,8 +130,6 @@ function setLoading() {
   document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("models-list").innerHTML = loadingHtml("Modelos pendientes");
   document.getElementById("simulation-summary").innerHTML = "";
-  renderWorldcupJobProgress("training");
-  renderWorldcupJobProgress("simulation");
 }
 
 function applyDefaultConfig(config) {
@@ -177,8 +168,11 @@ function renderOverview(overview) {
     ${matchTeamHtml(highlight.home || {}, "home")}
     <div class="hero-vs-block">
       <span class="versus">VS</span>
-      <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
-      <small>${escapeHtml(highlight.venue || "Sede por confirmar")}</small>
+      <div class="hero-kickoff">
+        <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
+        <small>${escapeHtml(highlight.venue || "Sede por confirmar")}</small>
+      </div>
+      <div id="hero-countdown" class="hero-countdown hero-countdown-vs"></div>
     </div>
     ${matchTeamHtml(highlight.away || {}, "away")}`;
   renderHeroCountdown(overview.countdown_target, overview.countdown_state, highlight);
@@ -320,16 +314,32 @@ function heroNextCardHtml(fixture) {
 function renderHeroHardware(hardware) {
   const container = document.getElementById("hero-hardware");
   if (!container) return;
+  const accelerator = hardware.training_accelerator || {};
+  const cudaDetected = Boolean(hardware.cuda_available);
+  const device = String(hardware.actual_device || hardware.device_default || (cudaDetected ? "cuda" : "cpu")).toLowerCase();
+  const cudaDevices = Array.isArray(hardware.cuda_devices) ? hardware.cuda_devices.filter(Boolean) : [];
+  const cudaDetail = cudaDetected
+    ? cudaDevices[0] || "GPU disponible"
+    : cleanMessage(hardware.cuda_error || "CPU fallback");
+  const xgboostMode = device === "cuda" || cudaDetected ? "GPU hist" : "CPU hist";
+  const numbaMode = hardware.numba_cuda_available ? "CUDA" : "CPU njit";
+  const acceleratorName = accelerator.backend
+    ? String(accelerator.backend).toUpperCase()
+    : (hardware.numba_cuda_available ? "NUMBA CUDA" : "NUMBA CPU");
+  const acceleratorDetail = accelerator.device || accelerator.mode || (hardware.numba_cuda_available ? "sanitizado GPU" : "prange/fastmath");
+  const threads = hardware.effective_n_jobs || hardware.n_jobs || hardware.default_n_jobs || hardware.cpu_count || "-";
   container.innerHTML = [
-    hardwareChip("Device", hardware.actual_device || hardware.device_default || "cpu", "Motor"),
-    hardwareChip("CUDA", hardware.cuda_available ? "Si" : "No", hardware.cuda_available ? "GPU disponible" : "CPU fallback"),
-    hardwareChip("CPU", hardware.cpu_count || "-", "nucleos"),
-    hardwareChip("Threads", hardware.effective_n_jobs || hardware.n_jobs || hardware.default_n_jobs || "-", "n_jobs"),
+    hardwareChip("CUDA", cudaDetected ? "Detectado" : "No detectado", cudaDetail, cudaDetected ? "ok" : "warn"),
+    hardwareChip("Device", device, "motor activo", device === "cuda" ? "ok" : ""),
+    hardwareChip("XGBoost", xgboostMode, device === "cuda" ? "tree_method GPU" : "tree_method hist", device === "cuda" ? "ok" : ""),
+    hardwareChip("Numba", numbaMode, acceleratorDetail, hardware.numba_cuda_available ? "ok" : ""),
+    hardwareChip("Threads", threads, `${hardware.cpu_count || "-"} nucleos CPU`, ""),
+    hardwareChip("Acelerador", acceleratorName, acceleratorDetail, accelerator.backend === "cuda" ? "ok" : ""),
   ].join("");
 }
 
-function hardwareChip(label, value, detail) {
-  return `<div class="hardware-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
+function hardwareChip(label, value, detail, tone = "") {
+  return `<div class="hardware-chip ${tone ? `hardware-${escapeAttr(tone)}` : ""}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
 }
 
 async function loadModelsCatalog() {
@@ -730,7 +740,7 @@ async function trainWorldCupModel(walkForwardMode = "none") {
   try {
     const job = await api("/api/mundial/models/train", jsonOptions(trainingPayload(walkForwardMode)));
     trackWorldcupJob(job, "training");
-    document.getElementById("simulation-summary").textContent = "Entrenamiento en proceso...";
+    document.getElementById("training-status").textContent = `${modeLabel} en segundo plano...`;
   } catch (error) {
     showError(error.message);
   }
@@ -1228,7 +1238,6 @@ function trackWorldcupJob(job, kind) {
   job.handled = false;
   state.jobs.set(job.job_id, job);
   setWorldcupJobBusy(kind, true);
-  renderWorldcupJobProgress(kind);
   startWorldcupJobPolling();
 }
 
@@ -1255,14 +1264,12 @@ async function pollWorldcupJobs() {
         state.jobs.set(jobId, job);
       }
       if (!isTerminalJob(job)) hasActive = true;
-      renderWorldcupJobProgress(job.kind);
     } catch (error) {
       previous.status = "failed";
       previous.error = error.message;
       previous.handled = true;
       state.jobs.set(jobId, previous);
       await handleWorldcupJobComplete(previous);
-      renderWorldcupJobProgress(previous.kind);
     }
   }
   if (!hasActive && state.jobTimer) {
@@ -1276,6 +1283,7 @@ async function handleWorldcupJobComplete(job) {
   if (job.status === "failed") {
     showError(job.error || "Proceso fallido");
     if (job.kind === "training" && state.training) renderTrainingStatus(state.training);
+    if (job.kind === "simulation") document.getElementById("simulation-summary").textContent = "";
     return;
   }
   const result = job.result || {};
@@ -1286,55 +1294,11 @@ async function handleWorldcupJobComplete(job) {
     if (result.models) renderModelsCatalog(result.models);
     else await loadModelsCatalog();
     document.getElementById("sim-use-ml-model").checked = true;
-    document.getElementById("simulation-summary").textContent = `Modelo listo: ${(result.model || {}).model_name || (result.model || {}).model_id || "híbrido"}`;
+    document.getElementById("training-status").textContent = `Modelo listo: ${(result.model || {}).model_name || (result.model || {}).model_id || "híbrido"}`;
   }
   if (job.kind === "simulation") {
     renderSimulation(result);
   }
-}
-
-function renderWorldcupJobProgress(kind) {
-  const target = document.getElementById(kind === "simulation" ? "worldcup-simulation-progress" : "worldcup-training-progress");
-  if (!target) return;
-  const job = latestWorldcupJob(kind);
-  if (!job) {
-    target.className = "worldcup-progress hidden";
-    target.innerHTML = "";
-    return;
-  }
-  const progress = job.progress || {};
-  const percent = clampPercent(progress.percent ?? (job.status === "succeeded" ? 100 : 0));
-  const current = progress.current_trial || progress.current || 0;
-  const total = progress.total_trials || progress.total || 0;
-  const label = progress.message || job.message || jobLabels[job.status] || job.status;
-  const best = progress.best_value === "" || progress.best_value === null || progress.best_value === undefined
-    ? ""
-    : `<span>Mejor ${escapeHtml(formatNumber(progress.best_value))}</span>`;
-  const stateText = progress.last_state ? `<span>${escapeHtml(progress.last_state)}</span>` : "";
-  const market = progress.market ? `<span>${escapeHtml(progress.market)}</span>` : "";
-  const error = job.error ? `<span>${escapeHtml(cleanMessage(job.error))}</span>` : "";
-  target.className = `worldcup-progress ${escapeAttr(job.status || "queued")}`;
-  target.innerHTML = `
-    <div class="progress-header">
-      <div class="progress-title">
-        <strong>${escapeHtml(jobLabels[job.status] || job.status || "Proceso")}</strong>
-        <small>${escapeHtml(label)}</small>
-      </div>
-      <strong>${escapeHtml(percent)}%</strong>
-    </div>
-    <div class="progress-bar"><div class="progress-fill" style="width:${escapeAttr(percent)}%"></div></div>
-    <div class="progress-meta">
-      <span>${escapeHtml(progress.stage || job.status || "queued")}</span>
-      <span>${escapeHtml(current)}/${escapeHtml(total)}</span>
-      ${market}
-      ${best}
-      ${stateText}
-      ${error}
-    </div>`;
-}
-
-function latestWorldcupJob(kind) {
-  return [...state.jobs.values()].filter((job) => job.kind === kind).pop();
 }
 
 function isTerminalJob(job) {
@@ -1349,18 +1313,6 @@ function setWorldcupJobBusy(kind, busy) {
     const button = document.getElementById(id);
     if (button) button.disabled = Boolean(busy);
   });
-}
-
-function clampPercent(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return 0;
-  return Math.min(100, Math.max(0, Math.round(number)));
-}
-
-function formatNumber(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return value;
-  return number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function predictionCard(label, value) {
