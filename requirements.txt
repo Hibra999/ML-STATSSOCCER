@@ -32,6 +32,7 @@ h5py==3.14.0
 idna==3.10
 imbalanced-learn==0.13.0
 joblib==1.5.1
+kagglehub>=0.3.12
 keras==2.15.0
 kiwisolver==1.4.8
 lanusstats==2.1.11

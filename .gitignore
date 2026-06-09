@@ -6,3 +6,9 @@ venv/
 .mlstatssoccer/agent_history
 outputs/
 exports/
+storage/worldcup/kaggle/
+storage/worldcup/models/
+storage/worldcup/sofascore/
+storage/worldcup/fotmob/
+storage/worldcup/lineups/
+storage/worldcup/player_stats/

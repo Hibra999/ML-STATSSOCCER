@@ -18,6 +18,7 @@
       <button class="nav-pill" data-section="fixtures">Fixtures</button>
       <button class="nav-pill" data-section="alineaciones">11 iniciales</button>
       <button class="nav-pill" data-section="modelo">Modelo</button>
+      <button class="nav-pill" data-section="entrenamiento">Entrenamiento</button>
       <button class="nav-pill" data-section="datos">Datos</button>
     </nav>
   </header>
@@ -54,8 +55,10 @@
         <label>Max goles<input id="sim-max-goals" type="number" min="6" max="14" step="1" value="10"></label>
         <label>Peso 11<input id="sim-lineup-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
         <label>Peso features<input id="sim-player-feature-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
+        <label>Peso Kaggle<input id="sim-ml-weight" type="number" min="0" max="1" step="0.05" value="0.5"></label>
         <label class="check"><input id="sim-use-lineups" type="checkbox"> Usar 11</label>
         <label class="check"><input id="sim-use-player-features" type="checkbox"> Features XI</label>
+        <label class="check"><input id="sim-use-ml-model" type="checkbox"> Kaggle ML</label>
       </div>
       <div class="actions-row">
         <button id="simulate-btn" class="primary" type="button">Simular</button>
@@ -119,6 +122,19 @@
         <h2>Monte Carlo</h2>
         <small id="simulation-summary"></small>
       </div>
+      <div class="prediction-dock">
+        <div>
+          <h3>Prediccion del partido</h3>
+          <small>1X2, marcador modal y Over/Under 2.5</small>
+        </div>
+        <select id="predict-fixture"></select>
+        <button id="predict-match-btn" class="primary" type="button">Predecir partido</button>
+      </div>
+      <div id="match-prediction" class="prediction-grid"></div>
+      <details class="data-drawer">
+        <summary>Detalle prediccion partido</summary>
+        <div id="match-prediction-detail"></div>
+      </details>
       <div id="champion-strip" class="champion-strip"></div>
       <div class="results-grid">
         <div>
@@ -130,6 +146,33 @@
           <div id="match-probs-table"></div>
         </div>
       </div>
+    </section>
+
+    <section id="entrenamiento" class="section-block">
+      <div class="section-heading">
+        <h2>Entrenamiento Mundial</h2>
+        <small id="training-source">Kaggle + Elo/Poisson</small>
+      </div>
+      <div class="training-panel">
+        <div class="control-title">
+          <strong>Dataset Kaggle</strong>
+          <small id="training-status">Sin revisar</small>
+        </div>
+        <div class="actions-row">
+          <button id="training-refresh" type="button">Revisar dataset</button>
+          <button id="training-download" type="button">Descargar Kaggle</button>
+          <button id="training-train" class="primary" type="button">Entrenar hibrido</button>
+        </div>
+      </div>
+      <div id="training-summary" class="prediction-grid"></div>
+      <details class="data-drawer" open>
+        <summary>Metricas train/test</summary>
+        <div id="training-metrics"></div>
+      </details>
+      <details class="data-drawer">
+        <summary>Preview dataset</summary>
+        <div id="training-preview"></div>
+      </details>
     </section>
 
     <section id="datos" class="section-block">

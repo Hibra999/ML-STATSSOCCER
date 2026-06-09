@@ -26,12 +26,19 @@ from src.worldcup.lanus_provider import (
     autodetect_fixture_event,
     link_fixture_lineup,
     lineup_payload_for_fixture,
+    lineup_payload_from_detected_event,
     lineup_rating_adjustments,
     lineups_summary,
     player_feature_rating_adjustments,
     player_features_dataframe,
     player_stats_payload_for_fixture,
     sofa_player_photo_url,
+)
+from src.worldcup.training import (
+    dataset_status,
+    download_kaggle_dataset,
+    predict_match_payload,
+    train_hybrid_model,
 )
 
 
@@ -41,8 +48,10 @@ DEFAULT_CONFIG = {
     "seed": 2026,
     "use_lineups": False,
     "use_player_features": False,
+    "use_ml_model": False,
     "lineup_weight": 1.0,
     "player_feature_weight": 1.0,
+    "ml_weight": 0.5,
     "history_weight": 1.0,
     "recency_weight": 0.35,
     "host_advantage": 45.0,
@@ -262,7 +271,7 @@ def autodetect_fixture(fixture_id: str, payload: Dict[str, Any] | None = None) -
     event = autodetect_fixture_event(tournament=tournament, fixture_id=fixture_id, refresh=bool(payload.get("refresh", False)))
     lineup = {}
     if event.get("match_url") and bool(payload.get("fetch_lineup", True)):
-        lineup = lineup_response(lineup_payload_for_fixture(tournament=tournament, fixture_id=fixture_id, refresh=True, match_url=event["match_url"]))
+        lineup = lineup_response(lineup_payload_from_detected_event(tournament=tournament, fixture_id=fixture_id, event=event, refresh=True))
     return {
         "event": event,
         "lineup": lineup,
@@ -320,6 +329,53 @@ def player_features(refresh: bool = False) -> Dict[str, Any]:
     }
 
 
+def training_download(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    return download_kaggle_dataset(force=bool(payload.get("force", False)))
+
+
+def training_dataset() -> Dict[str, Any]:
+    return dataset_status()
+
+
+def training_status() -> Dict[str, Any]:
+    return dataset_status()
+
+
+def training_train(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    tournament, _ = load_tournament_2026(refresh=bool((payload or {}).get("refresh_fixtures", False)))
+    result = train_hybrid_model(tournament=tournament, payload=payload or {})
+    result["metrics_table"] = table_payload(metrics_dataframe(result.get("metrics", {})), page=1, page_size=10)
+    return result
+
+
+def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    config = simulation_config(payload)
+    tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    model, history_source = build_model(tournament, config)
+    if config["use_lineups"]:
+        adjustments, _ = lineup_rating_adjustments(tournament, weight=config["lineup_weight"])
+        if adjustments:
+            model = model.adjusted(adjustments)
+    if config["use_player_features"]:
+        adjustments, _ = player_feature_rating_adjustments(tournament, weight=config["player_feature_weight"])
+        if adjustments:
+            model = model.adjusted(adjustments)
+    result = predict_match_payload(
+        tournament=tournament,
+        base_model=model,
+        fixture_id=payload.get("fixture_id"),
+        home=payload.get("home"),
+        away=payload.get("away"),
+        use_ml_model=bool(config["use_ml_model"]),
+        ml_weight=float(config["ml_weight"]),
+    )
+    result["fixture_source"] = fixture_source
+    result["history_source"] = history_source
+    return result
+
+
 def lineup_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     enriched = enrich_lineup_payload(payload)
     return {
@@ -356,12 +412,14 @@ def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
             "history_source": history_source,
             "use_lineups": config["use_lineups"],
             "use_player_features": config["use_player_features"],
+            "use_ml_model": config["use_ml_model"],
             "lineup_notes": lineup_notes,
             "player_feature_notes": feature_notes,
             "anti_leakage": [
                 "Historico filtrado antes del 2026-06-11.",
                 "Alineaciones ignoradas si fueron obtenidas despues de la fecha del partido.",
                 "Features del XI ignoradas si fueron obtenidas despues de la fecha del partido.",
+                "Modelo Kaggle entrenado/evaluado con split train/test local y sin partidos 2026.",
                 "No se usan resultados del Mundial 2026 para entrenar ni calibrar.",
             ],
         },
@@ -403,9 +461,15 @@ def procedure() -> Dict[str, Any]:
                 "name": "Monte Carlo",
                 "detail": "Simula fase de grupos, mejores terceros y bracket completo para estimar avance, final y campeon.",
             },
+            {
+                "name": "Prediccion de partido",
+                "detail": "Combina Elo/Poisson con el modelo Kaggle si esta entrenado, y reporta 1X2, marcador modal y Over/Under 2.5.",
+            },
         ],
         "sources": [
             "openfootball/worldcup.json",
+            "Kaggle: harrachimustapha/fifa-world-cup-team-dataset",
+            "FotMob JSON publico para autodeteccion/lineups cuando existan",
             "storage/worldcup/cache/*.json",
             "LanusStats/SofaScore opcional para alineaciones",
             "Wikipedia squads opcional para jugadores",
@@ -435,8 +499,10 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "seed": int(payload.get("seed") if payload.get("seed") is not None else DEFAULT_CONFIG["seed"]),
         "use_lineups": bool(payload.get("use_lineups", DEFAULT_CONFIG["use_lineups"])),
         "use_player_features": bool(payload.get("use_player_features", DEFAULT_CONFIG["use_player_features"])),
+        "use_ml_model": bool(payload.get("use_ml_model", DEFAULT_CONFIG["use_ml_model"])),
         "lineup_weight": _clamp_float(payload.get("lineup_weight", DEFAULT_CONFIG["lineup_weight"]), 0.0, 2.0),
         "player_feature_weight": _clamp_float(payload.get("player_feature_weight", DEFAULT_CONFIG["player_feature_weight"]), 0.0, 2.0),
+        "ml_weight": _clamp_float(payload.get("ml_weight", DEFAULT_CONFIG["ml_weight"]), 0.0, 1.0),
         "history_weight": _clamp_float(payload.get("history_weight", DEFAULT_CONFIG["history_weight"]), 0.2, 2.0),
         "recency_weight": _clamp_float(payload.get("recency_weight", DEFAULT_CONFIG["recency_weight"]), 0.0, 1.0),
         "host_advantage": _clamp_float(payload.get("host_advantage", DEFAULT_CONFIG["host_advantage"]), 0.0, 120.0),
@@ -561,6 +627,15 @@ def table_payload(df: pd.DataFrame, page: int = 1, page_size: int = 50) -> Dict[
         "total": total,
         "pages": int(math.ceil(total / page_size)) if page_size else 0,
     }
+
+
+def metrics_dataframe(metrics: Dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for split, values in (metrics or {}).items():
+        row = {"Split": split}
+        row.update(values or {})
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def jsonable(value: Any) -> Any:

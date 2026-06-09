@@ -105,6 +105,26 @@ def create_mundial_app() -> FastAPI:
     def player_features(refresh: bool = False):
         return _wrap(services.player_features, refresh)
 
+    @app.post("/api/mundial/training/download-kaggle")
+    def training_download(payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.training_download, payload)
+
+    @app.get("/api/mundial/training/dataset")
+    def training_dataset():
+        return _wrap(services.training_dataset)
+
+    @app.post("/api/mundial/training/train")
+    def training_train(payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.training_train, payload)
+
+    @app.get("/api/mundial/training/status")
+    def training_status():
+        return _wrap(services.training_status)
+
+    @app.post("/api/mundial/predict-match")
+    def predict_match(payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.predict_match, payload)
+
     @app.post("/api/mundial/simulate")
     def simulate(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.simulate, payload)

@@ -58,6 +58,11 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/lineups/auto-refresh" in paths
     assert "/api/mundial/fixtures/{fixture_id}/player-stats" in paths
     assert "/api/mundial/player-features" in paths
+    assert "/api/mundial/training/download-kaggle" in paths
+    assert "/api/mundial/training/dataset" in paths
+    assert "/api/mundial/training/train" in paths
+    assert "/api/mundial/training/status" in paths
+    assert "/api/mundial/predict-match" in paths
     assert "/api/mundial/procedure" in paths
     assert "/api/worldcup/overview" not in paths
     assert "/assets" in paths
@@ -144,9 +149,14 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "lineup-stage" in html_source
     assert "lineup-autodetect" in html_source
     assert "sim-use-player-features" in html_source
+    assert "sim-use-ml-model" in html_source
+    assert "training-train" in html_source
+    assert "predict-match-btn" in html_source
     assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
     assert "/api/mundial/player-features" in app_source
+    assert "/api/mundial/training/train" in app_source
+    assert "/api/mundial/predict-match" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
     assert "/api/worldcup/simulate" not in app_source
     assert "player-photo" in app_source
@@ -267,6 +277,61 @@ def test_worldcup_autodetect_fixture_event_caches_match(tmp_path, monkeypatch):
     assert lanus_provider.read_lineup_links()["1"].endswith("#id:987")
 
 
+def test_worldcup_autodetect_fixture_event_handles_provider_failures(tmp_path, monkeypatch):
+    from src.worldcup import lanus_provider
+    from src.worldcup.data import fallback_tournament_2026
+
+    monkeypatch.setattr(lanus_provider, "LINEUPS_ROOT", tmp_path / "lineups")
+    monkeypatch.setattr(lanus_provider, "LINEUP_LINKS_FILE", tmp_path / "lineups" / "links.json")
+    monkeypatch.setattr(lanus_provider, "SOFASCORE_ROOT", tmp_path / "events")
+    monkeypatch.setattr(lanus_provider, "SOFASCORE_EVENTS_FILE", tmp_path / "events" / "events.json")
+    monkeypatch.setattr(lanus_provider, "fetch_best_fotmob_event", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("fotmob down")))
+    monkeypatch.setattr(lanus_provider, "fetch_best_sofascore_event", lambda fixture: (_ for _ in ()).throw(RuntimeError("sofascore down")))
+
+    result = lanus_provider.autodetect_fixture_event(fallback_tournament_2026(), fixture_id=1, refresh=True)
+
+    assert result["status"] == "Pendiente"
+    assert result["provider"] == "none"
+    assert result["event_id"] == ""
+    assert "fotmob down" in result["error"]
+    assert "sofascore down" in result["error"]
+    assert len(result["source_attempts"]) == 2
+
+
+def test_worldcup_fotmob_provider_extracts_match_and_lineup():
+    from src.worldcup.fotmob_provider import extract_fotmob_matches, normalize_fotmob_players
+    from src.worldcup.lanus_provider import team_similarity
+
+    payload = {
+        "matches": [
+            {"id": 11, "home": {"name": "Mexico"}, "away": {"name": "South Africa"}},
+            {"id": 12, "home": {"name": "Canada"}, "away": {"name": "Qatar"}},
+        ]
+    }
+    matches = extract_fotmob_matches(payload)
+    assert len(matches) == 2
+    assert team_similarity("Mexico", matches[0]["home"]["name"]) == 1.0
+
+    details = {
+        "content": {
+            "lineup": {
+                "confirmed": True,
+                "lineup": [
+                    {"teamName": "Mexico", "formation": "4-3-3", "players": [{"id": index, "name": f"MEX {index}", "position": "M", "shirt": index, "rating": 7.0} for index in range(1, 12)]},
+                    {"teamName": "South Africa", "formation": "4-4-2", "players": [{"id": 100 + index, "name": f"RSA {index}", "position": "D", "shirt": index, "rating": 6.5} for index in range(1, 12)]},
+                ],
+            }
+        }
+    }
+    home_players, away_players, formation_home, formation_away, confirmed = normalize_fotmob_players(details, "Mexico", "South Africa")
+
+    assert confirmed is True
+    assert formation_home == "4-3-3"
+    assert formation_away == "4-4-2"
+    assert len([player for player in home_players if player["starter"]]) == 11
+    assert len([player for player in away_players if player["starter"]]) == 11
+
+
 def test_worldcup_lineup_fallback_pending_without_match_url(tmp_path, monkeypatch):
     from src.worldcup import lanus_provider
     from src.worldcup.data import fallback_tournament_2026
@@ -364,8 +429,10 @@ def test_mundial_simulation_config_is_clamped():
         "max_goals": 99,
         "lineup_weight": 9,
         "player_feature_weight": 9,
+        "ml_weight": 9,
         "use_lineups": True,
         "use_player_features": True,
+        "use_ml_model": True,
     })
 
     assert config["iterations"] == 20000
@@ -375,8 +442,85 @@ def test_mundial_simulation_config_is_clamped():
     assert config["max_goals"] == 14
     assert config["lineup_weight"] == 2.0
     assert config["player_feature_weight"] == 2.0
+    assert config["ml_weight"] == 1.0
     assert config["use_lineups"] is True
     assert config["use_player_features"] is True
+    assert config["use_ml_model"] is True
+
+
+def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch):
+    from src.worldcup import training
+    from src.worldcup.data import fallback_tournament_2026
+    from src.worldcup.model import WorldCupModel
+
+    monkeypatch.setattr(training, "KAGGLE_ROOT", tmp_path / "kaggle")
+    monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", tmp_path / "models")
+    monkeypatch.setattr(training, "HYBRID_MODEL_FILE", tmp_path / "models" / "hybrid.pkl")
+    monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
+    training.KAGGLE_ROOT.mkdir(parents=True)
+    pd.DataFrame([
+        {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
+        {"home_team": "South Africa", "away_team": "Mexico", "home_goals": 1, "away_goals": 1},
+        {"home_team": "Mexico", "away_team": "Canada", "home_goals": 1, "away_goals": 2},
+        {"home_team": "Canada", "away_team": "South Africa", "home_goals": 0, "away_goals": 1},
+    ]).to_csv(training.KAGGLE_ROOT / "train.csv", index=False)
+    pd.DataFrame([
+        {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 3, "away_goals": 1},
+        {"home_team": "Canada", "away_team": "Mexico", "home_goals": 0, "away_goals": 0},
+    ]).to_csv(training.KAGGLE_ROOT / "test.csv", index=False)
+    pd.DataFrame([
+        {"Team": "Mexico", "Rank": 14, "Goals": 10},
+        {"Team": "South Africa", "Rank": 60, "Goals": 5},
+        {"Team": "Canada", "Rank": 35, "Goals": 7},
+    ]).to_csv(training.KAGGLE_ROOT / "teams.csv", index=False)
+
+    status = training.dataset_status()
+    result = training.train_hybrid_model(fallback_tournament_2026(), payload={"seed": 7, "n_estimators": 20})
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "South Africa", "Canada"])
+    prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
+
+    assert status["trainable"] is True
+    assert result["model"]["trained"] is True
+    assert result["eval_rows"] == 2
+    assert prediction["fixture"]["home"] == "Mexico"
+    assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
+    assert prediction["model_probs"]["ml_weight"] == 0.5
+
+
+def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatch):
+    from src.worldcup import training
+    from src.worldcup.data import fallback_tournament_2026
+    from src.worldcup.model import WorldCupModel
+
+    monkeypatch.setattr(training, "KAGGLE_ROOT", tmp_path / "kaggle")
+    monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", tmp_path / "models")
+    monkeypatch.setattr(training, "HYBRID_MODEL_FILE", tmp_path / "models" / "hybrid.pkl")
+    monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
+    training.KAGGLE_ROOT.mkdir(parents=True)
+    pd.DataFrame([
+        {"version": 2022, "team": "Mexico", "fifa_rank_pre_tournament": 12, "fifa_points_pre_tournament": 1600, "wins_last_4y": 20, "quarter_finalist": 1},
+        {"version": 2022, "team": "South Africa", "fifa_rank_pre_tournament": 60, "fifa_points_pre_tournament": 1350, "wins_last_4y": 8, "quarter_finalist": 0},
+        {"version": 2022, "team": "Brazil", "fifa_rank_pre_tournament": 1, "fifa_points_pre_tournament": 1800, "wins_last_4y": 30, "quarter_finalist": 1},
+        {"version": 2022, "team": "Qatar", "fifa_rank_pre_tournament": 50, "fifa_points_pre_tournament": 1400, "wins_last_4y": 9, "quarter_finalist": 0},
+        {"version": 2018, "team": "France", "fifa_rank_pre_tournament": 7, "fifa_points_pre_tournament": 1700, "wins_last_4y": 25, "quarter_finalist": 1},
+        {"version": 2018, "team": "Panama", "fifa_rank_pre_tournament": 55, "fifa_points_pre_tournament": 1320, "wins_last_4y": 6, "quarter_finalist": 0},
+    ]).to_csv(training.KAGGLE_ROOT / "train.csv", index=False)
+    pd.DataFrame([
+        {"version": 2026, "team": "Mexico", "fifa_rank_pre_tournament": 14, "fifa_points_pre_tournament": 1650, "wins_last_4y": 22, "quarter_finalist": ""},
+        {"version": 2026, "team": "South Africa", "fifa_rank_pre_tournament": 58, "fifa_points_pre_tournament": 1360, "wins_last_4y": 10, "quarter_finalist": ""},
+    ]).to_csv(training.KAGGLE_ROOT / "test.csv", index=False)
+
+    status = training.dataset_status()
+    result = training.train_hybrid_model(fallback_tournament_2026(), payload={"seed": 11, "n_estimators": 20})
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "South Africa"])
+    prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
+
+    assert status["training_mode"] == "team_strength"
+    assert status["target_column"] == "quarter_finalist"
+    assert result["mode"] == "team_strength"
+    assert result["model"]["target_column"] == "quarter_finalist"
+    assert prediction["model_probs"]["ml"]
+    assert "team-strength" in prediction["notes"][0]
 
 
 def test_mundial_lineup_payload_adds_visual_positions_and_photos():

@@ -6,6 +6,7 @@ const state = {
   players: [],
   lineups: [],
   playerFeatures: [],
+  training: null,
   teamAssets: new Map(),
   defaultsApplied: false,
 };
@@ -30,6 +31,10 @@ function bindEvents() {
   document.getElementById("lineup-link").addEventListener("click", linkSelectedLineup);
   document.getElementById("lineup-fixture").addEventListener("change", () => loadSelectedLineup(false));
   document.getElementById("players-refresh").addEventListener("click", () => loadPlayers(true));
+  document.getElementById("training-refresh").addEventListener("click", loadTrainingStatus);
+  document.getElementById("training-download").addEventListener("click", downloadTrainingDataset);
+  document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
+  document.getElementById("predict-match-btn").addEventListener("click", runMatchPrediction);
 }
 
 async function api(path, options = {}) {
@@ -43,7 +48,7 @@ async function loadAll(refresh) {
   clearAlert();
   setLoading();
   try {
-    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, procedure] = await Promise.all([
+    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, training, procedure] = await Promise.all([
       api(`/api/mundial/overview?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/groups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/fixtures?refresh=${refresh ? "true" : "false"}`),
@@ -51,6 +56,7 @@ async function loadAll(refresh) {
       api(`/api/mundial/lineups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/players?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/player-features?refresh=${refresh ? "true" : "false"}`),
+      api("/api/mundial/training/status"),
       api("/api/mundial/procedure"),
     ]);
     state.overview = overview;
@@ -60,6 +66,7 @@ async function loadAll(refresh) {
     state.lineups = lineups.lineups || [];
     state.players = players.players || [];
     state.playerFeatures = playerFeatures.rows || [];
+    state.training = training;
     rebuildTeamAssets();
     applyDefaultConfig(overview.default_config || {});
     renderOverview(overview);
@@ -70,9 +77,12 @@ async function loadAll(refresh) {
     renderLineupsSummary(lineups);
     renderPlayers(players);
     renderPlayerFeatures(playerFeatures);
+    renderTrainingStatus(training);
     renderProcedure(procedure);
     fillLineupSelect();
+    fillPredictSelect();
     await loadSelectedLineup(false);
+    await runMatchPrediction();
     await runSimulation();
   } catch (error) {
     showError(error.message);
@@ -87,6 +97,8 @@ function setLoading() {
   document.getElementById("players-list").innerHTML = loadingHtml("Cargando jugadores");
   document.getElementById("lineup-features-table").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("player-features-table").innerHTML = loadingHtml("Features pendientes");
+  document.getElementById("training-summary").innerHTML = loadingHtml("Dataset pendiente");
+  document.getElementById("match-prediction").innerHTML = loadingHtml("Prediccion pendiente");
 }
 
 function applyDefaultConfig(config) {
@@ -100,6 +112,7 @@ function applyDefaultConfig(config) {
     "sim-max-goals": config.max_goals,
     "sim-lineup-weight": config.lineup_weight,
     "sim-player-feature-weight": config.player_feature_weight,
+    "sim-ml-weight": config.ml_weight,
   };
   Object.entries(pairs).forEach(([id, value]) => {
     const input = document.getElementById(id);
@@ -107,6 +120,7 @@ function applyDefaultConfig(config) {
   });
   document.getElementById("sim-use-lineups").checked = Boolean(config.use_lineups);
   document.getElementById("sim-use-player-features").checked = Boolean(config.use_player_features);
+  document.getElementById("sim-use-ml-model").checked = Boolean(config.use_ml_model);
   state.defaultsApplied = true;
 }
 
@@ -185,6 +199,13 @@ function fillLineupSelect() {
   const groupFixtures = state.fixtures.filter((fixture) => fixture.group);
   document.getElementById("lineup-fixture").innerHTML = groupFixtures.map((fixture) => `
     <option value="${escapeAttr(fixture.id)}">${escapeHtml(fixture.id)} - ${escapeHtml(fixture.group)} - ${escapeHtml(fixture.label)}</option>
+  `).join("");
+}
+
+function fillPredictSelect() {
+  const groupFixtures = state.fixtures.filter((fixture) => fixture.group);
+  document.getElementById("predict-fixture").innerHTML = groupFixtures.map((fixture) => `
+    <option value="${escapeAttr(fixture.id)}">${escapeHtml(fixture.id)} - ${escapeHtml(fixture.date)} - ${escapeHtml(fixture.label)}</option>
   `).join("");
 }
 
@@ -380,6 +401,77 @@ function renderPlayers(payload) {
   renderTable("players-table", payload.table);
 }
 
+async function loadTrainingStatus() {
+  try {
+    const result = await api("/api/mundial/training/status");
+    state.training = result;
+    renderTrainingStatus(result);
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function downloadTrainingDataset() {
+  clearAlert();
+  document.getElementById("training-status").textContent = "Descargando Kaggle...";
+  try {
+    const result = await api("/api/mundial/training/download-kaggle", jsonOptions({ force: false }));
+    state.training = result;
+    renderTrainingStatus(result);
+  } catch (error) {
+    showError(error.message);
+    await loadTrainingStatus();
+  }
+}
+
+async function trainWorldCupModel() {
+  clearAlert();
+  document.getElementById("training-status").textContent = "Entrenando modelo hibrido...";
+  try {
+    const result = await api("/api/mundial/training/train", jsonOptions(simulationPayload()));
+    renderTrainingResult(result);
+    await loadTrainingStatus();
+    document.getElementById("sim-use-ml-model").checked = true;
+    await runMatchPrediction();
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+function renderTrainingStatus(payload) {
+  const model = payload.model || {};
+  document.getElementById("training-status").textContent = payload.available
+    ? `${payload.train_rows || 0} train - ${payload.test_rows || 0} test - modelo ${model.trained ? "entrenado" : "pendiente"}`
+    : "Dataset Kaggle no descargado";
+  document.getElementById("training-summary").innerHTML = [
+    predictionCard("Archivos", (payload.files || []).length),
+    predictionCard("Train", payload.train_rows || 0),
+    predictionCard("Test", payload.test_rows || 0),
+    predictionCard("Features equipo", payload.team_feature_rows || 0),
+    predictionCard("Modelo", model.trained ? "Listo" : "Pendiente"),
+  ].join("");
+  renderTable("training-preview", payload.preview);
+  renderTable("training-metrics", metricsTableFromModel(model));
+}
+
+function renderTrainingResult(payload) {
+  renderTable("training-metrics", payload.metrics_table);
+  document.getElementById("training-summary").innerHTML = [
+    predictionCard("Train", payload.train_rows || 0),
+    predictionCard("Eval", payload.eval_rows || 0),
+    predictionCard("Features", (payload.features || []).length),
+    predictionCard("Clases", ((payload.model || {}).classes || []).join("/")),
+    predictionCard("Modelo", "Listo"),
+  ].join("");
+}
+
+function metricsTableFromModel(model) {
+  const metrics = (model && model.metrics) || {};
+  const rows = Object.entries(metrics).map(([split, values]) => ({ Split: split, ...(values || {}) }));
+  const columns = rows.length ? Object.keys(rows[0]) : [];
+  return { columns, rows, total: rows.length };
+}
+
 async function runSimulation() {
   clearAlert();
   document.getElementById("simulation-summary").textContent = "Ejecutando Monte Carlo...";
@@ -392,6 +484,42 @@ async function runSimulation() {
   }
 }
 
+async function runMatchPrediction() {
+  const fixtureId = document.getElementById("predict-fixture").value || document.getElementById("lineup-fixture").value;
+  try {
+    const result = await api("/api/mundial/predict-match", jsonOptions({ ...simulationPayload(), fixture_id: fixtureId }));
+    renderMatchPrediction(result);
+  } catch (error) {
+    document.getElementById("match-prediction").innerHTML = loadingHtml("Prediccion no disponible");
+    showError(error.message);
+  }
+}
+
+function renderMatchPrediction(result) {
+  const fixture = result.fixture || {};
+  const probs = result.probabilities || {};
+  document.getElementById("match-prediction").innerHTML = [
+    predictionCard(fixture.home || "Local", `${probs.home || 0}%`),
+    predictionCard("Empate", `${probs.draw || 0}%`),
+    predictionCard(fixture.away || "Visitante", `${probs.away || 0}%`),
+    predictionCard("Over 2.5", `${probs.over25 || 0}%`),
+    predictionCard("Under 2.5", `${probs.under25 || 0}%`),
+  ].join("");
+  renderTable("match-prediction-detail", objectTable({
+    Partido: `${fixture.home || ""} vs ${fixture.away || ""}`,
+    Fecha: fixture.date || "",
+    Prediccion: result.prediction || "",
+    Marcador: result.modal_score || "",
+    "xG local": (result.expected_goals || {}).home || "",
+    "xG visita": (result.expected_goals || {}).away || "",
+    Nota: (result.notes || []).join(" - "),
+  }));
+}
+
+function predictionCard(label, value) {
+  return `<article class="prediction-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
+}
+
 function simulationPayload() {
   return {
     iterations: Number(document.getElementById("sim-iterations").value || 5000),
@@ -402,8 +530,10 @@ function simulationPayload() {
     max_goals: Number(document.getElementById("sim-max-goals").value || 10),
     lineup_weight: Number(document.getElementById("sim-lineup-weight").value || 1),
     player_feature_weight: Number(document.getElementById("sim-player-feature-weight").value || 1),
+    ml_weight: Number(document.getElementById("sim-ml-weight").value || 0.5),
     use_lineups: document.getElementById("sim-use-lineups").checked,
     use_player_features: document.getElementById("sim-use-player-features").checked,
+    use_ml_model: document.getElementById("sim-use-ml-model").checked,
   };
 }
 
@@ -412,8 +542,9 @@ function renderSimulation(result) {
   const config = summary.config || {};
   const lineupState = config.use_lineups ? "11 activo" : "11 off";
   const featureState = config.use_player_features ? "features XI activas" : "features XI off";
+  const mlState = config.use_ml_model ? "Kaggle ML activo" : "Kaggle ML off";
   document.getElementById("simulation-summary").textContent =
-    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState}`;
+    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState} - ${mlState}`;
   const rows = (result.advancement && result.advancement.rows) || [];
   const topChampions = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 8);
   document.getElementById("champion-strip").innerHTML = topChampions.map((row) => {
@@ -478,6 +609,10 @@ window.handleImageError = handleImageError;
 
 function renderTable(id, table) {
   document.getElementById(id).innerHTML = tableHtml(table);
+}
+
+function objectTable(row) {
+  return { columns: Object.keys(row), rows: [row], total: 1 };
 }
 
 function tableHtml(table) {

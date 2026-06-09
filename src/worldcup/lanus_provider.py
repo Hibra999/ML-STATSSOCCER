@@ -12,6 +12,7 @@ from unicodedata import normalize as unicode_normalize
 import pandas as pd
 
 from src.worldcup.data import clean_team_name, tournament_fixtures_dataframe
+from src.worldcup.fotmob_provider import fetch_best_fotmob_event, fetch_fotmob_lineup
 
 
 LINEUPS_ROOT = Path("storage") / "worldcup" / "lineups"
@@ -90,7 +91,9 @@ def autodetect_fixture_event(tournament: Dict[str, Any], fixture_id: Any, refres
     if fixture_key in event_cache and not refresh:
         return event_cache[fixture_key]
 
-    event = fetch_best_sofascore_event(fixture)
+    attempts: List[Dict[str, str]] = []
+    event = fetch_best_event_with_fallbacks(fixture, attempts)
+    event["source_attempts"] = attempts
     if not event.get("event_id"):
         event_cache[fixture_key] = event
         write_event_cache(event_cache)
@@ -98,10 +101,68 @@ def autodetect_fixture_event(tournament: Dict[str, Any], fixture_id: Any, refres
 
     event_cache[fixture_key] = event
     write_event_cache(event_cache)
-    links = read_lineup_links()
-    links[fixture_key] = event["match_url"]
-    write_lineup_links(links)
+    if "sofascore.com" in str(event.get("match_url", "")):
+        links = read_lineup_links()
+        links[fixture_key] = event["match_url"]
+        write_lineup_links(links)
     return event
+
+
+def fetch_best_event_with_fallbacks(fixture: pd.Series, attempts: List[Dict[str, str]]) -> Dict[str, Any]:
+    fixture_key = str(fixture.get("No.", ""))
+    date = str(fixture.get("Fecha", ""))[:10]
+    home = clean_team_name(fixture.get("Equipo 1"))
+    away = clean_team_name(fixture.get("Equipo 2"))
+
+    for provider, fetcher in (
+            ("FotMob", lambda: fetch_best_fotmob_event(
+                fixture=fixture,
+                similarity_fn=team_similarity,
+                event_builder=fotmob_event_payload,
+                pending_builder=lambda fixture_key, date, home, away, error: pending_event_payload(
+                    fixture_key, date, home, away, error, source="FotMob", provider="FotMob",
+                ),
+            )),
+            ("SofaScore", lambda: fetch_best_sofascore_event(fixture)),
+    ):
+        try:
+            event = fetcher()
+            attempts.append({"provider": provider, "status": event.get("status", ""), "error": event.get("error", "")})
+            if event.get("event_id"):
+                return event
+        except Exception as exc:
+            attempts.append({"provider": provider, "status": "Error", "error": clean_error(exc)})
+
+    error = "; ".join(f"{attempt['provider']}: {attempt['error'] or attempt['status']}" for attempt in attempts if attempt.get("error") or attempt.get("status"))
+    return pending_event_payload(fixture_key, date, home, away, error or "No se detecto evento en FotMob ni SofaScore.", source="multi-provider", provider="none")
+
+
+def lineup_payload_from_detected_event(
+        tournament: Dict[str, Any],
+        fixture_id: Any,
+        event: Dict[str, Any],
+        refresh: bool = True,
+) -> Dict[str, Any]:
+    fixture = find_fixture(tournament=tournament, fixture_id=fixture_id)
+    fixture_key = str(fixture["No."])
+    provider = str(event.get("provider") or event.get("source") or "").lower()
+    try:
+        if provider.startswith("fotmob"):
+            payload = fetch_fotmob_lineup(fixture=fixture, fixture_key=fixture_key, event=event)
+            write_lineup_cache(lineup_cache_path(fixture_key), payload)
+            write_player_stats_cache(player_stats_cache_path(fixture_key), player_stats_payload(payload))
+            return payload
+        if event.get("match_url"):
+            payload = lineup_payload_for_fixture(tournament=tournament, fixture_id=fixture_key, refresh=refresh, match_url=event.get("match_url"))
+            write_player_stats_cache(player_stats_cache_path(fixture_key), player_stats_payload(payload))
+            return payload
+    except Exception as exc:
+        cached = read_lineup_cache(lineup_cache_path(fixture_key)) if lineup_cache_path(fixture_key).exists() else None
+        if cached is not None:
+            cached["error"] = clean_error(exc)
+            return cached
+        return pending_lineup_payload(fixture, fixture_key, match_url=event.get("match_url", ""), error=clean_error(exc))
+    return pending_lineup_payload(fixture, fixture_key, match_url=event.get("match_url", ""), error=event.get("error", ""))
 
 
 def auto_refresh_lineups(tournament: Dict[str, Any], refresh_events: bool = False, limit: int = 0) -> Dict[str, Any]:
@@ -119,8 +180,7 @@ def auto_refresh_lineups(tournament: Dict[str, Any], refresh_events: bool = Fals
             failures += 1
             rows.append({**event, "fixture_id": fixture_key, "status": "No detectado"})
             continue
-        lineup = lineup_payload_for_fixture(tournament, fixture_key, refresh=True, match_url=event["match_url"])
-        write_player_stats_cache(player_stats_cache_path(fixture_key), player_stats_payload(lineup))
+        lineup = lineup_payload_from_detected_event(tournament, fixture_key, event, refresh=True)
         refreshed += int(lineup.get("starters_home", 0) == 11 and lineup.get("starters_away", 0) == 11)
         rows.append({
             **event,
@@ -404,6 +464,38 @@ def fetch_best_sofascore_event(fixture: pd.Series) -> Dict[str, Any]:
         "confidence": round(confidence, 3),
         "reverse": bool(reverse),
         "source": "SofaScore scheduled-events",
+        "provider": "SofaScore",
+        "status": "Detectado",
+        "error": "",
+        "detected_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def fotmob_event_payload(
+        fixture_key: str,
+        date: str,
+        home: str,
+        away: str,
+        event_home: str,
+        event_away: str,
+        event_id: str,
+        match_url: str,
+        confidence: float,
+        reverse: bool,
+) -> Dict[str, Any]:
+    return {
+        "fixture_id": str(fixture_key),
+        "date": date,
+        "home": home,
+        "away": away,
+        "event_home": event_home,
+        "event_away": event_away,
+        "event_id": str(event_id),
+        "match_url": match_url,
+        "confidence": round(float(confidence or 0.0), 3),
+        "reverse": bool(reverse),
+        "source": "FotMob matches",
+        "provider": "FotMob",
         "status": "Detectado",
         "error": "",
         "detected_at": datetime.now(timezone.utc).isoformat(),
@@ -671,7 +763,15 @@ def sofa_event_url(event_id: str, home: str, away: str) -> str:
     return f"https://www.sofascore.com/football/match/{home_slug}-{away_slug}#id:{event_id}"
 
 
-def pending_event_payload(fixture_key: str, date: str, home: str, away: str, error: str) -> Dict[str, Any]:
+def pending_event_payload(
+        fixture_key: str,
+        date: str,
+        home: str,
+        away: str,
+        error: str,
+        source: str = "SofaScore scheduled-events",
+        provider: str = "SofaScore",
+) -> Dict[str, Any]:
     return {
         "fixture_id": str(fixture_key),
         "date": date,
@@ -683,7 +783,8 @@ def pending_event_payload(fixture_key: str, date: str, home: str, away: str, err
         "match_url": "",
         "confidence": 0.0,
         "reverse": False,
-        "source": "SofaScore scheduled-events",
+        "source": source,
+        "provider": provider,
         "status": "Pendiente",
         "error": error,
         "detected_at": datetime.now(timezone.utc).isoformat(),
