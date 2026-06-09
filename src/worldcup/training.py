@@ -6,7 +6,7 @@ import pickle
 import re
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -25,6 +25,8 @@ KAGGLE_ROOT = Path("storage") / "worldcup" / "kaggle"
 WORLD_CUP_MODELS_ROOT = Path("storage") / "worldcup" / "models"
 HYBRID_MODEL_FILE = WORLD_CUP_MODELS_ROOT / "hybrid_worldcup_model.pkl"
 HYBRID_MODEL_META_FILE = WORLD_CUP_MODELS_ROOT / "hybrid_worldcup_model.json"
+PREPARED_DATASET_FILE = CACHE_ROOT / "worldcup_training_prepared.pkl"
+PREPARED_DATASET_META_FILE = CACHE_ROOT / "worldcup_training_prepared.json"
 LEGACY_MODEL_ID = "legacy-hybrid"
 ACTIVE_MODEL_STATE_FILE = "active_model.json"
 BASE_FEATURE_COLUMNS = [
@@ -182,10 +184,12 @@ def download_kaggle_dataset(force: bool = False) -> Dict[str, Any]:
 def dataset_status() -> Dict[str, Any]:
     files = list(discover_dataset_files(KAGGLE_ROOT))
     normalized = normalize_dataset_files(files)
+    prepared = prepared_dataset_status(files=files, normalized=normalized)
     model_meta = read_model_metadata()
-    train_rows = labeled_train_row_count(normalized)
-    test_rows = labeled_test_row_count(normalized)
-    eval_strategy = evaluation_strategy(normalized)
+    active_dataset = prepared["dataset"] if prepared["ready"] else normalized
+    train_rows = labeled_train_row_count(active_dataset)
+    test_rows = labeled_test_row_count(active_dataset)
+    eval_strategy = evaluation_strategy(active_dataset)
     walk_forward = walk_forward_status()
     refresh_state = walk_forward_refresh_state()
     return {
@@ -193,22 +197,46 @@ def dataset_status() -> Dict[str, Any]:
         "local_path": str(KAGGLE_ROOT),
         "files": [str(path) for path in files],
         "available": bool(files),
+        "etl_ready": bool(prepared["ready"]),
+        "etl_stale": bool(prepared["stale"]),
+        "etl_status": prepared["status"],
+        "etl_artifact_path": str(PREPARED_DATASET_FILE),
+        "prepared_at": prepared.get("prepared_at", ""),
+        "prepared_mode": prepared.get("mode", ""),
+        "prepared_label_source": prepared.get("label_source", ""),
+        "prepared_over_under_ready": bool(prepared.get("over_under_ready", False)),
+        "prepared_warnings": prepared.get("warnings", []),
         "train_rows": train_rows,
         "test_rows": test_rows,
         "eval_rows": test_rows if test_rows else planned_holdout_rows(train_rows),
-        "prediction_rows": int(normalized["team_prediction"].shape[0]),
+        "prediction_rows": int(active_dataset["team_prediction"].shape[0]),
         "eval_strategy": eval_strategy,
-        "team_feature_rows": int(normalized["team_features"].shape[0]),
-        "target_column": normalized["target_column"],
-        "team_columns": normalized["team_columns"],
-        "training_mode": normalized["training_mode"],
-        "etl_steps": etl_steps(files, normalized, eval_strategy),
-        "trainable": bool(normalized["trainable"]),
+        "team_feature_rows": int(active_dataset["team_features"].shape[0]),
+        "target_column": active_dataset["target_column"],
+        "team_columns": active_dataset["team_columns"],
+        "training_mode": active_dataset["training_mode"],
+        "raw_training_mode": normalized["training_mode"],
+        "etl_steps": etl_steps(files, active_dataset, eval_strategy, prepared=prepared),
+        "trainable": bool(active_dataset["trainable"]),
         "walk_forward": walk_forward,
         "walk_forward_refresh": refresh_state,
         "model": model_meta,
-        "preview": normalized["preview"],
+        "preview": active_dataset["preview"],
     }
+
+
+def prepare_training_dataset(force: bool = False, refresh_history: bool = False) -> Dict[str, Any]:
+    files = list(discover_dataset_files(KAGGLE_ROOT))
+    if not files:
+        raise WorldCupTrainingError("No hay dataset Kaggle local. Primero descarga el dataset.")
+    normalized = normalize_dataset_files(files)
+    if PREPARED_DATASET_FILE.exists() and not force:
+        current = prepared_dataset_status(files=files, normalized=normalized)
+        if current["ready"] and not current["stale"]:
+            return dataset_status()
+    prepared = build_prepared_dataset(files=files, normalized=normalized, refresh_history=refresh_history)
+    save_prepared_dataset(prepared)
+    return dataset_status()
 
 
 def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -224,14 +252,11 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
     train_config = training_config(payload)
     model_id = train_config["model_id"]
     files = list(discover_dataset_files(KAGGLE_ROOT))
-    if not files:
-        raise WorldCupTrainingError("No hay dataset Kaggle local. Primero descarga el dataset.")
-
-    normalized = normalize_dataset_files(files)
+    normalized = load_prepared_dataset(required=True)
     train_rows = normalized["train"].copy()
     test_rows = normalized["test"].copy()
     if not normalized["trainable"]:
-        raise WorldCupTrainingError("El dataset no tiene columnas trainables de partido: equipos y resultado/winner.")
+        raise WorldCupTrainingError("El ETL no genero columnas trainables de partido con goles y resultado reales.")
     walk_forward_mode = normalize_walk_forward_mode(payload.get("walk_forward_mode", "none"))
     walk_forward_summary = supplemental_training_rows(
         tournament=tournament,
@@ -258,56 +283,38 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
     fixture_feature_rows = read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
     target_warning = ""
     eval_strategy = "unavailable"
-    if normalized["training_mode"] == "team_strength":
-        effective_target = "team_strength"
-        if train_config["training_target"] == "over_under_25":
-            target_warning = "El dataset Kaggle de equipos no permite entrenar Over/Under 2.5; U/O queda con Poisson."
-        x_train, y_train, feature_columns = build_team_training_matrix(normalized["team_train"])
-        if normalized["team_test"].empty or "Label" not in normalized["team_test"].columns or normalized["team_test"]["Label"].dropna().empty:
-            eval_strategy = "holdout_from_train"
-            x_train, x_eval, y_train, y_eval = safe_train_eval_split(
-                x_train,
-                y_train,
-                test_size=float(payload.get("eval_size", 0.25) or 0.25),
-                random_state=train_config["seed"],
-            )
-        else:
-            eval_strategy = "test_file"
-            x_eval, y_eval, _ = build_team_training_matrix(normalized["team_test"], feature_columns=feature_columns)
+    effective_target = train_config["training_target"]
+    if effective_target == "over_under_25" and not has_over_under_target(train_rows):
+        raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar O/U 2.5.")
+    x_train, y_train, feature_columns = build_training_matrix(
+        train_rows,
+        base_model,
+        feature_store,
+        history_team_features=history_team_features,
+        matchup_features=matchup_features,
+        fixture_feature_rows=fixture_feature_rows,
+        target=effective_target,
+    )
+    if test_rows.empty:
+        eval_strategy = "holdout_from_train"
+        x_train, x_eval, y_train, y_eval = safe_train_eval_split(
+            x_train,
+            y_train,
+            test_size=float(payload.get("eval_size", 0.25) or 0.25),
+            random_state=train_config["seed"],
+        )
     else:
-        effective_target = train_config["training_target"]
-        if effective_target == "over_under_25" and not has_over_under_target(train_rows):
-            effective_target = "result"
-            target_warning = "El dataset no tiene goles suficientes para entrenar Over/Under 2.5; U/O queda con Poisson."
-        x_train, y_train, feature_columns = build_training_matrix(
-            train_rows,
+        eval_strategy = "test_file"
+        x_eval, y_eval, _ = build_training_matrix(
+            test_rows,
             base_model,
             feature_store,
             history_team_features=history_team_features,
             matchup_features=matchup_features,
             fixture_feature_rows=fixture_feature_rows,
+            feature_columns=feature_columns,
             target=effective_target,
         )
-        if test_rows.empty:
-            eval_strategy = "holdout_from_train"
-            x_train, x_eval, y_train, y_eval = safe_train_eval_split(
-                x_train,
-                y_train,
-                test_size=float(payload.get("eval_size", 0.25) or 0.25),
-                random_state=train_config["seed"],
-            )
-        else:
-            eval_strategy = "test_file"
-            x_eval, y_eval, _ = build_training_matrix(
-                test_rows,
-                base_model,
-                feature_store,
-                history_team_features=history_team_features,
-                matchup_features=matchup_features,
-                fixture_feature_rows=fixture_feature_rows,
-                feature_columns=feature_columns,
-                target=effective_target,
-            )
 
     if x_train.empty or pd.Series(y_train).dropna().empty:
         raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
@@ -327,11 +334,11 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
         num_classes=len(label_classes),
     )
     clf = fit_result["classifier"]
-    y_train_pred = clf.predict(x_train)
-    y_eval_pred = clf.predict(x_eval)
+    y_train_pred = classifier_predict(clf, x_train)
+    y_eval_pred = classifier_predict(clf, x_eval)
     metrics = classification_metrics_from_predictions(y_train_encoded, y_train_pred, y_eval_encoded, y_eval_pred)
-    confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes)
-    etl = etl_steps(files, normalized, eval_strategy)
+    confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes, target=effective_target)
+    etl = etl_steps(files, normalized, eval_strategy, prepared=prepared_dataset_status(files=files, normalized=normalized))
     hardware = detect_hardware()
     hardware.update({
         "requested_device": train_config["device"],
@@ -346,7 +353,7 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
         "history_team_features": history_team_features.to_dict(orient="records"),
         "matchup_features": matchup_features.to_dict(orient="records"),
         "kaggle_files": [str(path) for path in files],
-        "history_source": history_source,
+        "history_source": normalized.get("history_source", history_source),
         "metrics": metrics,
         "confusion_matrix": confusion,
         "classes": label_classes,
@@ -367,7 +374,7 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
         "tuning_trace": tuning_trace(tuned),
         "etl_steps": etl,
         "hardware": hardware,
-        "warnings": [warning for warning in [target_warning, *fit_result.get("warnings", [])] if warning],
+        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *fit_result.get("warnings", [])] if warning]),
         "top_features": top_feature_importances(clf, feature_columns),
         "walk_forward_mode": walk_forward_mode,
         "walk_forward_summary": walk_forward_summary,
@@ -411,11 +418,9 @@ def train_dual_market_model(
     bundle_id = train_config["model_id"]
     bundle_name = train_config["model_name"]
     files = list(discover_dataset_files(KAGGLE_ROOT))
-    if not files:
-        raise WorldCupTrainingError("No hay dataset Kaggle local. Primero descarga el dataset.")
-    normalized = normalize_dataset_files(files)
+    normalized = load_prepared_dataset(required=True)
     if not normalized["trainable"]:
-        raise WorldCupTrainingError("El dataset no tiene columnas trainables de partido: equipos y resultado/winner.")
+        raise WorldCupTrainingError("El ETL preparado no dejo filas entrenables para el bundle dual.")
 
     result_child_id = child_market_model_id(bundle_id, "result")
     over_child_id = child_market_model_id(bundle_id, "over_under_25")
@@ -457,18 +462,16 @@ def train_dual_market_model(
                 warnings.append("No se guardo modelo O/U porque el dataset no produjo target Over/Under 2.5 valido.")
                 delete_model_files(over_child_id)
         except Exception as exc:
-            warnings.append(f"O/U 2.5 no se pudo entrenar ({exc.__class__.__name__}: {exc}); ese mercado seguira con Poisson.")
             delete_model_files(over_child_id)
+            raise WorldCupTrainingError(f"O/U 2.5 no se pudo entrenar con goles reales ({exc.__class__.__name__}: {exc}).")
     else:
-        warnings.append("O/U 2.5 no se entreno: el dataset actual no trae goles suficientes; ese mercado seguira con Poisson.")
+        raise WorldCupTrainingError("O/U 2.5 no se puede entrenar: el ETL preparado no contiene goles reales suficientes.")
 
     warnings.extend(result_record.get("warnings", []))
     warnings.extend(over_record.get("warnings", []))
     warnings = unique_strings(warnings)
     trained_at = datetime.now(timezone.utc).isoformat()
-    bundle_target_column = str(result_record.get("target_column") or "result")
-    if "over_under_25" in market_models and over_record.get("target_column"):
-        bundle_target_column = f"{bundle_target_column} + {over_record.get('target_column')}"
+    bundle_target_column = str(normalized.get("target_column") or result_record.get("target_column") or "result")
     bundle_record = {
         "bundle": True,
         "market_mode": "dual_markets",
@@ -485,7 +488,7 @@ def train_dual_market_model(
         "mode": normalized["training_mode"],
         "eval_strategy": result_record.get("eval_strategy", ""),
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
-        "effective_target": "result+over_under_25" if "over_under_25" in market_models else "result",
+        "effective_target": "result+over_under_25",
         "requested_target": "dual_markets",
         "target_column": bundle_target_column,
         "model_type": train_config["model_type"],
@@ -670,6 +673,211 @@ def normalize_dataset_files(files: Iterable[Path]) -> Dict[str, Any]:
     }
 
 
+def build_prepared_dataset(
+        files: List[Path],
+        normalized: Dict[str, Any],
+        refresh_history: bool = False,
+) -> Dict[str, Any]:
+    history_df, history_source = load_historical_matches(refresh=bool(refresh_history))
+    history_rows = history_match_rows(history_df, source=history_source)
+    warnings: List[str] = []
+    label_source = "kaggle_match_result"
+    raw_train = normalized["train"].copy()
+    raw_test = normalized["test"].copy()
+    raw_mode = normalized["training_mode"]
+    team_features = normalized["team_features"].copy()
+
+    if raw_train.empty:
+        if history_rows.empty:
+            raise WorldCupTrainingError("El ETL no encontro partidos con goles reales para construir el dataset de entrenamiento.")
+        train_df = history_rows
+        test_df = pd.DataFrame(columns=history_rows.columns)
+        label_source = "historical_worldcup"
+        warnings.append("El Kaggle actual no trae filas de partido entrenables; el ETL usa resultados historicos abiertos del Mundial para 1X2 y O/U 2.5.")
+    elif has_over_under_target(raw_train):
+        train_df = raw_train
+        test_df = raw_test if has_over_under_target(raw_test) else pd.DataFrame(columns=raw_train.columns)
+        if raw_test.empty or not has_over_under_target(raw_test):
+            warnings.append("La evaluacion dual usara holdout desde train porque el test Kaggle no trae goles suficientes para O/U 2.5.")
+    else:
+        if history_rows.empty:
+            raise WorldCupTrainingError("El Kaggle actual no trae goles suficientes para O/U 2.5 y no se encontraron partidos historicos con goles reales.")
+        train_df = pd.concat([raw_train, history_rows], ignore_index=True)
+        test_df = raw_test if has_over_under_target(raw_test) else pd.DataFrame(columns=history_rows.columns)
+        label_source = "kaggle_match_result + historical_worldcup"
+        warnings.append("El Kaggle actual no alcanza para O/U 2.5; el ETL complemento las etiquetas de partido con el historico abierto del Mundial.")
+        if raw_test.empty or not has_over_under_target(raw_test):
+            warnings.append("La evaluacion O/U usara holdout desde train porque el test Kaggle no trae goles suficientes.")
+
+    train_df = sanitize_match_rows(train_df)
+    test_df = sanitize_match_rows(test_df)
+    over_under_ready = has_over_under_target(train_df)
+    if not over_under_ready:
+        raise WorldCupTrainingError("El ETL no pudo construir un target real de O/U 2.5 con goles observados.")
+
+    prepared_at = datetime.now(timezone.utc).isoformat()
+    preview_source = train_df if not train_df.empty else test_df if not test_df.empty else team_features
+    return {
+        "prepared_at": prepared_at,
+        "source_files": [str(path) for path in files],
+        "source_mode": raw_mode,
+        "training_mode": "match_result",
+        "train": train_df,
+        "test": test_df,
+        "team_train": pd.DataFrame(),
+        "team_test": pd.DataFrame(),
+        "team_prediction": normalized["team_prediction"].copy(),
+        "team_features": team_features,
+        "target_column": "Label + OverUnder25",
+        "team_columns": normalized["team_columns"],
+        "trainable": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
+        "preview": preview_payload(preview_source),
+        "warnings": unique_strings(warnings),
+        "label_source": label_source,
+        "history_source": history_source,
+        "over_under_ready": over_under_ready,
+        "result_ready": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
+    }
+
+
+def sanitize_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame(columns=["Home", "Away", "Label", "HG", "AG", "OverUnder25", "Source"])
+    working = rows.copy()
+    required = ["Home", "Away", "Label", "Source"]
+    for column in required:
+        if column not in working.columns:
+            working[column] = ""
+    if "HG" not in working.columns:
+        working["HG"] = np.nan
+    if "AG" not in working.columns:
+        working["AG"] = np.nan
+    if "OverUnder25" not in working.columns:
+        working["OverUnder25"] = np.nan
+    working["Home"] = working["Home"].map(clean_team_name)
+    working["Away"] = working["Away"].map(clean_team_name)
+    working["Label"] = working["Label"].astype(str)
+    working["HG"] = pd.to_numeric(working["HG"], errors="coerce")
+    working["AG"] = pd.to_numeric(working["AG"], errors="coerce")
+    needs_over = working["OverUnder25"].isna() & working["HG"].notna() & working["AG"].notna()
+    if needs_over.any():
+        working.loc[needs_over, "OverUnder25"] = ((working.loc[needs_over, "HG"] + working.loc[needs_over, "AG"]) >= 3.0).astype(int)
+    if "Date" in working.columns:
+        working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
+    working = working[
+        working["Home"].astype(str).str.len().gt(1) &
+        working["Away"].astype(str).str.len().gt(1) &
+        working["Label"].isin(TARGET_LABELS)
+    ].copy()
+    return working.reset_index(drop=True)
+
+
+def history_match_rows(history_df: pd.DataFrame, source: str) -> pd.DataFrame:
+    if history_df.empty:
+        return pd.DataFrame(columns=["Home", "Away", "Label", "HG", "AG", "OverUnder25", "Source", "Date"])
+    working = history_df.copy()
+    working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
+    rows: List[Dict[str, Any]] = []
+    for _, row in working.iterrows():
+        home = clean_team_name(row.get("Team 1"))
+        away = clean_team_name(row.get("Team 2"))
+        if not home or not away:
+            continue
+        try:
+            goals_home = float(row.get("G1", np.nan))
+            goals_away = float(row.get("G2", np.nan))
+        except (TypeError, ValueError):
+            continue
+        rows.append({
+            "Home": home,
+            "Away": away,
+            "Label": label_from_goals(goals_home, goals_away),
+            "HG": goals_home,
+            "AG": goals_away,
+            "OverUnder25": int((goals_home + goals_away) >= 3.0),
+            "Source": source,
+            "Date": row.get("Date"),
+        })
+    return sanitize_match_rows(pd.DataFrame(rows))
+
+
+def save_prepared_dataset(dataset: Dict[str, Any]) -> None:
+    PREPARED_DATASET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with PREPARED_DATASET_FILE.open("wb") as handle:
+        pickle.dump(dataset, handle)
+    PREPARED_DATASET_META_FILE.write_text(
+        json.dumps(json_safe(prepared_dataset_metadata(dataset)), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_prepared_dataset(required: bool = False) -> Optional[Dict[str, Any]]:
+    if not PREPARED_DATASET_FILE.exists():
+        if required:
+            raise WorldCupTrainingError("Primero ejecuta Preparar ETL para construir el dataset de entrenamiento Mundial.")
+        return None
+    with PREPARED_DATASET_FILE.open("rb") as handle:
+        dataset = pickle.load(handle)
+    if not isinstance(dataset, dict):
+        if required:
+            raise WorldCupTrainingError("El artifact ETL Mundial esta dañado. Vuelve a ejecutar Preparar ETL.")
+        return None
+    return dataset
+
+
+def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Dict[str, Any]:
+    dataset = load_prepared_dataset(required=False)
+    if not dataset:
+        return {
+            "ready": False,
+            "stale": False,
+            "status": "pending",
+            "dataset": normalized,
+            "prepared_at": "",
+            "mode": "",
+            "label_source": "",
+            "over_under_ready": False,
+            "warnings": [],
+        }
+    source_files = {str(path) for path in files}
+    artifact_sources = set(dataset.get("source_files", []))
+    artifact_time = PREPARED_DATASET_FILE.stat().st_mtime if PREPARED_DATASET_FILE.exists() else 0.0
+    source_times = [path.stat().st_mtime for path in files if path.exists()]
+    stale = bool(source_times and max(source_times) > artifact_time) or bool(source_files != artifact_sources)
+    return {
+        "ready": True,
+        "stale": stale,
+        "status": "stale" if stale else "ready",
+        "dataset": dataset,
+        "prepared_at": str(dataset.get("prepared_at") or ""),
+        "mode": str(dataset.get("training_mode") or ""),
+        "label_source": str(dataset.get("label_source") or ""),
+        "over_under_ready": bool(dataset.get("over_under_ready", False)),
+        "warnings": dataset.get("warnings", []),
+    }
+
+
+def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "prepared_at": dataset.get("prepared_at", ""),
+        "training_mode": dataset.get("training_mode", ""),
+        "source_mode": dataset.get("source_mode", ""),
+        "source_files": dataset.get("source_files", []),
+        "label_source": dataset.get("label_source", ""),
+        "warnings": dataset.get("warnings", []),
+        "target_column": dataset.get("target_column", ""),
+        "team_columns": dataset.get("team_columns", []),
+        "train_rows": labeled_train_row_count(dataset),
+        "test_rows": labeled_test_row_count(dataset),
+        "prediction_rows": int(dataset.get("team_prediction", pd.DataFrame()).shape[0]),
+        "team_feature_rows": int(dataset.get("team_features", pd.DataFrame()).shape[0]),
+        "over_under_ready": bool(dataset.get("over_under_ready", False)),
+        "result_ready": bool(dataset.get("result_ready", False)),
+        "preview": dataset.get("preview", {"columns": [], "rows": [], "total": 0}),
+        "history_source": dataset.get("history_source", ""),
+    }
+
+
 def standardize_match_rows(df: pd.DataFrame, source: str = "") -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
@@ -842,12 +1050,15 @@ def match_feature_row(
         "rating_home": p_home.rating,
         "rating_away": p_away.rating,
         "rating_diff": p_home.rating - p_away.rating,
+        "rating_ratio": float((p_home.rating + 1e-6) / max(p_away.rating + 1e-6, 1e-6)),
         "attack_home": p_home.attack,
         "attack_away": p_away.attack,
         "attack_diff": p_home.attack - p_away.attack,
+        "attack_ratio": float((p_home.attack + 1e-6) / max(p_away.attack + 1e-6, 1e-6)),
         "defense_home": p_home.defense,
         "defense_away": p_away.defense,
         "defense_diff": p_home.defense - p_away.defense,
+        "defense_ratio": float((p_home.defense + 1e-6) / max(p_away.defense + 1e-6, 1e-6)),
         "matches_home": float(p_home.matches),
         "matches_away": float(p_away.matches),
         "home_is_host": 1.0 if home in HOST_TEAMS else 0.0,
@@ -860,6 +1071,12 @@ def match_feature_row(
         "poisson_xg_home": float(poisson.get("lambda1", 0.0)),
         "poisson_xg_away": float(poisson.get("lambda2", 0.0)),
         "poisson_xg_diff": float(poisson.get("lambda1", 0.0)) - float(poisson.get("lambda2", 0.0)),
+        "poisson_xg_total": float(poisson.get("lambda1", 0.0)) + float(poisson.get("lambda2", 0.0)),
+        "poisson_home_edge": float(poisson.get("home", 0.0)) - float(poisson.get("away", 0.0)),
+        "poisson_draw_pressure": float(poisson.get("draw", 0.0)) - abs(float(poisson.get("home", 0.0)) - float(poisson.get("away", 0.0))),
+        "host_flag_diff": float((1.0 if home in HOST_TEAMS else 0.0) - (1.0 if away in HOST_TEAMS else 0.0)),
+        "rating_attack_interaction": float((p_home.rating - p_away.rating) * (p_home.attack - p_away.attack)),
+        "rating_defense_interaction": float((p_home.rating - p_away.rating) * (p_home.defense - p_away.defense)),
     }
     merge_team_feature_block(row, team_features, home, away, prefix="kaggle", limit=24)
     merge_team_feature_block(
@@ -998,10 +1215,16 @@ def build_history_feature_table(history_df: pd.DataFrame, reference_date: str = 
         base["trend_defense_5_vs_12"] = base.get("last_12_goals_against_avg", 0.0) - base.get("last_5_goals_against_avg", 0.0)
         base["trend_btts_3_vs_10"] = base.get("last_3_btts_rate", 0.0) - base.get("last_10_btts_rate", 0.0)
         base["trend_under25_3_vs_10"] = base.get("last_3_under25_rate", 0.0) - base.get("last_10_under25_rate", 0.0)
+        base["trend_points_ppg_7_vs_12"] = base.get("last_7_points_ppg", 0.0) - base.get("last_12_points_ppg", 0.0)
+        base["trend_goal_diff_7_vs_12"] = base.get("last_7_goal_diff_avg", 0.0) - base.get("last_12_goal_diff_avg", 0.0)
         base["volatility_goal_diff_short_vs_long"] = base.get("last_3_goal_diff_std", 0.0) - base.get("last_10_goal_diff_std", 0.0)
         base["volatility_points_short_vs_long"] = base.get("last_3_points_std", 0.0) - base.get("last_10_points_std", 0.0)
+        base["volatility_goals_for_short_vs_long"] = base.get("last_3_goals_for_std", 0.0) - base.get("last_10_goals_for_std", 0.0)
+        base["volatility_goals_against_short_vs_long"] = base.get("last_3_goals_against_std", 0.0) - base.get("last_10_goals_against_std", 0.0)
         base["form_reversion_points"] = base.get("all_points_ppg", 0.0) - base.get("last_3_points_ppg", 0.0)
         base["form_reversion_goal_diff"] = base.get("all_goal_diff_avg", 0.0) - base.get("last_3_goal_diff_avg", 0.0)
+        base["weighted_points_short_vs_long"] = base.get("last_3_weighted_points", 0.0) - base.get("last_10_weighted_points", 0.0)
+        base["scoring_trend_3_vs_10"] = base.get("last_3_scoring_rate", 0.0) - base.get("last_10_scoring_rate", 0.0)
         rows.append(base)
     return pd.DataFrame(rows).fillna(0.0)
 
@@ -1286,7 +1509,10 @@ def effective_n_jobs(n_jobs: int, cpu_count: int) -> int:
 
 
 def has_over_under_target(rows: pd.DataFrame) -> bool:
-    return "OverUnder25" in rows.columns and rows["OverUnder25"].dropna().shape[0] > 0
+    if "OverUnder25" not in rows.columns:
+        return False
+    values = pd.to_numeric(rows["OverUnder25"], errors="coerce").dropna()
+    return values.shape[0] > 1 and values.astype(int).nunique() >= 2
 
 
 def read_fixture_feature_rows() -> pd.DataFrame:
@@ -1553,6 +1779,7 @@ def fit_configured_classifier(
             num_classes=num_classes,
         )
         classifier.fit(x_train, y_train)
+        finalize_classifier_for_inference(classifier, model_key=model_key, trained_device=device)
         return {"classifier": classifier, "device": device, "warnings": device_warnings}
     except Exception as exc:
         if device == "cuda":
@@ -1565,12 +1792,28 @@ def fit_configured_classifier(
                 num_classes=num_classes,
             )
             fallback.fit(x_train, y_train)
+            finalize_classifier_for_inference(fallback, model_key=model_key, trained_device="cpu")
             return {
                 "classifier": fallback,
                 "device": "cpu",
                 "warnings": [*device_warnings, f"CUDA fallo durante fit ({exc.__class__.__name__}); se reintento en CPU."],
             }
         raise
+
+
+def finalize_classifier_for_inference(classifier, model_key: str, trained_device: str) -> None:
+    if model_key != "xgboost":
+        return
+    if trained_device != "cuda":
+        return
+    try:
+        classifier.set_params(device="cpu")
+    except Exception:
+        pass
+    try:
+        classifier.get_booster().set_param({"device": "cpu"})
+    except Exception:
+        pass
 
 
 def resolve_device(model_key: str, requested_device: str) -> Tuple[str, List[str]]:
@@ -1706,7 +1949,7 @@ def tune_model_if_requested(config: Dict[str, Any], x_train: pd.DataFrame, y_tra
                 seed=config["seed"],
                 num_classes=int(pd.Series(y_train).nunique()),
             )
-            pred = fit_result["classifier"].predict(x_eval)
+            pred = classifier_predict(fit_result["classifier"], x_eval)
             return metric_score(y_eval, pred, objective_name)
         except Exception as exc:
             trial.set_user_attr("error", f"{exc.__class__.__name__}: {exc}")
@@ -1955,7 +2198,7 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
         if column not in x.columns:
             x[column] = 0.0
     x = x[feature_columns].fillna(0.0).astype(float)
-    probabilities = np.asarray(record["classifier"].predict_proba(x)[0], dtype=float)
+    probabilities = np.asarray(classifier_predict_proba(record["classifier"], x)[0], dtype=float)
     labels = [str(label) for label in record.get("classes", [])]
     target = record.get("effective_target", "result")
     if target == "over_under_25":
@@ -2005,12 +2248,12 @@ def team_strength_score(record: Dict[str, Any], team: str) -> float:
     x = x[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
     clf = record["classifier"]
     if hasattr(clf, "predict_proba"):
-        probabilities = clf.predict_proba(x)[0]
+        probabilities = classifier_predict_proba(clf, x)[0]
         class_values = record.get("classes", [])
         for target_value in (1, "1", True, "True", "true"):
             if target_value in class_values:
                 return float(probabilities[class_values.index(target_value)])
-    encoded = int(clf.predict(x)[0])
+    encoded = int(classifier_predict(clf, x)[0])
     classes = record.get("classes", [])
     if 0 <= encoded < len(classes):
         return 1.0 if str(classes[encoded]) in {"1", "True", "true"} else 0.0
@@ -2024,6 +2267,18 @@ def blend_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, float]
         output[label] = base_probs.get(label, 0.0) * (1.0 - weight) + ml_probs.get(label, base_probs.get(label, 0.0)) * weight
     total = max(sum(output.values()), 1e-9)
     return {label: value / total for label, value in output.items()}
+
+
+def classifier_predict(classifier, x: pd.DataFrame) -> np.ndarray:
+    if classifier.__class__.__module__.startswith("xgboost"):
+        return np.asarray(classifier.predict(np.asarray(x, dtype=np.float32)))
+    return np.asarray(classifier.predict(x))
+
+
+def classifier_predict_proba(classifier, x: pd.DataFrame) -> np.ndarray:
+    if classifier.__class__.__module__.startswith("xgboost"):
+        return np.asarray(classifier.predict_proba(np.asarray(x, dtype=np.float32)))
+    return np.asarray(classifier.predict_proba(x))
 
 
 def blend_total_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, float], ml_weight: float) -> Dict[str, float]:
@@ -2140,7 +2395,7 @@ def unique_strings(values: Iterable[Any]) -> List[str]:
 
 
 def classification_metrics(clf, x_train, y_train, x_eval, y_eval) -> Dict[str, Dict[str, float]]:
-    return classification_metrics_from_predictions(y_train, clf.predict(x_train), y_eval, clf.predict(x_eval))
+    return classification_metrics_from_predictions(y_train, classifier_predict(clf, x_train), y_eval, classifier_predict(clf, x_eval))
 
 
 def classification_metrics_from_predictions(y_train, y_train_pred, y_eval, y_eval_pred) -> Dict[str, Dict[str, float]]:
@@ -2159,9 +2414,9 @@ def metric_row(y_true, y_pred) -> Dict[str, float]:
     }
 
 
-def confusion_matrix_payload(y_true, y_pred, classes: List[Any]) -> Dict[str, Any]:
+def confusion_matrix_payload(y_true, y_pred, classes: List[Any], target: str = "result") -> Dict[str, Any]:
     encoded_labels = list(range(len(classes)))
-    labels = [display_class_label(label) for label in classes]
+    labels = [display_class_label(label, target=target) for label in classes]
     matrix = confusion_matrix(y_true, y_pred, labels=encoded_labels).astype(int)
     total = int(matrix.sum())
     rows = []
@@ -2183,7 +2438,7 @@ def confusion_matrix_payload(y_true, y_pred, classes: List[Any]) -> Dict[str, An
     }
 
 
-def display_class_label(label: Any) -> str:
+def display_class_label(label: Any, target: str = "result") -> str:
     text = str(label)
     if text == "H":
         return "1 Local"
@@ -2192,19 +2447,29 @@ def display_class_label(label: Any) -> str:
     if text == "A":
         return "2 Visita"
     if text in {"0", "False", "false"}:
-        return "No"
+        return "Under 2.5" if target == "over_under_25" else "No"
     if text in {"1", "True", "true"}:
-        return "Si"
+        return "Over 2.5" if target == "over_under_25" else "Si"
     return text
 
 
-def etl_steps(files: Iterable[Path], normalized: Dict[str, Any], eval_strategy: str) -> List[Dict[str, Any]]:
+def etl_steps(
+        files: Iterable[Path],
+        normalized: Dict[str, Any],
+        eval_strategy: str,
+        prepared: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     file_list = list(files)
     train_rows = labeled_train_row_count(normalized)
     test_rows = labeled_test_row_count(normalized)
     prediction_rows = int(normalized["team_prediction"].shape[0])
     feature_rows = int(normalized["team_features"].shape[0])
     walk_forward = walk_forward_status()
+    prepared = prepared or {}
+    prepared_ready = bool(prepared.get("ready"))
+    prepared_stale = bool(prepared.get("stale"))
+    prepared_label_source = str(prepared.get("label_source") or "")
+    prepared_detail = "Artifact listo para entrenamiento." if prepared_ready and not prepared_stale else "Artifact desactualizado; vuelve a preparar ETL." if prepared_stale else "Aún no se ha preparado el artifact ETL."
     return [
         {
             "name": "Descarga Kaggle",
@@ -2213,10 +2478,16 @@ def etl_steps(files: Iterable[Path], normalized: Dict[str, Any], eval_strategy: 
             "detail": "Archivos CSV/XLS disponibles localmente.",
         },
         {
+            "name": "Preparar ETL",
+            "status": "ok" if prepared_ready and not prepared_stale else "pending" if not prepared_ready else "info",
+            "count": train_rows,
+            "detail": prepared_detail,
+        },
+        {
             "name": "Lectura y normalizacion",
             "status": "ok" if train_rows else "pending",
             "count": train_rows,
-            "detail": f"Modo detectado: {normalized.get('training_mode') or 'sin modo'}.",
+            "detail": f"Modo activo: {normalized.get('training_mode') or 'sin modo'}; fuente labels: {prepared_label_source or normalized.get('training_mode') or 'sin modo'}.",
         },
         {
             "name": "Split evaluacion",
@@ -2229,6 +2500,12 @@ def etl_steps(files: Iterable[Path], normalized: Dict[str, Any], eval_strategy: 
             "status": "ok" if feature_rows else "pending",
             "count": feature_rows,
             "detail": "Features numericas por seleccion listas para el modelo.",
+        },
+        {
+            "name": "Mercado O/U 2.5",
+            "status": "ok" if has_over_under_target(normalized["train"]) else "pending",
+            "count": int(pd.to_numeric(normalized["train"].get("OverUnder25"), errors="coerce").dropna().shape[0]) if "OverUnder25" in normalized["train"].columns else 0,
+            "detail": "Solo usa goles reales observados; no se generan etiquetas artificiales.",
         },
         {
             "name": "Walk-forward XI",
@@ -2779,6 +3056,8 @@ def json_safe(value: Any) -> Any:
         return value.item()
     if isinstance(value, np.bool_):
         return bool(value)
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return str(value)
     if isinstance(value, Path):
         return str(value)
     try:

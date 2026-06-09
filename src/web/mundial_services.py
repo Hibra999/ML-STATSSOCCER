@@ -48,6 +48,7 @@ from src.worldcup.training import (
     delete_worldcup_model,
     download_kaggle_dataset,
     list_worldcup_models,
+    prepare_training_dataset,
     predict_match_payload,
     predict_ml_outputs,
     read_model_metadata,
@@ -502,6 +503,16 @@ def player_features(refresh: bool = False) -> Dict[str, Any]:
 def training_download(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     payload = payload or {}
     return download_kaggle_dataset(force=bool(payload.get("force", False)))
+
+
+def training_prepare(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    status = prepare_training_dataset(
+        force=bool(payload.get("force", False)),
+        refresh_history=bool(payload.get("refresh_history", False)),
+    )
+    status["options"] = worldcup_training_options()
+    return status
 
 
 def training_dataset() -> Dict[str, Any]:

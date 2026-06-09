@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260609-9">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260609-10">
 </head>
 <body>
   <header class="topbar">
@@ -128,6 +128,7 @@
           <div class="actions-row">
             <button id="training-refresh" type="button">Revisar dataset</button>
             <button id="training-download" type="button">Descargar Kaggle</button>
+            <button id="training-prepare-etl" class="primary" type="button">Preparar ETL</button>
             <button id="refresh-btn" type="button">Actualizar datos</button>
           </div>
           <div id="training-walkforward-notice" class="status-strip"></div>
@@ -149,8 +150,8 @@
         </article>
 
         <article class="visual-panel training-band">
-          <header><h3>3. Entrenar bundle dual</h3><small>Siempre 1X2 + O/U 2.5 con el boosting elegido</small></header>
-          <div class="control-grid training-main-grid">
+          <header><h3>3. Configuración y entrenamiento</h3><small>Siempre 1X2 + O/U 2.5 con el boosting elegido</small></header>
+          <div id="training-manual-params" class="control-grid training-main-grid tuning-lockable">
             <label>Nombre modelo<input id="worldcup-model-id" placeholder="mundial-xgb-hibrido"></label>
             <label>Algoritmo boosting<select id="worldcup-model-type"></select></label>
             <label>Device<select id="worldcup-device"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
@@ -170,9 +171,10 @@
                 <label>Pruner<select id="worldcup-optuna-pruner"><option value="none">None</option><option value="median">Median</option><option value="successive-halving">Successive Halving</option></select></label>
                 <label>Parametros<input id="worldcup-tune-params" value="all"></label>
               </div>
+              <div id="training-tuning-lock-status" class="status-strip compact-status"></div>
             </section>
-            <section class="inline-drawer padded">
-              <header class="mini-heading"><strong>Parámetros avanzados</strong><small>Solo se usan si aplican al boosting</small></header>
+            <section id="training-advanced-params" class="inline-drawer padded tuning-lockable">
+              <header class="mini-heading"><strong>Parámetros avanzados</strong><small>Si tune_params = all, Optuna también controla este bloque</small></header>
               <div class="control-grid compact-controls">
                 <label>min_child_weight<input id="worldcup-min-child-weight" type="number" step="1"></label>
                 <label>lambda_regularization<input id="worldcup-lambda-regularization" type="number" step="0.1"></label>

@@ -59,6 +59,7 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/fixtures/{fixture_id}/player-stats" in paths
     assert "/api/mundial/player-features" in paths
     assert "/api/mundial/training/download-kaggle" in paths
+    assert "/api/mundial/training/prepare-etl" in paths
     assert "/api/mundial/training/dataset" in paths
     assert "/api/mundial/training/train" in paths
     assert "/api/mundial/training/status" in paths
@@ -200,6 +201,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "worldcup-tuning-enabled" in html_source
     assert "worldcup-device" in html_source
     assert "worldcup-n-jobs" in html_source
+    assert "training-prepare-etl" in html_source
+    assert "training-tuning-lock-status" in html_source
     assert "training-model-params" in html_source
     assert "training-model-state" in html_source
     assert "dataset-summary" in html_source
@@ -225,6 +228,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "/api/mundial/player-features" in app_source
     assert "/api/mundial/models" in app_source
     assert "/api/mundial/models/train" in app_source
+    assert "/api/mundial/training/prepare-etl" in app_source
     assert "/api/mundial/models/select" in app_source
     assert "/api/mundial/maintenance/clear" in app_source
     assert "trainingPayload" in app_source
@@ -558,6 +562,8 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", tmp_path / "models")
     monkeypatch.setattr(training, "HYBRID_MODEL_FILE", tmp_path / "models" / "hybrid.pkl")
     monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
+    monkeypatch.setattr(training, "PREPARED_DATASET_FILE", tmp_path / "cache" / "prepared.pkl")
+    monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
         {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
@@ -576,12 +582,16 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     ]).to_csv(training.KAGGLE_ROOT / "teams.csv", index=False)
 
     status = training.dataset_status()
+    prepared = training.prepare_training_dataset(force=True)
+    status = training.dataset_status()
     result = training.train_hybrid_model(fallback_tournament_2026(), payload={"seed": 7, "n_estimators": 20, "model_id": "mex-test"})
     model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "South Africa", "Canada"])
     prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
     catalog = training.list_worldcup_models()
 
     assert status["trainable"] is True
+    assert prepared["etl_ready"] is True
+    assert status["etl_ready"] is True
     assert status["test_rows"] == 2
     assert status["prediction_rows"] == 0
     assert status["eval_strategy"] == "test_file"
@@ -636,6 +646,8 @@ def test_worldcup_training_rejects_single_market_requests(tmp_path, monkeypatch)
     monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", tmp_path / "models")
     monkeypatch.setattr(training, "HYBRID_MODEL_FILE", tmp_path / "models" / "hybrid.pkl")
     monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
+    monkeypatch.setattr(training, "PREPARED_DATASET_FILE", tmp_path / "cache" / "prepared.pkl")
+    monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
         {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
@@ -643,6 +655,7 @@ def test_worldcup_training_rejects_single_market_requests(tmp_path, monkeypatch)
         {"home_team": "Mexico", "away_team": "Canada", "home_goals": 1, "away_goals": 2},
         {"home_team": "Canada", "away_team": "South Africa", "home_goals": 0, "away_goals": 1},
     ]).to_csv(training.KAGGLE_ROOT / "train.csv", index=False)
+    training.prepare_training_dataset(force=True)
 
     with pytest.raises(training.WorldCupTrainingError, match="bundle dual"):
         training.train_hybrid_model(
@@ -660,6 +673,8 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", tmp_path / "models")
     monkeypatch.setattr(training, "HYBRID_MODEL_FILE", tmp_path / "models" / "hybrid.pkl")
     monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
+    monkeypatch.setattr(training, "PREPARED_DATASET_FILE", tmp_path / "cache" / "prepared.pkl")
+    monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
         {"version": 2022, "team": "Mexico", "fifa_rank_pre_tournament": 12, "fifa_points_pre_tournament": 1600, "wins_last_4y": 20, "quarter_finalist": 1},
@@ -675,28 +690,34 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     ]).to_csv(training.KAGGLE_ROOT / "test.csv", index=False)
 
     status = training.dataset_status()
+    prepared = training.prepare_training_dataset(force=True)
+    status = training.dataset_status()
     result = training.train_hybrid_model(fallback_tournament_2026(), payload={"seed": 11, "n_estimators": 20})
     model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "South Africa"])
     prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
 
-    assert status["training_mode"] == "team_strength"
-    assert status["target_column"] == "quarter_finalist"
+    assert prepared["etl_ready"] is True
+    assert status["raw_training_mode"] == "team_strength"
+    assert status["training_mode"] == "match_result"
+    assert status["prepared_label_source"] == "historical_worldcup"
+    assert status["target_column"] == "Label + OverUnder25"
     assert status["test_rows"] == 0
     assert status["prediction_rows"] == 2
     assert status["eval_rows"] > 0
     assert status["eval_strategy"] == "holdout_from_train"
-    assert result["mode"] == "team_strength"
+    assert result["mode"] == "match_result"
     assert result["eval_strategy"] == "holdout_from_train"
     assert result["prediction_rows"] == 2
-    assert result["model"]["target_column"] == "quarter_finalist"
+    assert result["model"]["target_column"] == "Label + OverUnder25"
     assert result["model"]["eval_strategy"] == "holdout_from_train"
-    assert result["model"]["confusion_matrix"]["labels"] == ["No", "Si"]
+    assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
+    assert result["model"]["markets"]["over_under_25"]["confusion_matrix"]["labels"] == ["Under 2.5", "Over 2.5"]
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["steps"]
     assert result["model"]["model_label"] == "XGBoost"
     assert result["model"]["hardware"]["effective_n_jobs"] >= 1
     assert prediction["model_probs"]["ml"]
-    assert "team-strength" in prediction["notes"][0]
+    assert prediction["model_probs"]["over_under_ml"]
 
 
 def test_worldcup_predict_upcoming_returns_future_predictions(tmp_path, monkeypatch):
@@ -738,6 +759,8 @@ def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp
         root.mkdir(parents=True, exist_ok=True)
     (cache_root / "worldcup_2026.json").write_text("{}", encoding="utf-8")
     (cache_root / "players_2026.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (cache_root / "worldcup_training_prepared.pkl").write_text("x", encoding="utf-8")
+    (cache_root / "worldcup_training_prepared.json").write_text("{}", encoding="utf-8")
     (kaggle_root / "train.csv").write_text("home_team,away_team,home_goals,away_goals\nMexico,South Africa,2,1\n", encoding="utf-8")
     (models_root / "dummy.json").write_text("{}", encoding="utf-8")
     (models_root / "dummy.pkl").write_text("x", encoding="utf-8")
@@ -762,11 +785,14 @@ def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp
     monkeypatch.setattr(training, "WALK_FORWARD_MATCHES_FILE", walk_root / "matches.csv")
     monkeypatch.setattr(training, "WALK_FORWARD_PLAYERS_FILE", walk_root / "player_match_stats.csv")
     monkeypatch.setattr(training, "WALK_FORWARD_TEAM_FEATURES_FILE", walk_root / "team_match_features.csv")
+    monkeypatch.setattr(training, "PREPARED_DATASET_FILE", cache_root / "worldcup_training_prepared.pkl")
+    monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", cache_root / "worldcup_training_prepared.json")
 
     result = mundial_services.maintenance_clear({"clear_cache": True})
 
     assert (cache_root / "worldcup_2026.json").exists()
     assert not (cache_root / "players_2026.csv").exists()
+    assert not (cache_root / "worldcup_training_prepared.pkl").exists()
     assert not (models_root / "dummy.json").exists()
     assert result["training"]["available"] is True
     assert result["models"]["models"] == []
@@ -831,6 +857,8 @@ def test_worldcup_ngboost_dual_training_with_tuning_completes(tmp_path, monkeypa
     monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", tmp_path / "models")
     monkeypatch.setattr(training, "HYBRID_MODEL_FILE", tmp_path / "models" / "hybrid.pkl")
     monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
+    monkeypatch.setattr(training, "PREPARED_DATASET_FILE", tmp_path / "cache" / "prepared.pkl")
+    monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
         {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
@@ -849,6 +877,7 @@ def test_worldcup_ngboost_dual_training_with_tuning_completes(tmp_path, monkeypa
         {"Team": "South Africa", "Rank": 60, "Goals": 5},
         {"Team": "Canada", "Rank": 35, "Goals": 7},
     ]).to_csv(training.KAGGLE_ROOT / "teams.csv", index=False)
+    training.prepare_training_dataset(force=True)
 
     result = training.train_hybrid_model(
         fallback_tournament_2026(),

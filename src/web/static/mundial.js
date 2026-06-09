@@ -43,12 +43,15 @@ function bindEvents() {
   document.getElementById("players-refresh").addEventListener("click", () => loadPlayers(true));
   document.getElementById("training-refresh").addEventListener("click", loadTrainingStatus);
   document.getElementById("training-download").addEventListener("click", downloadTrainingDataset);
+  document.getElementById("training-prepare-etl").addEventListener("click", prepareTrainingEtl);
   document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
   document.getElementById("training-retrain-base").addEventListener("click", () => trainWorldCupModel("result_only"));
   document.getElementById("training-retrain-players").addEventListener("click", () => trainWorldCupModel("result_plus_players"));
   document.getElementById("upcoming-predict-btn").addEventListener("click", runUpcomingPredictions);
   document.getElementById("worldcup-model-type").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
   document.getElementById("worldcup-model-id").addEventListener("input", (event) => { event.target.dataset.autofilled = "false"; });
+  document.getElementById("worldcup-tuning-enabled").addEventListener("change", applyTuningLocks);
+  document.getElementById("worldcup-tune-params").addEventListener("input", applyTuningLocks);
 }
 
 async function api(path, options = {}) {
@@ -639,8 +642,25 @@ async function downloadTrainingDataset() {
   }
 }
 
+async function prepareTrainingEtl() {
+  clearAlert();
+  document.getElementById("training-status").textContent = "Preparando ETL...";
+  try {
+    const result = await api("/api/mundial/training/prepare-etl", jsonOptions({ force: true }));
+    state.training = result;
+    renderTrainingStatus(result);
+  } catch (error) {
+    showError(error.message);
+    await loadTrainingStatus();
+  }
+}
+
 async function trainWorldCupModel(walkForwardMode = "none") {
   clearAlert();
+  if (!state.training || !state.training.etl_ready || state.training.etl_stale) {
+    showError("Primero ejecuta Preparar ETL para dejar listo el dataset de entrenamiento.");
+    return;
+  }
   const modeLabel = walkForwardMode === "result_plus_players"
     ? "Reentrenando con partido + jugadores..."
     : walkForwardMode === "result_only"
@@ -668,21 +688,22 @@ function renderTrainingStatus(payload) {
   renderHardware(hardware);
   renderHeroHardware(hardware);
   document.getElementById("training-status").textContent = payload.available
-    ? `${payload.train_rows || 0} train etiquetado - ${evalStrategyLabel(payload.eval_strategy)} - ${payload.prediction_rows || 0} predicción`
+    ? `${payload.train_rows || 0} train listo - ${payload.etl_ready ? "ETL listo" : "ETL pendiente"} - ${evalStrategyLabel(payload.eval_strategy)}`
     : "Dataset Kaggle no descargado";
-  document.getElementById("training-source").textContent = `${payload.dataset_slug || "Kaggle"} - ${payload.training_mode || "sin modo"}`;
+  document.getElementById("training-source").textContent = `${payload.dataset_slug || "Kaggle"} - ${payload.training_mode || "sin modo"} - ${payload.prepared_label_source || "fuente pendiente"}`;
   document.getElementById("training-summary").innerHTML = datasetSummaryHtml(payload);
+  const trainDisabled = !payload.etl_ready || payload.etl_stale;
+  document.getElementById("training-train").disabled = trainDisabled;
+  document.getElementById("training-retrain-base").disabled = trainDisabled;
   renderWalkForwardNotice(payload.walk_forward_refresh || {});
   renderModelState(model, payload);
   renderTable("training-preview", payload.preview);
-  renderTable("training-metrics", metricsTableFromModel(model));
-  renderTrainingWarnings(model.warnings || []);
+  renderTrainingWarnings([...(payload.prepared_warnings || []), ...(model.warnings || [])]);
   renderTrainingVisuals(model, payload);
-  renderTable("training-model-params", paramsTable(model));
+  renderTrainingTables(model, payload);
 }
 
 function renderTrainingResult(payload) {
-  renderTable("training-metrics", payload.metrics_table);
   renderHardware(payload.hardware || {});
   renderHeroHardware(payload.hardware || {});
   renderTrainingWarnings(payload.warnings || []);
@@ -697,7 +718,7 @@ function renderTrainingResult(payload) {
   });
   renderModelState(payload.model || {}, payload);
   renderTrainingVisuals(payload.model || {}, payload);
-  renderTable("training-model-params", paramsTable(payload.model || {}));
+  renderTrainingTables(payload.model || {}, payload);
 }
 
 function renderTrainingVisuals(model, payload) {
@@ -736,11 +757,13 @@ function datasetSummaryHtml(payload) {
   const refresh = payload.walk_forward_refresh || {};
   return [
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
+    datasetCard("ETL", payload.etl_ready ? (payload.etl_stale ? "Desactualizado" : "Listo") : "Pendiente", payload.prepared_label_source || "preparar artifact"),
     datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
     datasetCard("Evaluacion", evalValue, evalStrategyLabel(payload.eval_strategy)),
     datasetCard("Predicción 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
     datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} base / ${refresh.ready_with_players || 0} con jugadores`),
+    datasetCard("O/U 2.5", payload.prepared_over_under_ready ? "Listo" : "Pendiente", "solo con goles reales"),
     datasetCard("Target", payload.target_column || "-", "label entrenable"),
   ].join("");
 }
@@ -815,6 +838,7 @@ function renderTrainingControls(options, model) {
     applyModelDefaults(selectedModel, false);
     state.trainingControlsApplied = true;
   }
+  applyTuningLocks();
 }
 
 function applyModelDefaults(modelKey, force) {
@@ -840,19 +864,23 @@ function applyModelDefaults(modelKey, force) {
     if (defaults[key] === undefined) {
       input.value = "";
       input.disabled = true;
+      input.dataset.unavailable = "true";
       return;
     }
+    input.dataset.unavailable = "false";
     input.disabled = false;
     if (force || input.value === "") input.value = defaults[key];
   });
   const natural = document.getElementById("worldcup-natural-gradient");
   natural.disabled = defaults.natural_gradient === undefined;
+  natural.dataset.unavailable = defaults.natural_gradient === undefined ? "true" : "false";
   natural.checked = Boolean(defaults.natural_gradient);
   const modelIdInput = document.getElementById("worldcup-model-id");
   if (modelIdInput && (force || !modelIdInput.value || modelIdInput.dataset.autofilled !== "false")) {
     modelIdInput.value = autoWorldcupModelId(modelKey);
     modelIdInput.dataset.autofilled = "true";
   }
+  applyTuningLocks();
 }
 
 function autoWorldcupModelId(modelKey) {
@@ -917,7 +945,7 @@ function renderConfusionMatrix(payload) {
   if (Array.isArray(payload)) {
     document.getElementById("training-confusion-matrix").innerHTML = payload.map((market) => `
       <section class="market-panel">
-        <header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml(market.effective_target || "")}</small></header>
+        <header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml(confusionTargetLabel(market.effective_target || market.key || ""))}</small></header>
         ${confusionMatrixHtml(market.confusion_matrix || {})}
       </section>`).join("");
     return;
@@ -1000,6 +1028,92 @@ function paramsTable(model) {
     rows.push({ Parametro: "tuning.best_trial", Valor: tuning.best_trial ?? "" });
   }
   return { columns: rows.length ? ["Parametro", "Valor"] : [], rows, total: rows.length };
+}
+
+function renderTrainingTables(model, payload) {
+  const markets = trainingMarketSections(model, payload);
+  document.getElementById("training-metrics").innerHTML = markets.map((market) => `
+    <section class="market-panel">
+      <header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml(confusionTargetLabel(market.effective_target || market.key || ""))}</small></header>
+      ${tableHtml(metricsTableFromMarket(market))}
+    </section>`).join("");
+  document.getElementById("training-model-params").innerHTML = markets.map((market) => `
+    <section class="market-panel">
+      <header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml(market.model_name || market.model_id || "")}</small></header>
+      ${tableHtml(paramsTable(market))}
+    </section>`).join("");
+}
+
+function metricsTableFromMarket(market) {
+  const metrics = market.metrics || {};
+  const rows = Object.entries(metrics).map(([split, values]) => ({ Split: split, ...(values || {}) }));
+  const columns = rows.length ? Object.keys(rows[0]) : [];
+  return { columns, rows, total: rows.length };
+}
+
+function confusionTargetLabel(target) {
+  if (target === "over_under_25") return "2 clases: Under / Over";
+  return "3 clases: 1 / X / 2";
+}
+
+function parseTuneParams(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw || raw === "all") return ["all"];
+  return raw.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function applyTuningLocks() {
+  const tuningEnabled = document.getElementById("worldcup-tuning-enabled").checked;
+  const tuneParams = parseTuneParams(document.getElementById("worldcup-tune-params").value);
+  const modelKey = document.getElementById("worldcup-model-type").value || "xgboost";
+  const models = ((state.trainingOptions || {}).models || []);
+  const model = models.find((item) => item.key === modelKey) || {};
+  const tunables = model.tunables || {};
+  const allSelected = tuneParams.includes("all");
+  const controlled = allSelected ? Object.keys(tunables) : tuneParams;
+  const lockedInputs = {
+    n_estimators: "worldcup-n-estimators",
+    learning_rate: "worldcup-learning-rate",
+    max_depth: "worldcup-max-depth",
+    min_child_weight: "worldcup-min-child-weight",
+    lambda_regularization: "worldcup-lambda-regularization",
+    alpha_regularization: "worldcup-alpha-regularization",
+    num_leaves: "worldcup-num-leaves",
+    min_child_samples: "worldcup-min-child-samples",
+    minibatch_frac: "worldcup-minibatch-frac",
+    l2_leaf_reg: "worldcup-l2-leaf-reg",
+    random_strength: "worldcup-random-strength",
+    natural_gradient: "worldcup-natural-gradient",
+  };
+  Object.entries(lockedInputs).forEach(([key, id]) => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    const unavailable = input.dataset.unavailable === "true";
+    const shouldLock = tuningEnabled && controlled.includes(key);
+    if (shouldLock) {
+      input.dataset.lockedByTuning = "true";
+      input.disabled = true;
+    } else if (input.dataset.lockedByTuning === "true") {
+      input.dataset.lockedByTuning = "false";
+      if (!unavailable) input.disabled = false;
+    }
+  });
+  ["training-manual-params", "training-advanced-params"].forEach((id) => {
+    const block = document.getElementById(id);
+    if (!block) return;
+    const hasLockedField = [...block.querySelectorAll("input,select")].some((node) => node.dataset.lockedByTuning === "true");
+    block.classList.toggle("tuning-locked", hasLockedField);
+  });
+  const note = document.getElementById("training-tuning-lock-status");
+  if (!note) return;
+  if (!tuningEnabled) {
+    note.innerHTML = `<span>Optuna desactivado. Se usan los parámetros visibles del formulario.</span>`;
+    return;
+  }
+  const detail = allSelected
+    ? "Optuna controla todos los hiperparámetros tunables, incluyendo los avanzados."
+    : `Optuna controla: ${controlled.join(", ") || "ninguno"}.`;
+  note.innerHTML = `<span>${escapeHtml(detail)}</span>`;
 }
 
 async function runUpcomingPredictions() {
