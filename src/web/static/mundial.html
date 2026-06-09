@@ -133,7 +133,6 @@
           </div>
           <div id="training-walkforward-notice" class="status-strip"></div>
           <div id="training-summary" class="dataset-summary"></div>
-          <div id="training-hardware" class="hardware-compact"></div>
           <div id="training-etl-flow" class="etl-flow"></div>
         </article>
 
@@ -141,6 +140,7 @@
           <header><h3>2. Modelo existente</h3><small>Catálogo local Mundial</small></header>
           <div class="model-loader">
             <select id="model-active-select"></select>
+            <button id="worldcup-new-model" type="button">Nuevo modelo</button>
             <button id="model-load" class="primary" type="button">Cargar modelo</button>
             <button id="model-delete" type="button">Borrar modelo</button>
             <button id="worldcup-clear-cache" type="button">Limpiar Mundial</button>
@@ -193,6 +193,7 @@
             <button id="training-retrain-base" type="button">Reentrenar con partido nuevo</button>
             <button id="training-retrain-players" type="button">Reentrenar con partido + jugadores</button>
           </div>
+          <div id="worldcup-training-progress" class="worldcup-progress hidden"></div>
           <div id="training-model-state" class="model-state-grid"></div>
           <div id="training-warnings" class="status-strip"></div>
         </article>
@@ -241,6 +242,7 @@
           <div class="actions-row">
             <button id="simulate-btn" class="primary" type="button">Simular torneo</button>
           </div>
+          <div id="worldcup-simulation-progress" class="worldcup-progress hidden"></div>
           <div id="simulation-summary" class="status-strip"></div>
         </article>
       </div>

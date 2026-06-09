@@ -584,9 +584,9 @@ def maintenance_clear(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     }
 
 
-def training_train(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def training_train(payload: Dict[str, Any] | None = None, progress_callback=None) -> Dict[str, Any]:
     tournament, _ = load_tournament_2026(refresh=bool((payload or {}).get("refresh_fixtures", False)))
-    result = train_hybrid_model(tournament=tournament, payload=payload or {})
+    result = train_hybrid_model(tournament=tournament, payload=payload or {}, progress_callback=progress_callback)
     result["metrics_table"] = table_payload(metrics_dataframe(result.get("metrics", {})), page=1, page_size=10)
     result["models"] = list_worldcup_models()
     return result
@@ -719,8 +719,9 @@ def lineup_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
+def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     config = simulation_config(payload)
+    emit_job_progress(progress_callback, "preparing", 0, 100, "Preparando Monte Carlo")
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     model, history_source = build_model(tournament, config)
     lineup_notes: List[str] = []
@@ -747,8 +748,10 @@ def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
         model=model,
         iterations=int(config["iterations"]),
         seed=int(config["seed"]),
+        progress_callback=progress_callback,
     )
-    return {
+    emit_job_progress(progress_callback, "rendering", 100, 100, "Preparando resultados")
+    output = {
         "summary": {
             "model": "Elo + Poisson Monte Carlo",
             "config": config,
@@ -774,7 +777,25 @@ def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
         "matches": table_payload(result["matches"], page=1, page_size=120),
         "procedure": procedure()["steps"],
     }
+    emit_job_progress(progress_callback, "complete", 100, 100, "Monte Carlo completado")
+    return output
 
+
+def emit_job_progress(callback, stage: str, current: int, total: int, message: str, **extra):
+    if callback is None:
+        return
+    total = max(int(total or 1), 1)
+    current = min(max(int(current or 0), 0), total)
+    callback({
+        "stage": stage,
+        "current": current,
+        "total": total,
+        "current_trial": current if stage == "tuning" else "",
+        "total_trials": total if stage == "tuning" else "",
+        "percent": int(round(current * 100 / total)),
+        "message": message,
+        **extra,
+    })
 
 def procedure() -> Dict[str, Any]:
     return {

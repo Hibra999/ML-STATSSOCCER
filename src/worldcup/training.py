@@ -78,6 +78,27 @@ class WorldCupTrainingError(RuntimeError):
     pass
 
 
+def emit_training_progress(callback, stage: str, current: int, total: int, message: str, **extra) -> None:
+    if callback is None:
+        return
+    total = max(int(total or 1), 1)
+    current = min(max(int(current or 0), 0), total)
+    callback({
+        "stage": stage,
+        "current": current,
+        "total": total,
+        "current_trial": current if stage == "tuning" else "",
+        "total_trials": total if stage == "tuning" else "",
+        "percent": int(round(current * 100 / total)),
+        "message": message,
+        **extra,
+    })
+
+
+def market_label_for_progress(target: str) -> str:
+    return "O/U 2.5" if target == "over_under_25" else "1X2"
+
+
 def training_options() -> Dict[str, Any]:
     models = []
     for key, spec in MODEL_SPECS.items():
@@ -239,18 +260,31 @@ def prepare_training_dataset(force: bool = False, refresh_history: bool = False)
     return dataset_status()
 
 
-def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None, progress_callback=None) -> Dict[str, Any]:
     payload = payload or {}
     train_config = training_config(payload)
     if train_config["market_mode"] != "dual_markets":
         raise WorldCupTrainingError("Mundial 2026 entrena siempre el bundle dual 1X2 + O/U 2.5.")
-    return train_dual_market_model(tournament=tournament, payload=payload, train_config=train_config)
+    emit_training_progress(progress_callback, "preparing", 0, 6, "Preparando entrenamiento Mundial")
+    return train_dual_market_model(
+        tournament=tournament,
+        payload=payload,
+        train_config=train_config,
+        progress_callback=progress_callback,
+    )
 
 
-def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def train_single_hybrid_model(
+        tournament: Dict[str, Any],
+        payload: Optional[Dict[str, Any]] = None,
+        progress_callback=None,
+        market_label: str = "",
+) -> Dict[str, Any]:
     payload = payload or {}
     train_config = training_config(payload)
     model_id = train_config["model_id"]
+    label = market_label or market_label_for_progress(train_config["training_target"])
+    emit_training_progress(progress_callback, "preparing", 1, 5, f"Preparando datos {label}", market=label, model_id=model_id)
     files = list(discover_dataset_files(KAGGLE_ROOT))
     normalized = load_prepared_dataset(required=True)
     train_rows = normalized["train"].copy()
@@ -320,9 +354,16 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
         raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
     y_train_encoded, label_classes = encode_labels(y_train)
     y_eval_encoded = encode_existing_labels(y_eval, label_classes)
-    tuned = tune_model_if_requested(train_config, x_train, y_train_encoded)
+    tuned = tune_model_if_requested(
+        train_config,
+        x_train,
+        y_train_encoded,
+        progress_callback=progress_callback,
+        market_label=label,
+    )
     if tuned.get("best_params"):
         train_config["params"].update(tuned["best_params"])
+    emit_training_progress(progress_callback, "fit", 4, 5, f"Entrenando clasificador {label}", market=label, model_id=model_id)
     fit_result = fit_configured_classifier(
         x_train=x_train,
         y_train=y_train_encoded,
@@ -336,6 +377,7 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
     clf = fit_result["classifier"]
     y_train_pred = classifier_predict(clf, x_train)
     y_eval_pred = classifier_predict(clf, x_eval)
+    emit_training_progress(progress_callback, "metrics", 5, 5, f"Calculando métricas {label}", market=label, model_id=model_id)
     metrics = classification_metrics_from_predictions(y_train_encoded, y_train_pred, y_eval_encoded, y_eval_pred)
     confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes, target=effective_target)
     etl = etl_steps(files, normalized, eval_strategy, prepared=prepared_dataset_status(files=files, normalized=normalized))
@@ -412,6 +454,7 @@ def train_dual_market_model(
         tournament: Dict[str, Any],
         payload: Optional[Dict[str, Any]] = None,
         train_config: Optional[Dict[str, Any]] = None,
+        progress_callback=None,
 ) -> Dict[str, Any]:
     payload = dict(payload or {})
     train_config = train_config or training_config(payload)
@@ -434,7 +477,13 @@ def train_dual_market_model(
         "model_name": f"{bundle_name} - 1X2",
         "hidden_from_catalog": True,
     }
-    result_result = train_single_hybrid_model(tournament=tournament, payload=result_payload)
+    emit_training_progress(progress_callback, "market-result", 1, 6, "Entrenando mercado 1X2", market="1X2", model_id=bundle_id)
+    result_result = train_single_hybrid_model(
+        tournament=tournament,
+        payload=result_payload,
+        progress_callback=progress_callback,
+        market_label="1X2",
+    )
     result_record = load_hybrid_model(result_child_id) or {}
 
     warnings: List[str] = []
@@ -453,7 +502,13 @@ def train_dual_market_model(
             "hidden_from_catalog": True,
         }
         try:
-            over_result = train_single_hybrid_model(tournament=tournament, payload=over_payload)
+            emit_training_progress(progress_callback, "market-over-under", 3, 6, "Entrenando mercado O/U 2.5", market="O/U 2.5", model_id=bundle_id)
+            over_result = train_single_hybrid_model(
+                tournament=tournament,
+                payload=over_payload,
+                progress_callback=progress_callback,
+                market_label="O/U 2.5",
+            )
             over_record = load_hybrid_model(over_child_id) or {}
             if over_record.get("effective_target") == "over_under_25":
                 market_results["over_under_25"] = market_training_summary(over_record, over_result, "O/U 2.5")
@@ -508,8 +563,10 @@ def train_dual_market_model(
         "walk_forward_mode": result_record.get("walk_forward_mode", "none"),
         "walk_forward_summary": result_record.get("walk_forward_summary", {}),
     }
+    emit_training_progress(progress_callback, "saving", 5, 6, "Guardando bundle dual", model_id=bundle_id)
     save_hybrid_model(bundle_record, model_id=bundle_id)
     model_meta = read_model_metadata(model_id=bundle_id)
+    emit_training_progress(progress_callback, "complete", 6, 6, "Entrenamiento completado", model_id=bundle_id)
     return {
         "model": model_meta,
         "metrics": bundle_record["metrics"],
@@ -1915,7 +1972,13 @@ def build_worldcup_classifier(
     raise WorldCupTrainingError(f'Modelo "{model_key}" no soportado para Mundial.')
 
 
-def tune_model_if_requested(config: Dict[str, Any], x_train: pd.DataFrame, y_train: pd.Series) -> Dict[str, Any]:
+def tune_model_if_requested(
+        config: Dict[str, Any],
+        x_train: pd.DataFrame,
+        y_train: pd.Series,
+        progress_callback=None,
+        market_label: str = "",
+) -> Dict[str, Any]:
     if not config.get("tuning_enabled"):
         return {"enabled": False}
     tunables = selected_tunables(config)
@@ -1960,7 +2023,40 @@ def tune_model_if_requested(config: Dict[str, Any], x_train: pd.DataFrame, y_tra
         sampler=build_optuna_sampler(optuna, config["optuna_sampler"], config["seed"]),
         pruner=build_optuna_pruner(optuna, config["optuna_pruner"]),
     )
-    study.optimize(objective, n_trials=config["n_trials"], show_progress_bar=False)
+    total_trials = int(config["n_trials"])
+    label = market_label or market_label_for_progress(config["training_target"])
+
+    def progress_after_trial(study_obj, trial):
+        current = min(len(study_obj.trials), total_trials)
+        try:
+            best_value = round(float(study_obj.best_value), 4)
+            best_trial = int(study_obj.best_trial.number + 1)
+        except ValueError:
+            best_value = None
+            best_trial = 0
+        emit_training_progress(
+            progress_callback,
+            "tuning",
+            current,
+            total_trials,
+            f"Fine-tuning {label}",
+            best_value=best_value,
+            best_trial=best_trial,
+            last_state=getattr(trial.state, "name", str(trial.state)),
+            market=label,
+            model_type=config["model_type"],
+        )
+
+    emit_training_progress(
+        progress_callback,
+        "tuning",
+        0,
+        total_trials,
+        f"Fine-tuning {label} iniciado",
+        market=label,
+        model_type=config["model_type"],
+    )
+    study.optimize(objective, n_trials=total_trials, show_progress_bar=False, callbacks=[progress_after_trial])
     try:
         best_value = round(float(study.best_value), 4)
         best_trial = int(study.best_trial.number + 1)

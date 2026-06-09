@@ -10,6 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.web import mundial_services as services
 from src.web.config import ALLOWED_HOSTS, LOCAL_HOST
+from src.web.jobs import jobs
 
 
 MUNDIAL_PORT = 5052
@@ -119,7 +120,7 @@ def create_mundial_app() -> FastAPI:
 
     @app.post("/api/mundial/training/train")
     def training_train(payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.training_train, payload)
+        return _submit("Entrenando modelo Mundial", services.training_train, payload, with_progress=True)
 
     @app.get("/api/mundial/training/status")
     def training_status():
@@ -135,7 +136,7 @@ def create_mundial_app() -> FastAPI:
 
     @app.post("/api/mundial/models/train")
     def models_train(payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.training_train, payload)
+        return _submit("Entrenando modelo Mundial", services.training_train, payload, with_progress=True)
 
     @app.post("/api/mundial/models/select")
     def models_select(payload: Dict[str, Any] = Body(default={})):
@@ -159,13 +160,27 @@ def create_mundial_app() -> FastAPI:
 
     @app.post("/api/mundial/simulate")
     def simulate(payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.simulate, payload)
+        return _submit("Simulando Monte Carlo Mundial", services.simulate, payload, with_progress=True)
 
     @app.get("/api/mundial/procedure")
     def procedure():
         return _wrap(services.procedure)
 
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: str):
+        job = jobs.get(job_id)
+        if job is None:
+            return JSONResponse(status_code=404, content={"ok": False, "data": {}, "error": "Proceso no encontrado."})
+        return _ok(job)
+
     return app
+
+
+def _submit(message: str, fn, *args, with_progress: bool = False, **kwargs):
+    try:
+        return _ok(jobs.submit(message, fn, *args, with_progress=with_progress, **kwargs))
+    except Exception as exc:
+        return _error(exc)
 
 
 def _wrap(fn, *args, **kwargs):

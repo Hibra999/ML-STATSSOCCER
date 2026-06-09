@@ -72,6 +72,7 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/predict-match" in paths
     assert "/api/mundial/predict-upcoming" in paths
     assert "/api/mundial/procedure" in paths
+    assert "/api/jobs/{job_id}" in paths
     assert "/api/worldcup/overview" not in paths
     assert "/assets" in paths
 
@@ -180,11 +181,13 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "mundial-xgb-hibrido" in html_source
     assert "ML híbrido" in html_source
     assert "model-active-select" in html_source
+    assert "worldcup-new-model" in html_source
     assert "model-load" in html_source
     assert "worldcup-clear-cache" in html_source
     assert "worldcup-model-id" in html_source
     assert "upcoming-model-select" in html_source
     assert "hero-hardware" in html_source
+    assert "training-hardware" not in html_source
     assert "sim-history-weight" in html_source
     assert "sim-recency-weight" in html_source
     assert "sim-host-advantage" in html_source
@@ -194,6 +197,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-use-player-features" in html_source
     assert "sim-use-ml-model" in html_source
     assert "training-train" in html_source
+    assert "worldcup-training-progress" in html_source
+    assert "worldcup-simulation-progress" in html_source
     assert "training-retrain-base" in html_source
     assert "training-retrain-players" in html_source
     assert "training-walkforward-notice" in html_source
@@ -242,6 +247,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "market-panel" in app_source
     assert "renderWalkForwardNotice" in app_source
     assert "renderHeroHardware" in app_source
+    assert "trackWorldcupJob" in app_source
+    assert "/api/jobs/${jobId}" in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
     assert "renderHeroCountdown" in app_source
@@ -312,6 +319,26 @@ def test_worldcup_simulation_returns_advancement_probabilities():
     assert "Pasa grupo %" in result["advancement"].columns
     assert "Over 2.5 %" in result["matches"].columns
     assert result["advancement"]["Campeon %"].sum() == pytest.approx(100, abs=0.01)
+
+
+def test_worldcup_simulation_emits_progress_payloads():
+    from src.worldcup.data import FALLBACK_2026_GROUPS, fallback_tournament_2026
+    from src.worldcup.model import WorldCupModel
+    from src.worldcup.simulation import simulate_worldcup
+
+    tournament = fallback_tournament_2026()
+    teams = [team for group in FALLBACK_2026_GROUPS.values() for team in group]
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=teams)
+    payloads = []
+
+    simulate_worldcup(tournament, model, iterations=100, seed=7, progress_callback=payloads.append)
+
+    assert payloads
+    assert payloads[-1]["stage"] == "simulation"
+    assert payloads[-1]["current"] == 100
+    assert payloads[-1]["total"] == 100
+    assert payloads[-1]["percent"] == 100
+    assert payloads[-1]["message"] == "Monte Carlo completado"
 
 
 def test_worldcup_lanus_lineup_normalization_extracts_starting_elevens():

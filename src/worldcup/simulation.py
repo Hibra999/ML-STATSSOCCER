@@ -26,7 +26,13 @@ ADVANCEMENT_COLUMNS = [
 ]
 
 
-def simulate_worldcup(tournament: Dict[str, Any], model: WorldCupModel, iterations: int = 5000, seed: int = 2026) -> Dict[str, pd.DataFrame]:
+def simulate_worldcup(
+        tournament: Dict[str, Any],
+        model: WorldCupModel,
+        iterations: int = 5000,
+        seed: int = 2026,
+        progress_callback=None,
+) -> Dict[str, pd.DataFrame]:
     iterations = min(max(int(iterations or 5000), 100), 20000)
     seed = int(seed if seed is not None else 2026)
     rng = np.random.default_rng(seed)
@@ -35,8 +41,10 @@ def simulate_worldcup(tournament: Dict[str, Any], model: WorldCupModel, iteratio
     knockouts = sorted(knockout_matches(tournament), key=lambda match: _knockout_sort_key(match))
     teams = [team for group in groups.values() for team in group]
     counters = {team: Counter() for team in teams}
+    report_every = max(1, iterations // 100)
+    _emit_progress(progress_callback, "simulation", 0, iterations, "Monte Carlo en ejecucion")
 
-    for _ in range(iterations):
+    for iteration in range(iterations):
         standings = _initial_standings(groups)
         for match in group_matches:
             team1 = str(match["team1"])
@@ -91,10 +99,30 @@ def simulate_worldcup(tournament: Dict[str, Any], model: WorldCupModel, iteratio
                 counters[winner]["final"] += 1
             elif round_name == "Final":
                 counters[winner]["champion"] += 1
+        current = iteration + 1
+        if current == iterations or current % report_every == 0:
+            _emit_progress(progress_callback, "simulation", current, iterations, "Monte Carlo en ejecucion")
 
     advancement = _advancement_dataframe(groups, model, counters, iterations)
     match_probs = match_probabilities_dataframe(group_matches, model)
+    _emit_progress(progress_callback, "simulation", iterations, iterations, "Monte Carlo completado")
     return {"advancement": advancement, "matches": match_probs}
+
+
+def _emit_progress(callback, stage: str, current: int, total: int, message: str) -> None:
+    if callback is None:
+        return
+    total = max(int(total or 1), 1)
+    current = min(max(int(current or 0), 0), total)
+    callback({
+        "stage": stage,
+        "current": current,
+        "total": total,
+        "current_trial": "",
+        "total_trials": "",
+        "percent": int(round(current * 100 / total)),
+        "message": message,
+    })
 
 
 def match_probabilities_dataframe(matches: List[Dict[str, Any]], model: WorldCupModel) -> pd.DataFrame:

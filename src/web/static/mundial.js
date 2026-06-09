@@ -14,6 +14,16 @@ const state = {
   defaultsApplied: false,
   trainingControlsApplied: false,
   countdownTimer: null,
+  jobs: new Map(),
+  jobTimer: null,
+  newModelMode: false,
+};
+
+const jobLabels = {
+  queued: "En cola",
+  running: "En proceso",
+  succeeded: "Completado",
+  failed: "Error",
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -27,6 +37,7 @@ function bindEvents() {
   });
   document.getElementById("refresh-btn").addEventListener("click", () => loadAll(true));
   document.getElementById("simulate-btn").addEventListener("click", runSimulation);
+  document.getElementById("worldcup-new-model").addEventListener("click", startNewWorldcupModel);
   document.getElementById("model-load").addEventListener("click", loadSelectedModel);
   document.getElementById("model-delete").addEventListener("click", deleteSelectedModel);
   document.getElementById("worldcup-clear-cache").addEventListener("click", clearWorldcupMaintenance);
@@ -118,7 +129,6 @@ function setLoading() {
   document.getElementById("player-features-table").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-summary").innerHTML = loadingHtml("Dataset pendiente");
   document.getElementById("training-model-state").innerHTML = loadingHtml("Modelo pendiente");
-  document.getElementById("training-hardware").innerHTML = loadingHtml("Hardware pendiente");
   document.getElementById("training-etl-flow").innerHTML = loadingHtml("ETL pendiente");
   document.getElementById("training-metric-cards").innerHTML = loadingHtml("Metricas pendientes");
   document.getElementById("training-confusion-matrix").innerHTML = loadingHtml("Matriz pendiente");
@@ -129,6 +139,8 @@ function setLoading() {
   document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("models-list").innerHTML = loadingHtml("Modelos pendientes");
   document.getElementById("simulation-summary").innerHTML = "";
+  renderWorldcupJobProgress("training");
+  renderWorldcupJobProgress("simulation");
 }
 
 function applyDefaultConfig(config) {
@@ -161,14 +173,15 @@ function renderOverview(overview) {
   document.getElementById("metric-players").textContent = overview.players || 0;
   document.getElementById("model-source").textContent = `${overview.model || "Modelo"} - ${overview.fixture_source || ""}`;
   const highlight = overview.highlight || overview.opener || {};
-  document.getElementById("hero-meta").textContent = [
-    highlight.group || highlight.round || "Partido inaugural",
-    `${highlight.date || "2026-06-11"} ${highlight.time || ""}`.trim(),
-    highlight.venue || "Sede por confirmar",
-  ].filter(Boolean).join(" - ");
+  const kickoffLabel = `${highlight.date || "2026-06-11"} ${highlight.time || ""}`.trim();
+  document.getElementById("hero-meta").textContent = highlight.group || highlight.round || "Partido inaugural";
   document.getElementById("hero-match").innerHTML = `
     ${matchTeamHtml(highlight.home || {}, "home")}
-    <span class="versus">VS</span>
+    <div class="hero-vs-block">
+      <span class="versus">VS</span>
+      <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
+      <small>${escapeHtml(highlight.venue || "Sede por confirmar")}</small>
+    </div>
     ${matchTeamHtml(highlight.away || {}, "away")}`;
   renderHeroCountdown(overview.countdown_target, overview.countdown_state, highlight);
   renderHeroHardware((state.trainingOptions || {}).hardware || {});
@@ -310,11 +323,15 @@ function renderHeroHardware(hardware) {
   const container = document.getElementById("hero-hardware");
   if (!container) return;
   container.innerHTML = [
-    countdownChip("Device", hardware.actual_device || hardware.device_default || "cpu"),
-    countdownChip("CUDA", hardware.cuda_available ? "Si" : "No"),
-    countdownChip("n_jobs", hardware.n_jobs ?? hardware.default_n_jobs ?? "-1"),
-    countdownChip("Threads", hardware.effective_n_jobs || hardware.cpu_count || "-"),
+    hardwareChip("Device", hardware.actual_device || hardware.device_default || "cpu", "Motor"),
+    hardwareChip("CUDA", hardware.cuda_available ? "Si" : "No", hardware.cuda_available ? "GPU disponible" : "CPU fallback"),
+    hardwareChip("CPU", hardware.cpu_count || "-", "nucleos"),
+    hardwareChip("Threads", hardware.effective_n_jobs || hardware.n_jobs || hardware.default_n_jobs || "-", "n_jobs"),
   ].join("");
+}
+
+function hardwareChip(label, value, detail) {
+  return `<div class="hardware-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
 }
 
 async function loadModelsCatalog() {
@@ -331,14 +348,14 @@ function renderModelsCatalog(payload) {
   state.models = models;
   state.activeModelId = activeId;
   const options = models.map((model) => `<option value="${escapeAttr(model.model_id)}">${escapeHtml(model.model_name || model.model_id)}${model.bundle ? " - 1X2 + O/U" : ""}${model.active ? " - activo" : ""}</option>`).join("");
-  const selectHtml = options || `<option value="">Sin modelos entrenados</option>`;
+  const selectHtml = `<option value="">Sin modelo seleccionado</option>${options}`;
   ["model-active-select", "upcoming-model-select"].forEach((id) => {
     const select = document.getElementById(id);
     if (!select) return;
     select.innerHTML = selectHtml;
-    select.value = activeId || (models[0] || {}).model_id || "";
+    select.value = state.newModelMode ? "" : activeId || (models[0] || {}).model_id || "";
   });
-  const active = models.find((model) => model.model_id === activeId) || models[0] || {};
+  const active = state.newModelMode ? {} : models.find((model) => model.model_id === activeId) || models[0] || {};
   renderActiveModel(active);
   document.getElementById("models-list").innerHTML = models.map((model) => `
     <article class="model-row ${model.active ? "active" : ""}">
@@ -359,16 +376,56 @@ function renderActiveModel(model) {
 
 function syncModelSelects(event) {
   const value = event && event.target ? event.target.value : selectedModelId();
+  state.newModelMode = !value;
   ["model-active-select", "upcoming-model-select"].forEach((id) => {
     const select = document.getElementById(id);
-    if (select && value) select.value = value;
+    if (select) select.value = value || "";
   });
+  if (value) renderActiveModel(state.models.find((model) => model.model_id === value) || {});
 }
 
 function selectedModelId() {
+  if (state.newModelMode) return "";
   const activeSelect = document.getElementById("model-active-select");
   const upcomingSelect = document.getElementById("upcoming-model-select");
   return (activeSelect && activeSelect.value) || (upcomingSelect && upcomingSelect.value) || state.activeModelId || "";
+}
+
+function startNewWorldcupModel() {
+  clearAlert();
+  state.newModelMode = true;
+  ["model-active-select", "upcoming-model-select"].forEach((id) => {
+    const select = document.getElementById(id);
+    if (select) select.value = "";
+  });
+  document.querySelectorAll(".model-row.active").forEach((row) => row.classList.remove("active"));
+  const modelType = document.getElementById("worldcup-model-type").value || ((state.trainingOptions || {}).defaults || {}).model_type || "xgboost";
+  state.trainingControlsApplied = false;
+  renderTrainingControls(state.trainingOptions, {});
+  applyModelDefaults(modelType, true);
+  const modelId = document.getElementById("worldcup-model-id");
+  modelId.value = "";
+  modelId.placeholder = `${autoWorldcupModelId(modelType)}-nuevo`;
+  modelId.dataset.autofilled = "false";
+  document.getElementById("worldcup-tuning-enabled").checked = false;
+  applyTuningLocks();
+  document.getElementById("sim-use-ml-model").checked = false;
+  document.getElementById("upcoming-summary").textContent = "Nuevo modelo pendiente de entrenamiento";
+  document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Sin modelo seleccionado");
+  document.getElementById("upcoming-predictions-table").innerHTML = "";
+  document.getElementById("training-model-state").innerHTML = [
+    predictionCard("Modo", "Nuevo modelo"),
+    predictionCard("Modelo", "Sin guardar"),
+    predictionCard("Mercados", "1X2 + O/U 2.5"),
+    predictionCard("Eval", "pendiente"),
+  ].join("");
+  document.getElementById("training-metric-cards").innerHTML = loadingHtml("Entrena el nuevo modelo");
+  document.getElementById("training-confusion-matrix").innerHTML = loadingHtml("Matriz pendiente");
+  document.getElementById("training-tuning-flow").innerHTML = tuningFlowHtml({ enabled: false });
+  document.getElementById("training-features").innerHTML = loadingHtml("Features pendientes");
+  document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
+  document.getElementById("simulation-summary").textContent = "Nuevo modelo preparado. Ingresa nombre y parámetros antes de entrenar.";
+  renderActiveModel({});
 }
 
 async function loadSelectedModel() {
@@ -379,6 +436,7 @@ async function loadSelectedModel() {
     return;
   }
   try {
+    state.newModelMode = false;
     const result = await api("/api/mundial/models/select", jsonOptions({ model_id: modelId }));
     renderModelsCatalog(result);
     document.getElementById("sim-use-ml-model").checked = true;
@@ -661,6 +719,10 @@ async function trainWorldCupModel(walkForwardMode = "none") {
     showError("Primero ejecuta Preparar ETL para dejar listo el dataset de entrenamiento.");
     return;
   }
+  if (!document.getElementById("worldcup-model-id").value.trim()) {
+    showError("Ingresa un nombre para el nuevo modelo antes de entrenar.");
+    return;
+  }
   const modeLabel = walkForwardMode === "result_plus_players"
     ? "Reentrenando con partido + jugadores..."
     : walkForwardMode === "result_only"
@@ -668,13 +730,9 @@ async function trainWorldCupModel(walkForwardMode = "none") {
       : "Entrenando híbrido Mundial...";
   document.getElementById("training-status").textContent = modeLabel;
   try {
-    const result = await api("/api/mundial/models/train", jsonOptions(trainingPayload(walkForwardMode)));
-    renderTrainingResult(result);
-    await loadTrainingStatus();
-    if (result.models) renderModelsCatalog(result.models);
-    else await loadModelsCatalog();
-    document.getElementById("sim-use-ml-model").checked = true;
-    document.getElementById("simulation-summary").textContent = `Modelo listo: ${(result.model || {}).model_name || (result.model || {}).model_id || "híbrido"}`;
+    const job = await api("/api/mundial/models/train", jsonOptions(trainingPayload(walkForwardMode)));
+    trackWorldcupJob(job, "training");
+    document.getElementById("simulation-summary").textContent = "Entrenamiento en proceso...";
   } catch (error) {
     showError(error.message);
   }
@@ -685,7 +743,6 @@ function renderTrainingStatus(payload) {
   state.trainingOptions = payload.options || state.trainingOptions;
   renderTrainingControls(state.trainingOptions, model);
   const hardware = (model.hardware && model.trained) ? model.hardware : ((state.trainingOptions || {}).hardware || {});
-  renderHardware(hardware);
   renderHeroHardware(hardware);
   document.getElementById("training-status").textContent = payload.available
     ? `${payload.train_rows || 0} train listo - ${payload.etl_ready ? "ETL listo" : "ETL pendiente"} - ${evalStrategyLabel(payload.eval_strategy)}`
@@ -704,7 +761,6 @@ function renderTrainingStatus(payload) {
 }
 
 function renderTrainingResult(payload) {
-  renderHardware(payload.hardware || {});
   renderHeroHardware(payload.hardware || {});
   renderTrainingWarnings(payload.warnings || []);
   renderWalkForwardNotice(((state.training || {}).walk_forward_refresh) || {});
@@ -886,23 +942,6 @@ function applyModelDefaults(modelKey, force) {
 function autoWorldcupModelId(modelKey) {
   const shortModel = { xgboost: "xgb", lightgbm: "lgbm", catboost: "cat", ngboost: "ngb" }[modelKey] || modelKey || "model";
   return `mundial-${shortModel}-hibrido`;
-}
-
-function renderHardware(hardware) {
-  const devices = hardware.cuda_devices || [];
-  document.getElementById("training-hardware").innerHTML = [
-    predictionCard("CPU", hardware.cpu_count || "-"),
-    predictionCard("Device real", hardware.actual_device || hardware.device_default || "cpu"),
-    predictionCard("CUDA", hardware.cuda_available ? "Si" : "No"),
-    predictionCard("n_jobs", hardware.n_jobs ?? hardware.default_n_jobs ?? "-1"),
-    predictionCard("Threads", hardware.effective_n_jobs || hardware.cpu_count || "-"),
-  ].join("");
-  if (!hardware.cuda_available && hardware.cuda_error) {
-    document.getElementById("training-hardware").insertAdjacentHTML("beforeend", `<small class="hardware-note">${escapeHtml(hardware.cuda_error)}</small>`);
-  }
-  if (devices.length) {
-    document.getElementById("training-hardware").insertAdjacentHTML("beforeend", `<small class="hardware-note">${devices.map(escapeHtml).join(" | ")}</small>`);
-  }
 }
 
 function renderTrainingWarnings(warnings) {
@@ -1177,12 +1216,153 @@ async function runSimulation() {
   clearAlert();
   document.getElementById("simulation-summary").textContent = "Ejecutando Monte Carlo...";
   try {
-    const result = await api("/api/mundial/simulate", jsonOptions(simulationPayload()));
-    renderSimulation(result);
+    const job = await api("/api/mundial/simulate", jsonOptions(simulationPayload()));
+    trackWorldcupJob(job, "simulation");
   } catch (error) {
     document.getElementById("simulation-summary").textContent = "";
     showError(error.message);
   }
+}
+
+function trackWorldcupJob(job, kind) {
+  if (!job || !job.job_id) return;
+  job.kind = kind;
+  job.handled = false;
+  state.jobs.set(job.job_id, job);
+  setWorldcupJobBusy(kind, true);
+  renderWorldcupJobProgress(kind);
+  startWorldcupJobPolling();
+}
+
+function startWorldcupJobPolling() {
+  if (state.jobTimer) return;
+  state.jobTimer = window.setInterval(pollWorldcupJobs, 1000);
+  pollWorldcupJobs();
+}
+
+async function pollWorldcupJobs() {
+  let hasActive = false;
+  for (const jobId of [...state.jobs.keys()]) {
+    const previous = state.jobs.get(jobId) || {};
+    if (isTerminalJob(previous) && previous.handled) continue;
+    try {
+      const job = await api(`/api/jobs/${jobId}`);
+      job.kind = previous.kind;
+      job.handled = previous.handled;
+      if (isTerminalJob(job) && !job.handled) {
+        job.handled = true;
+        state.jobs.set(jobId, job);
+        await handleWorldcupJobComplete(job);
+      } else {
+        state.jobs.set(jobId, job);
+      }
+      if (!isTerminalJob(job)) hasActive = true;
+      renderWorldcupJobProgress(job.kind);
+    } catch (error) {
+      previous.status = "failed";
+      previous.error = error.message;
+      previous.handled = true;
+      state.jobs.set(jobId, previous);
+      await handleWorldcupJobComplete(previous);
+      renderWorldcupJobProgress(previous.kind);
+    }
+  }
+  if (!hasActive && state.jobTimer) {
+    window.clearInterval(state.jobTimer);
+    state.jobTimer = null;
+  }
+}
+
+async function handleWorldcupJobComplete(job) {
+  setWorldcupJobBusy(job.kind, false);
+  if (job.status === "failed") {
+    showError(job.error || "Proceso fallido");
+    if (job.kind === "training" && state.training) renderTrainingStatus(state.training);
+    return;
+  }
+  const result = job.result || {};
+  if (job.kind === "training") {
+    state.newModelMode = false;
+    renderTrainingResult(result);
+    await loadTrainingStatus();
+    if (result.models) renderModelsCatalog(result.models);
+    else await loadModelsCatalog();
+    document.getElementById("sim-use-ml-model").checked = true;
+    document.getElementById("simulation-summary").textContent = `Modelo listo: ${(result.model || {}).model_name || (result.model || {}).model_id || "híbrido"}`;
+  }
+  if (job.kind === "simulation") {
+    renderSimulation(result);
+  }
+}
+
+function renderWorldcupJobProgress(kind) {
+  const target = document.getElementById(kind === "simulation" ? "worldcup-simulation-progress" : "worldcup-training-progress");
+  if (!target) return;
+  const job = latestWorldcupJob(kind);
+  if (!job) {
+    target.className = "worldcup-progress hidden";
+    target.innerHTML = "";
+    return;
+  }
+  const progress = job.progress || {};
+  const percent = clampPercent(progress.percent ?? (job.status === "succeeded" ? 100 : 0));
+  const current = progress.current_trial || progress.current || 0;
+  const total = progress.total_trials || progress.total || 0;
+  const label = progress.message || job.message || jobLabels[job.status] || job.status;
+  const best = progress.best_value === "" || progress.best_value === null || progress.best_value === undefined
+    ? ""
+    : `<span>Mejor ${escapeHtml(formatNumber(progress.best_value))}</span>`;
+  const stateText = progress.last_state ? `<span>${escapeHtml(progress.last_state)}</span>` : "";
+  const market = progress.market ? `<span>${escapeHtml(progress.market)}</span>` : "";
+  const error = job.error ? `<span>${escapeHtml(cleanMessage(job.error))}</span>` : "";
+  target.className = `worldcup-progress ${escapeAttr(job.status || "queued")}`;
+  target.innerHTML = `
+    <div class="progress-header">
+      <div class="progress-title">
+        <strong>${escapeHtml(jobLabels[job.status] || job.status || "Proceso")}</strong>
+        <small>${escapeHtml(label)}</small>
+      </div>
+      <strong>${escapeHtml(percent)}%</strong>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" style="width:${escapeAttr(percent)}%"></div></div>
+    <div class="progress-meta">
+      <span>${escapeHtml(progress.stage || job.status || "queued")}</span>
+      <span>${escapeHtml(current)}/${escapeHtml(total)}</span>
+      ${market}
+      ${best}
+      ${stateText}
+      ${error}
+    </div>`;
+}
+
+function latestWorldcupJob(kind) {
+  return [...state.jobs.values()].filter((job) => job.kind === kind).pop();
+}
+
+function isTerminalJob(job) {
+  return job && ["succeeded", "failed"].includes(job.status);
+}
+
+function setWorldcupJobBusy(kind, busy) {
+  const ids = kind === "simulation"
+    ? ["simulate-btn"]
+    : ["training-train", "training-retrain-base", "training-retrain-players"];
+  ids.forEach((id) => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = Boolean(busy);
+  });
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(100, Math.max(0, Math.round(number)));
+}
+
+function formatNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return value;
+  return number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function predictionCard(label, value) {
@@ -1393,6 +1573,6 @@ function escapeAttr(value) {
 
 function cleanMessage(message) {
   return String(message || "")
-    .replace(/^(CLIError|ValueError|RuntimeError|LineupProviderError):\s*/, "")
+    .replace(/^(CLIError|ValueError|RuntimeError|WorldCupTrainingError|LineupProviderError):\s*/, "")
     .replace(/\bNone\b/g, "Sin valor");
 }
