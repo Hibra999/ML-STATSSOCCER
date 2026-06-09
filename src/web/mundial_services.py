@@ -383,6 +383,90 @@ def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return result
 
 
+def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    config = simulation_config(payload)
+    tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    model, history_source = build_model(tournament, config)
+    if config["use_lineups"]:
+        adjustments, _ = lineup_rating_adjustments(tournament, weight=config["lineup_weight"])
+        if adjustments:
+            model = model.adjusted(adjustments)
+    if config["use_player_features"]:
+        adjustments, _ = player_feature_rating_adjustments(tournament, weight=config["player_feature_weight"])
+        if adjustments:
+            model = model.adjusted(adjustments)
+
+    limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
+    group_filter = str(payload.get("group") or "").strip()
+    fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter)
+    predictions = []
+    rows = []
+    for _, fixture in fixture_df.head(limit).iterrows():
+        result = predict_match_payload(
+            tournament=tournament,
+            base_model=model,
+            fixture_id=fixture.get("No."),
+            use_ml_model=bool(config["use_ml_model"]),
+            ml_weight=float(config["ml_weight"]),
+        )
+        predictions.append(result)
+        rows.append(upcoming_prediction_row(result))
+    return {
+        "predictions": predictions,
+        "table": table_payload(pd.DataFrame(rows), page=1, page_size=limit),
+        "summary": {
+            "requested": limit,
+            "returned": len(predictions),
+            "group": group_filter or "Todos",
+            "fixture_source": fixture_source,
+            "history_source": history_source,
+            "use_ml_model": config["use_ml_model"],
+        },
+    }
+
+
+def upcoming_fixture_rows(tournament: Dict[str, Any], group_filter: str = "") -> pd.DataFrame:
+    df = tournament_fixtures_dataframe(tournament)
+    df = df[df["Grupo"].astype(str) != ""].copy()
+    if group_filter:
+        df = df[df["Grupo"].astype(str) == group_filter]
+    df = df[
+        df["Equipo 1"].astype(str).str.len().gt(1) &
+        df["Equipo 2"].astype(str).str.len().gt(1) &
+        ~df["Equipo 1"].astype(str).str.match(r"^[123W][A-Z0-9/]+$") &
+        ~df["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
+    ].copy()
+    df["_date"] = pd.to_datetime(df["Fecha"], errors="coerce")
+    today = pd.Timestamp.today().normalize()
+    upcoming = df[df["_date"].notna() & (df["_date"] >= today)]
+    if upcoming.empty:
+        upcoming = df[df["_date"].notna()]
+    if upcoming.empty:
+        upcoming = df
+    return upcoming.sort_values(["_date", "No."], kind="stable")
+
+
+def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
+    fixture = result.get("fixture", {})
+    probs = result.get("probabilities", {})
+    expected = result.get("expected_goals", {})
+    return {
+        "No.": fixture.get("id", ""),
+        "Fecha": fixture.get("date", ""),
+        "Grupo": fixture.get("group", ""),
+        "Partido": f"{fixture.get('home', '')} vs {fixture.get('away', '')}",
+        "1 %": probs.get("home", ""),
+        "X %": probs.get("draw", ""),
+        "2 %": probs.get("away", ""),
+        "Over 2.5 %": probs.get("over25", ""),
+        "Under 2.5 %": probs.get("under25", ""),
+        "Marcador": result.get("modal_score", ""),
+        "Prediccion": result.get("prediction", ""),
+        "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
+    }
+
+
 def lineup_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     enriched = enrich_lineup_payload(payload)
     return {

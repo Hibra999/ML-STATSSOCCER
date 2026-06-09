@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split as sklearn_train_test_split
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
@@ -191,6 +191,7 @@ def dataset_status() -> Dict[str, Any]:
         "target_column": normalized["target_column"],
         "team_columns": normalized["team_columns"],
         "training_mode": normalized["training_mode"],
+        "etl_steps": etl_steps(files, normalized, eval_strategy),
         "trainable": bool(normalized["trainable"]),
         "model": model_meta,
         "preview": normalized["preview"],
@@ -275,7 +276,11 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         num_classes=len(label_classes),
     )
     clf = fit_result["classifier"]
-    metrics = classification_metrics(clf, x_train, y_train_encoded, x_eval, y_eval_encoded)
+    y_train_pred = clf.predict(x_train)
+    y_eval_pred = clf.predict(x_eval)
+    metrics = classification_metrics_from_predictions(y_train_encoded, y_train_pred, y_eval_encoded, y_eval_pred)
+    confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes)
+    etl = etl_steps(files, normalized, eval_strategy)
     hardware = detect_hardware()
     hardware.update({
         "requested_device": train_config["device"],
@@ -290,6 +295,7 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "kaggle_files": [str(path) for path in files],
         "history_source": history_source,
         "metrics": metrics,
+        "confusion_matrix": confusion,
         "classes": label_classes,
         "encoded_classes": list(range(len(label_classes))),
         "mode": normalized["training_mode"],
@@ -302,6 +308,8 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
         "model_params": train_config["params"],
         "tuning": tuned,
+        "tuning_trace": tuning_trace(tuned),
+        "etl_steps": etl,
         "hardware": hardware,
         "warnings": [warning for warning in [target_warning, *fit_result.get("warnings", [])] if warning],
         "top_features": top_feature_importances(clf, feature_columns),
@@ -310,6 +318,7 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
     return {
         "model": read_model_metadata(),
         "metrics": metrics,
+        "confusion_matrix": confusion,
         "features": feature_columns,
         "train_rows": int(len(y_train)),
         "eval_rows": int(len(y_eval)),
@@ -322,6 +331,8 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "model_type": train_config["model_type"],
         "hardware": hardware,
         "tuning": tuned,
+        "tuning_trace": tuning_trace(tuned),
+        "etl_steps": etl,
         "warnings": record["warnings"],
     }
 
@@ -1166,9 +1177,13 @@ def blend_total_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, 
 
 
 def classification_metrics(clf, x_train, y_train, x_eval, y_eval) -> Dict[str, Dict[str, float]]:
+    return classification_metrics_from_predictions(y_train, clf.predict(x_train), y_eval, clf.predict(x_eval))
+
+
+def classification_metrics_from_predictions(y_train, y_train_pred, y_eval, y_eval_pred) -> Dict[str, Dict[str, float]]:
     return {
-        "train": metric_row(y_train, clf.predict(x_train)),
-        "eval": metric_row(y_eval, clf.predict(x_eval)),
+        "train": metric_row(y_train, y_train_pred),
+        "eval": metric_row(y_eval, y_eval_pred),
     }
 
 
@@ -1178,6 +1193,121 @@ def metric_row(y_true, y_pred) -> Dict[str, float]:
         "F1": round(float(f1_score(y_true, y_pred, average="macro", zero_division=0.0)), 3),
         "Precision": round(float(precision_score(y_true, y_pred, average="macro", zero_division=0.0)), 3),
         "Recall": round(float(recall_score(y_true, y_pred, average="macro", zero_division=0.0)), 3),
+    }
+
+
+def confusion_matrix_payload(y_true, y_pred, classes: List[Any]) -> Dict[str, Any]:
+    encoded_labels = list(range(len(classes)))
+    labels = [display_class_label(label) for label in classes]
+    matrix = confusion_matrix(y_true, y_pred, labels=encoded_labels).astype(int)
+    total = int(matrix.sum())
+    rows = []
+    for row_index, actual in enumerate(labels):
+        row_total = int(matrix[row_index].sum())
+        for column_index, predicted in enumerate(labels):
+            count = int(matrix[row_index, column_index])
+            rows.append({
+                "Actual": actual,
+                "Predicho": predicted,
+                "Conteo": count,
+                "Porcentaje": round(count * 100.0 / max(row_total, 1), 2),
+            })
+    return {
+        "labels": labels,
+        "matrix": matrix.tolist(),
+        "rows": rows,
+        "total": total,
+    }
+
+
+def display_class_label(label: Any) -> str:
+    text = str(label)
+    if text == "H":
+        return "1 Local"
+    if text == "D":
+        return "X Empate"
+    if text == "A":
+        return "2 Visita"
+    if text in {"0", "False", "false"}:
+        return "No"
+    if text in {"1", "True", "true"}:
+        return "Si"
+    return text
+
+
+def etl_steps(files: Iterable[Path], normalized: Dict[str, Any], eval_strategy: str) -> List[Dict[str, Any]]:
+    file_list = list(files)
+    train_rows = labeled_train_row_count(normalized)
+    test_rows = labeled_test_row_count(normalized)
+    prediction_rows = int(normalized["team_prediction"].shape[0])
+    feature_rows = int(normalized["team_features"].shape[0])
+    return [
+        {
+            "name": "Descarga Kaggle",
+            "status": "ok" if file_list else "pending",
+            "count": len(file_list),
+            "detail": "Archivos CSV/XLS disponibles localmente.",
+        },
+        {
+            "name": "Lectura y normalizacion",
+            "status": "ok" if train_rows else "pending",
+            "count": train_rows,
+            "detail": f"Modo detectado: {normalized.get('training_mode') or 'sin modo'}.",
+        },
+        {
+            "name": "Split evaluacion",
+            "status": "ok" if eval_strategy != "unavailable" else "pending",
+            "count": test_rows if test_rows else planned_holdout_rows(train_rows),
+            "detail": "Test etiquetado" if eval_strategy == "test_file" else "Holdout desde train" if eval_strategy == "holdout_from_train" else "Sin evaluacion.",
+        },
+        {
+            "name": "Features seleccion",
+            "status": "ok" if feature_rows else "pending",
+            "count": feature_rows,
+            "detail": "Features numericas por seleccion listas para el modelo.",
+        },
+        {
+            "name": "Prediccion 2026",
+            "status": "ok" if prediction_rows else "info",
+            "count": prediction_rows,
+            "detail": "Filas sin label usadas como features futuras.",
+        },
+        {
+            "name": "Anti-leakage",
+            "status": "ok" if train_rows else "pending",
+            "count": 0,
+            "detail": "No se usan resultados del Mundial 2026 como target.",
+        },
+    ]
+
+
+def tuning_trace(tuned: Dict[str, Any]) -> Dict[str, Any]:
+    if not tuned or not tuned.get("enabled"):
+        return {
+            "enabled": False,
+            "steps": [{
+                "name": "Fine-tuning",
+                "status": "off",
+                "detail": "Optuna desactivado; se usaron parametros actuales del formulario.",
+            }],
+        }
+    best_params = tuned.get("best_params", {}) or {}
+    return {
+        "enabled": True,
+        "trials": int(tuned.get("trials", 0) or 0),
+        "sampler": tuned.get("sampler", ""),
+        "pruner": tuned.get("pruner", ""),
+        "objective": tuned.get("objective", ""),
+        "best_value": tuned.get("best_value", ""),
+        "best_trial": tuned.get("best_trial", ""),
+        "best_params": best_params,
+        "steps": [
+            {"name": "Sampler", "status": "ok", "detail": str(tuned.get("sampler", ""))},
+            {"name": "Pruner", "status": "ok", "detail": str(tuned.get("pruner", ""))},
+            {"name": "Trials", "status": "ok", "detail": str(tuned.get("trials", 0))},
+            {"name": "Mejor valor", "status": "ok", "detail": str(tuned.get("best_value", ""))},
+            {"name": "Parametros", "status": "ok" if best_params else "info", "detail": ", ".join(best_params.keys()) or "Sin cambios"},
+        ],
     }
 
 
@@ -1191,6 +1321,7 @@ def save_hybrid_model(record: Dict[str, Any]) -> None:
         "feature_count": len(record.get("feature_columns", [])),
         "classes": record.get("classes", []),
         "metrics": record.get("metrics", {}),
+        "confusion_matrix": record.get("confusion_matrix", {}),
         "mode": record.get("mode", ""),
         "eval_strategy": record.get("eval_strategy", ""),
         "prediction_rows": record.get("prediction_rows", 0),
@@ -1201,6 +1332,8 @@ def save_hybrid_model(record: Dict[str, Any]) -> None:
         "model_label": record.get("model_label", ""),
         "model_params": record.get("model_params", {}),
         "tuning": record.get("tuning", {}),
+        "tuning_trace": record.get("tuning_trace", {}),
+        "etl_steps": record.get("etl_steps", []),
         "hardware": record.get("hardware", {}),
         "warnings": record.get("warnings", []),
         "top_features": record.get("top_features", []),
@@ -1231,6 +1364,7 @@ def read_model_metadata() -> Dict[str, Any]:
         "feature_count": 0,
         "classes": [],
         "metrics": {},
+        "confusion_matrix": {},
         "model_type": "",
         "model_label": "",
         "effective_target": "",
@@ -1239,6 +1373,8 @@ def read_model_metadata() -> Dict[str, Any]:
         "prediction_rows": 0,
         "hardware": detect_hardware(),
         "tuning": {"enabled": False},
+        "tuning_trace": tuning_trace({"enabled": False}),
+        "etl_steps": [],
         "warnings": [],
         "top_features": [],
     }

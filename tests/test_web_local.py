@@ -64,6 +64,7 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/training/status" in paths
     assert "/api/mundial/training/options" in paths
     assert "/api/mundial/predict-match" in paths
+    assert "/api/mundial/predict-upcoming" in paths
     assert "/api/mundial/procedure" in paths
     assert "/api/worldcup/overview" not in paths
     assert "/assets" in paths
@@ -150,6 +151,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     app_source = open("src/web/static/mundial.js", "r", encoding="utf-8").read()
 
     assert "Mundial 2026" in html_source
+    assert "data-section=\"predicciones\"" in html_source
     assert "sim-history-weight" in html_source
     assert "sim-recency-weight" in html_source
     assert "sim-host-advantage" in html_source
@@ -167,6 +169,11 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "training-model-params" in html_source
     assert "training-model-state" in html_source
     assert "dataset-summary" in html_source
+    assert "training-etl-flow" in html_source
+    assert "training-confusion-matrix" in html_source
+    assert "training-tuning-flow" in html_source
+    assert "upcoming-predict-limit" in html_source
+    assert "upcoming-predictions" in html_source
     assert "predict-match-btn" in html_source
     assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
@@ -176,6 +183,11 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "predictionBreakdownTable" in app_source
     assert "paramsTable" in app_source
     assert "evalStrategyLabel" in app_source
+    assert "renderConfusionMatrix" in app_source
+    assert "renderEtlFlow" in app_source
+    assert "renderTuningFlow" in app_source
+    assert "runUpcomingPredictions" in app_source
+    assert "/api/mundial/predict-upcoming" in app_source
     assert "/api/mundial/predict-match" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
     assert "/api/worldcup/simulate" not in app_source
@@ -519,6 +531,9 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert result["model"]["trained"] is True
     assert result["model"]["model_type"] == "xgboost"
     assert result["model"]["eval_strategy"] == "test_file"
+    assert result["model"]["confusion_matrix"]["matrix"]
+    assert result["model"]["etl_steps"]
+    assert result["model"]["tuning_trace"]["enabled"] is False
     assert result["model"]["hardware"]["actual_device"] in {"cpu", "cuda"}
     assert result["eval_rows"] == 2
     assert prediction["fixture"]["home"] == "Mexico"
@@ -576,10 +591,25 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert result["prediction_rows"] == 2
     assert result["model"]["target_column"] == "quarter_finalist"
     assert result["model"]["eval_strategy"] == "holdout_from_train"
+    assert result["model"]["confusion_matrix"]["labels"] == ["No", "Si"]
+    assert result["model"]["etl_steps"]
+    assert result["model"]["tuning_trace"]["steps"]
     assert result["model"]["model_label"] == "XGBoost"
     assert result["model"]["hardware"]["effective_n_jobs"] >= 1
     assert prediction["model_probs"]["ml"]
     assert "team-strength" in prediction["notes"][0]
+
+
+def test_worldcup_predict_upcoming_returns_future_predictions(tmp_path, monkeypatch):
+    from src.web import mundial_services
+
+    result = mundial_services.predict_upcoming({"limit": 3, "use_ml_model": False})
+
+    assert result["summary"]["requested"] == 3
+    assert result["summary"]["returned"] == 3
+    assert len(result["predictions"]) == 3
+    assert result["table"]["total"] == 3
+    assert set(result["predictions"][0]["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
 
 
 def test_mundial_lineup_payload_adds_visual_positions_and_photos():

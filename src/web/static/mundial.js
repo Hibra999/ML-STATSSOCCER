@@ -37,6 +37,7 @@ function bindEvents() {
   document.getElementById("training-download").addEventListener("click", downloadTrainingDataset);
   document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
   document.getElementById("predict-match-btn").addEventListener("click", runMatchPrediction);
+  document.getElementById("upcoming-predict-btn").addEventListener("click", runUpcomingPredictions);
   document.getElementById("worldcup-model-type").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
 }
 
@@ -78,6 +79,7 @@ async function loadAll(refresh) {
     renderTeams(teams);
     renderFixtureFilters();
     renderFixtures();
+    fillUpcomingGroupFilter();
     renderLineupsSummary(lineups);
     renderPlayers(players);
     renderPlayerFeatures(playerFeatures);
@@ -87,6 +89,7 @@ async function loadAll(refresh) {
     fillPredictSelect();
     await loadSelectedLineup(false);
     await runMatchPrediction();
+    await runUpcomingPredictions();
     await runSimulation();
   } catch (error) {
     showError(error.message);
@@ -104,10 +107,15 @@ function setLoading() {
   document.getElementById("training-summary").innerHTML = loadingHtml("Dataset pendiente");
   document.getElementById("training-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("training-hardware").innerHTML = loadingHtml("Hardware pendiente");
+  document.getElementById("training-etl-flow").innerHTML = loadingHtml("ETL pendiente");
+  document.getElementById("training-metric-cards").innerHTML = loadingHtml("Metricas pendientes");
+  document.getElementById("training-confusion-matrix").innerHTML = loadingHtml("Matriz pendiente");
+  document.getElementById("training-tuning-flow").innerHTML = loadingHtml("Tuning pendiente");
   document.getElementById("training-features").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
   document.getElementById("match-prediction").innerHTML = loadingHtml("Prediccion pendiente");
   document.getElementById("match-prob-breakdown").innerHTML = loadingHtml("Desglose pendiente");
+  document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones pendientes");
 }
 
 function applyDefaultConfig(config) {
@@ -216,6 +224,11 @@ function fillPredictSelect() {
   document.getElementById("predict-fixture").innerHTML = groupFixtures.map((fixture) => `
     <option value="${escapeAttr(fixture.id)}">${escapeHtml(fixture.id)} - ${escapeHtml(fixture.date)} - ${escapeHtml(fixture.label)}</option>
   `).join("");
+}
+
+function fillUpcomingGroupFilter() {
+  const groups = [...new Set(state.fixtures.map((fixture) => fixture.group).filter(Boolean))];
+  document.getElementById("upcoming-group-filter").innerHTML = `<option value="">Todos los grupos</option>${groups.map((group) => `<option value="${escapeAttr(group)}">${escapeHtml(group)}</option>`).join("")}`;
 }
 
 async function loadSelectedLineup(refresh) {
@@ -463,7 +476,7 @@ function renderTrainingStatus(payload) {
   renderTable("training-preview", payload.preview);
   renderTable("training-metrics", metricsTableFromModel(model));
   renderTrainingWarnings(model.warnings || []);
-  renderTable("training-features", featureImportanceTable(model.top_features || []));
+  renderTrainingVisuals(model, payload);
   renderTable("training-model-params", paramsTable(model));
 }
 
@@ -480,8 +493,16 @@ function renderTrainingResult(payload) {
     target_column: payload.effective_target,
   });
   renderModelState(payload.model || {}, payload);
-  renderTable("training-features", featureImportanceTable(((payload.model || {}).top_features || [])));
+  renderTrainingVisuals(payload.model || {}, payload);
   renderTable("training-model-params", paramsTable(payload.model || {}));
+}
+
+function renderTrainingVisuals(model, payload) {
+  renderEtlFlow((model.etl_steps || payload.etl_steps || []));
+  renderMetricCards(model.metrics || payload.metrics || {});
+  renderConfusionMatrix(model.confusion_matrix || payload.confusion_matrix || {});
+  renderTuningFlow(model.tuning_trace || payload.tuning_trace || model.tuning || {});
+  renderFeatureList(model.top_features || []);
 }
 
 function datasetSummaryHtml(payload) {
@@ -596,6 +617,59 @@ function renderTrainingWarnings(warnings) {
   document.getElementById("training-warnings").innerHTML = (warnings || []).map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
 }
 
+function renderEtlFlow(steps) {
+  document.getElementById("training-etl-flow").innerHTML = (steps || []).map((step, index) => `
+    <article class="etl-step ${escapeAttr(step.status || "info")}">
+      <span>${escapeHtml(index + 1)}</span>
+      <div><strong>${escapeHtml(step.name || "")}</strong><small>${escapeHtml(step.detail || "")}</small></div>
+      <b>${escapeHtml(step.count ?? "")}</b>
+    </article>`).join("") || loadingHtml("ETL pendiente");
+}
+
+function renderMetricCards(metrics) {
+  const evalMetrics = (metrics && (metrics.eval || metrics.Eval)) || {};
+  const rows = ["Accuracy", "F1", "Precision", "Recall"].map((key) => predictionCard(key, evalMetrics[key] ?? "-"));
+  document.getElementById("training-metric-cards").innerHTML = rows.join("");
+}
+
+function renderConfusionMatrix(payload) {
+  const labels = payload.labels || [];
+  const matrix = payload.matrix || [];
+  if (!labels.length || !matrix.length) {
+    document.getElementById("training-confusion-matrix").innerHTML = loadingHtml("Matriz pendiente");
+    return;
+  }
+  const maxValue = Math.max(...matrix.flat().map((value) => Number(value) || 0), 1);
+  const header = `<div></div>${labels.map((label) => `<strong>${escapeHtml(label)}</strong>`).join("")}`;
+  const rows = matrix.map((row, rowIndex) => `
+    <strong>${escapeHtml(labels[rowIndex])}</strong>
+    ${row.map((value, colIndex) => {
+      const intensity = Math.max(0.12, Number(value || 0) / maxValue);
+      const correct = rowIndex === colIndex ? " correct" : "";
+      return `<span class="confusion-cell${correct}" style="--intensity:${escapeAttr(intensity)}"><b>${escapeHtml(value)}</b></span>`;
+    }).join("")}
+  `).join("");
+  document.getElementById("training-confusion-matrix").innerHTML = `<div class="confusion-grid" style="grid-template-columns: 120px repeat(${labels.length}, minmax(82px, 1fr))">${header}${rows}</div>`;
+}
+
+function renderTuningFlow(trace) {
+  const steps = trace.steps || [];
+  const head = trace.enabled
+    ? `<div class="tuning-head"><strong>Best ${escapeHtml(trace.objective || "")}: ${escapeHtml(trace.best_value ?? "")}</strong><small>Trial ${escapeHtml(trace.best_trial ?? "")} - ${escapeHtml(trace.trials ?? "")} trials</small></div>`
+    : `<div class="tuning-head"><strong>Fine-tuning desactivado</strong><small>Se usaron parametros manuales/default.</small></div>`;
+  const items = steps.map((step) => `<article class="tuning-step ${escapeAttr(step.status || "info")}"><strong>${escapeHtml(step.name || "")}</strong><small>${escapeHtml(step.detail || "")}</small></article>`).join("");
+  document.getElementById("training-tuning-flow").innerHTML = head + `<div class="tuning-steps">${items}</div>`;
+}
+
+function renderFeatureList(features) {
+  document.getElementById("training-features").innerHTML = (features || []).slice(0, 10).map((item) => `
+    <div class="feature-bar">
+      <span>${escapeHtml(item.feature || "")}</span>
+      <div><i style="width:${escapeAttr(Math.min(100, Math.max(2, Number(item.importance || 0) * 100)))}%"></i></div>
+      <b>${escapeHtml(item.importance ?? "")}</b>
+    </div>`).join("") || loadingHtml("Features pendientes");
+}
+
 function featureImportanceTable(features) {
   const rows = (features || []).map((item) => ({ Feature: item.feature, Importancia: item.importance }));
   return { columns: rows.length ? ["Feature", "Importancia"] : [], rows, total: rows.length };
@@ -610,6 +684,48 @@ function paramsTable(model) {
     rows.push({ Parametro: "tuning.best_trial", Valor: tuning.best_trial ?? "" });
   }
   return { columns: rows.length ? ["Parametro", "Valor"] : [], rows, total: rows.length };
+}
+
+async function runUpcomingPredictions() {
+  const limit = Number(document.getElementById("upcoming-predict-limit").value || 8);
+  const group = document.getElementById("upcoming-group-filter").value || "";
+  document.getElementById("upcoming-summary").textContent = "Calculando próximos partidos...";
+  try {
+    const result = await api("/api/mundial/predict-upcoming", jsonOptions({ ...simulationPayload(), limit, group }));
+    renderUpcomingPredictions(result);
+  } catch (error) {
+    document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones no disponibles");
+    showError(error.message);
+  }
+}
+
+function renderUpcomingPredictions(result) {
+  const summary = result.summary || {};
+  document.getElementById("upcoming-summary").textContent = `${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - ML ${summary.use_ml_model ? "activo" : "off"}`;
+  document.getElementById("upcoming-predictions").innerHTML = (result.predictions || []).map((prediction) => {
+    const fixture = prediction.fixture || {};
+    const probs = prediction.probabilities || {};
+    return `<article class="upcoming-card">
+      <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
+      <div class="upcoming-match">
+        <strong>${escapeHtml(fixture.home || "")}</strong>
+        <span>vs</span>
+        <strong>${escapeHtml(fixture.away || "")}</strong>
+      </div>
+      <div class="prob-strip">
+        <span>1 <b>${escapeHtml(probs.home ?? "")}%</b></span>
+        <span>X <b>${escapeHtml(probs.draw ?? "")}%</b></span>
+        <span>2 <b>${escapeHtml(probs.away ?? "")}%</b></span>
+      </div>
+      <div class="prob-strip muted">
+        <span>O2.5 <b>${escapeHtml(probs.over25 ?? "")}%</b></span>
+        <span>U2.5 <b>${escapeHtml(probs.under25 ?? "")}%</b></span>
+        <span>Score <b>${escapeHtml(prediction.modal_score || "")}</b></span>
+      </div>
+      <small>${escapeHtml((prediction.notes || []).join(" - "))}</small>
+    </article>`;
+  }).join("") || loadingHtml("Sin fixtures futuros");
+  renderTable("upcoming-predictions-table", result.table);
 }
 
 function metricsTableFromModel(model) {

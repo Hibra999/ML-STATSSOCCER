@@ -18,6 +18,7 @@
       <button class="nav-pill" data-section="fixtures">Fixtures</button>
       <button class="nav-pill" data-section="alineaciones">11 iniciales</button>
       <button class="nav-pill" data-section="modelo">Modelo</button>
+      <button class="nav-pill" data-section="predicciones">Predicciones</button>
       <button class="nav-pill" data-section="entrenamiento">Entrenamiento</button>
       <button class="nav-pill" data-section="datos">Datos</button>
     </nav>
@@ -152,6 +153,27 @@
       </div>
     </section>
 
+    <section id="predicciones" class="section-block">
+      <div class="section-heading">
+        <h2>Próximos partidos</h2>
+        <small id="upcoming-summary">Modelo entrenado si esta disponible</small>
+      </div>
+      <div class="prediction-dock clean-dock">
+        <div>
+          <h3>Predecir futuros N</h3>
+          <small>1X2, Over/Under 2.5 y marcador modal por fixture</small>
+        </div>
+        <label>N partidos<input id="upcoming-predict-limit" type="number" min="1" max="72" step="1" value="8"></label>
+        <select id="upcoming-group-filter"></select>
+        <button id="upcoming-predict-btn" class="primary" type="button">Predecir próximos</button>
+      </div>
+      <div id="upcoming-predictions" class="upcoming-grid"></div>
+      <details class="data-drawer">
+        <summary>Tabla próximos partidos</summary>
+        <div id="upcoming-predictions-table"></div>
+      </details>
+    </section>
+
     <section id="entrenamiento" class="section-block">
       <div class="section-heading">
         <h2>Entrenamiento Mundial</h2>
@@ -222,16 +244,28 @@
           <div id="training-warnings" class="status-strip"></div>
         </article>
       </div>
-      <details class="data-drawer" open>
-        <summary>Metricas train/test</summary>
-        <div id="training-metrics"></div>
-      </details>
-      <details class="data-drawer" open>
-        <summary>Features importantes</summary>
-        <div id="training-features"></div>
-      </details>
+      <div class="training-visual-grid">
+        <article class="visual-panel">
+          <header><h3>Proceso ETL</h3><small>Ingesta, limpieza y anti-leakage</small></header>
+          <div id="training-etl-flow" class="etl-flow"></div>
+        </article>
+        <article class="visual-panel">
+          <header><h3>Evaluacion</h3><small>Metricas y matriz de confusion</small></header>
+          <div id="training-metric-cards" class="metric-card-grid"></div>
+          <div id="training-confusion-matrix" class="confusion-wrap"></div>
+        </article>
+        <article class="visual-panel">
+          <header><h3>Fine-tuning</h3><small>Optuna y mejores parametros</small></header>
+          <div id="training-tuning-flow" class="tuning-flow"></div>
+        </article>
+        <article class="visual-panel">
+          <header><h3>Features</h3><small>Importancia y parametros finales</small></header>
+          <div id="training-features"></div>
+        </article>
+      </div>
       <details class="data-drawer">
-        <summary>Parametros finales del modelo</summary>
+        <summary>Metricas y parametros en tabla</summary>
+        <div id="training-metrics"></div>
         <div id="training-model-params"></div>
       </details>
       <details class="data-drawer">
