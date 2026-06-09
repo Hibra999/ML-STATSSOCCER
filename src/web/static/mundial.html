@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260609-1">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260609-2">
 </head>
 <body>
   <header class="topbar">
@@ -27,7 +27,7 @@
   <main>
     <section id="alert" class="alert hidden"></section>
 
-    <section id="resumen" class="hero section-block">
+    <section id="resumen" class="hero section-block worldcup-view active">
       <div class="hero-copy">
         <span class="eyebrow">Apartado independiente</span>
         <h1>Mundial 2026</h1>
@@ -42,32 +42,7 @@
       </div>
     </section>
 
-    <section class="control-dock section-block">
-      <div class="control-title">
-        <strong>Fine-tuning de simulacion</strong>
-        <small id="model-source">Elo + Poisson Monte Carlo</small>
-      </div>
-      <div class="control-grid">
-        <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
-        <label>Seed<input id="sim-seed" type="number" value="2026"></label>
-        <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
-        <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
-        <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
-        <label>Max goles<input id="sim-max-goals" type="number" min="6" max="14" step="1" value="10"></label>
-        <label>Peso 11<input id="sim-lineup-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
-        <label>Peso features<input id="sim-player-feature-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
-        <label>Peso Kaggle<input id="sim-ml-weight" type="number" min="0" max="1" step="0.05" value="0.5"></label>
-        <label class="check"><input id="sim-use-lineups" type="checkbox"> Usar 11</label>
-        <label class="check"><input id="sim-use-player-features" type="checkbox"> Features XI</label>
-        <label class="check"><input id="sim-use-ml-model" type="checkbox"> Kaggle ML</label>
-      </div>
-      <div class="actions-row">
-        <button id="simulate-btn" class="primary" type="button">Simular</button>
-        <button id="refresh-btn" type="button">Actualizar datos</button>
-      </div>
-    </section>
-
-    <section id="grupos" class="section-block">
+    <section id="grupos" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Grupos</h2>
         <small id="groups-source"></small>
@@ -80,7 +55,7 @@
       <div id="teams-grid" class="teams-grid"></div>
     </section>
 
-    <section id="fixtures" class="section-block">
+    <section id="fixtures" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Fixtures</h2>
         <div class="filters">
@@ -91,7 +66,7 @@
       <div id="fixtures-list" class="fixtures-list"></div>
     </section>
 
-    <section id="alineaciones" class="section-block">
+    <section id="alineaciones" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>11 iniciales</h2>
         <small id="lineup-source"></small>
@@ -118,10 +93,43 @@
       <div id="lineups-summary" class="lineups-summary"></div>
     </section>
 
-    <section id="modelo" class="section-block">
+    <section id="modelo" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Monte Carlo</h2>
         <small id="simulation-summary"></small>
+      </div>
+      <div class="model-management-grid">
+        <article class="visual-panel compact-panel">
+          <header><h3>Modelo activo</h3><small>Catálogo local Mundial</small></header>
+          <div class="model-loader">
+            <select id="model-active-select"></select>
+            <button id="model-load" class="primary" type="button">Cargar modelo</button>
+            <button id="model-delete" type="button">Borrar</button>
+          </div>
+          <div id="active-model-state" class="model-state-grid"></div>
+          <div id="models-list" class="models-list"></div>
+        </article>
+        <article class="visual-panel compact-panel">
+          <header><h3>Fine-tuning de simulación</h3><small id="model-source">Elo + Poisson Monte Carlo</small></header>
+          <div class="control-grid compact-controls">
+            <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
+            <label>Seed<input id="sim-seed" type="number" value="2026"></label>
+            <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
+            <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
+            <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
+            <label>Max goles<input id="sim-max-goals" type="number" min="6" max="14" step="1" value="10"></label>
+            <label>Peso 11<input id="sim-lineup-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
+            <label>Peso features<input id="sim-player-feature-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
+            <label>Peso Kaggle<input id="sim-ml-weight" type="number" min="0" max="1" step="0.05" value="0.5"></label>
+            <label class="check"><input id="sim-use-lineups" type="checkbox"> Usar 11</label>
+            <label class="check"><input id="sim-use-player-features" type="checkbox"> Features XI</label>
+            <label class="check"><input id="sim-use-ml-model" type="checkbox"> Kaggle ML</label>
+          </div>
+          <div class="actions-row">
+            <button id="simulate-btn" class="primary" type="button">Simular</button>
+            <button id="refresh-btn" type="button">Actualizar datos</button>
+          </div>
+        </article>
       </div>
       <div class="prediction-dock">
         <div>
@@ -153,7 +161,7 @@
       </div>
     </section>
 
-    <section id="predicciones" class="section-block">
+    <section id="predicciones" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Próximos partidos</h2>
         <small id="upcoming-summary">Modelo entrenado si esta disponible</small>
@@ -164,6 +172,7 @@
           <small>1X2, Over/Under 2.5 y marcador modal por fixture</small>
         </div>
         <label>N partidos<input id="upcoming-predict-limit" type="number" min="1" max="72" step="1" value="8"></label>
+        <select id="upcoming-model-select"></select>
         <select id="upcoming-group-filter"></select>
         <button id="upcoming-predict-btn" class="primary" type="button">Predecir próximos</button>
       </div>
@@ -174,7 +183,7 @@
       </details>
     </section>
 
-    <section id="entrenamiento" class="section-block">
+    <section id="entrenamiento" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Entrenamiento Mundial</h2>
         <small id="training-source">Kaggle + Elo/Poisson</small>
@@ -201,6 +210,7 @@
         <article class="flow-step">
           <header><span>3</span><div><strong>Modelo</strong><small>Boosting del proyecto principal</small></div></header>
           <div class="control-grid compact-controls">
+            <label>Nombre modelo<input id="worldcup-model-id" placeholder="mundial-xgb-result"></label>
             <label>Modelo<select id="worldcup-model-type"></select></label>
             <label>Target<select id="worldcup-target"><option value="result">Resultado 1/X/2</option><option value="over_under_25">Over/Under 2.5</option></select></label>
             <label>N estimadores<input id="worldcup-n-estimators" type="number" min="1" step="1"></label>
@@ -274,7 +284,7 @@
       </details>
     </section>
 
-    <section id="datos" class="section-block">
+    <section id="datos" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Datos y procedimiento</h2>
         <button id="players-refresh" type="button">Actualizar jugadores</button>
@@ -301,6 +311,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260609-1"></script>
+  <script src="/static/mundial.js?v=20260609-2"></script>
 </body>
 </html>

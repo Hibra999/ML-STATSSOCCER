@@ -63,6 +63,10 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/training/train" in paths
     assert "/api/mundial/training/status" in paths
     assert "/api/mundial/training/options" in paths
+    assert "/api/mundial/models" in paths
+    assert "/api/mundial/models/train" in paths
+    assert "/api/mundial/models/select" in paths
+    assert "/api/mundial/models/{model_id}" in paths
     assert "/api/mundial/predict-match" in paths
     assert "/api/mundial/predict-upcoming" in paths
     assert "/api/mundial/procedure" in paths
@@ -151,7 +155,14 @@ def test_mundial_ui_is_standalone_and_personalizable():
     app_source = open("src/web/static/mundial.js", "r", encoding="utf-8").read()
 
     assert "Mundial 2026" in html_source
+    assert "worldcup-view active" in html_source
+    assert "scrollIntoView" not in app_source
+    assert "switchWorldcupView" in app_source
     assert "data-section=\"predicciones\"" in html_source
+    assert "model-active-select" in html_source
+    assert "model-load" in html_source
+    assert "worldcup-model-id" in html_source
+    assert "upcoming-model-select" in html_source
     assert "sim-history-weight" in html_source
     assert "sim-recency-weight" in html_source
     assert "sim-host-advantage" in html_source
@@ -178,7 +189,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
     assert "/api/mundial/player-features" in app_source
-    assert "/api/mundial/training/train" in app_source
+    assert "/api/mundial/models" in app_source
+    assert "/api/mundial/models/train" in app_source
+    assert "/api/mundial/models/select" in app_source
     assert "trainingPayload" in app_source
     assert "predictionBreakdownTable" in app_source
     assert "paramsTable" in app_source
@@ -520,15 +533,17 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     ]).to_csv(training.KAGGLE_ROOT / "teams.csv", index=False)
 
     status = training.dataset_status()
-    result = training.train_hybrid_model(fallback_tournament_2026(), payload={"seed": 7, "n_estimators": 20})
+    result = training.train_hybrid_model(fallback_tournament_2026(), payload={"seed": 7, "n_estimators": 20, "model_id": "mex-test"})
     model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "South Africa", "Canada"])
     prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
+    catalog = training.list_worldcup_models()
 
     assert status["trainable"] is True
     assert status["test_rows"] == 2
     assert status["prediction_rows"] == 0
     assert status["eval_strategy"] == "test_file"
     assert result["model"]["trained"] is True
+    assert result["model"]["model_id"] == "mex-test"
     assert result["model"]["model_type"] == "xgboost"
     assert result["model"]["eval_strategy"] == "test_file"
     assert result["model"]["confusion_matrix"]["matrix"]
@@ -539,11 +554,14 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert prediction["fixture"]["home"] == "Mexico"
     assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
     assert prediction["model_probs"]["ml_weight"] == 0.5
+    assert prediction["model_probs"]["model_id"] == "mex-test"
     assert set(prediction["model_probs"]) >= {"poisson", "poisson_totals", "ml", "over_under_ml"}
+    assert catalog["active_model_id"] == "mex-test"
+    assert any(item["model_id"] == "mex-test" for item in catalog["models"])
 
     over_result = training.train_hybrid_model(
         fallback_tournament_2026(),
-        payload={"seed": 7, "n_estimators": 5, "training_target": "over_under_25"},
+        payload={"seed": 7, "n_estimators": 5, "training_target": "over_under_25", "model_id": "mex-uo"},
     )
     over_prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
 

@@ -36,8 +36,13 @@ from src.worldcup.lanus_provider import (
 )
 from src.worldcup.training import (
     dataset_status,
+    delete_worldcup_model,
     download_kaggle_dataset,
+    list_worldcup_models,
     predict_match_payload,
+    predict_ml_outputs,
+    read_model_metadata,
+    set_active_worldcup_model,
     training_options as worldcup_training_options,
     train_hybrid_model,
 )
@@ -59,6 +64,76 @@ DEFAULT_CONFIG = {
     "max_goals": 10,
     "refresh": False,
 }
+
+
+class BlendedWorldCupModel:
+    def __init__(self, base_model: WorldCupModel, model_id: str = "", ml_weight: float = 0.5):
+        self.base_model = base_model
+        self.model_id = str(model_id or "")
+        self.ml_weight = _clamp_float(ml_weight, 0.0, 1.0)
+
+    def profile(self, team: str):
+        return self.base_model.profile(team)
+
+    def adjusted(self, rating_adjustments: Dict[str, float]):
+        return BlendedWorldCupModel(
+            base_model=self.base_model.adjusted(rating_adjustments),
+            model_id=self.model_id,
+            ml_weight=self.ml_weight,
+        )
+
+    def expected_goals(self, team1: str, team2: str):
+        return self.base_model.expected_goals(team1, team2)
+
+    def match_probabilities(self, team1: str, team2: str, max_goals: int | None = None) -> Dict[str, float]:
+        base = self.base_model.match_probabilities(team1, team2, max_goals=max_goals)
+        ml = predict_ml_outputs(self.base_model, team1, team2, model_id=self.model_id)
+        result_ml = ml.get("result", {})
+        if not result_ml:
+            return base
+        weight = self.ml_weight
+        output = dict(base)
+        output["home"] = base["home"] * (1.0 - weight) + result_ml.get("H", base["home"]) * weight
+        output["draw"] = base["draw"] * (1.0 - weight) + result_ml.get("D", base["draw"]) * weight
+        output["away"] = base["away"] * (1.0 - weight) + result_ml.get("A", base["away"]) * weight
+        total = max(output["home"] + output["draw"] + output["away"], 1e-9)
+        output["home"] /= total
+        output["draw"] /= total
+        output["away"] /= total
+        totals_ml = ml.get("over_under_25", {})
+        if totals_ml:
+            output["over25"] = base["over25"] * (1.0 - weight) + totals_ml.get("over25", base["over25"]) * weight
+            output["under25"] = base["under25"] * (1.0 - weight) + totals_ml.get("under25", base["under25"]) * weight
+            total_goals = max(output["over25"] + output["under25"], 1e-9)
+            output["over25"] /= total_goals
+            output["under25"] /= total_goals
+        return output
+
+    def sample_score(self, team1: str, team2: str, rng: np.random.Generator):
+        probabilities = self.match_probabilities(team1, team2)
+        outcome = rng.choice(["home", "draw", "away"], p=[probabilities["home"], probabilities["draw"], probabilities["away"]])
+        goals1, goals2 = self.base_model.sample_score(team1, team2, rng)
+        if outcome == "home" and goals1 <= goals2:
+            goals1 = goals2 + 1
+        elif outcome == "away" and goals2 <= goals1:
+            goals2 = goals1 + 1
+        elif outcome == "draw":
+            draw_goals = int(round((goals1 + goals2) / 2.0))
+            goals1 = draw_goals
+            goals2 = draw_goals
+        return goals1, goals2
+
+    def sample_knockout_winner(self, team1: str, team2: str, rng: np.random.Generator):
+        goals1, goals2 = self.sample_score(team1, team2, rng)
+        if goals1 > goals2:
+            return team1, team2, goals1, goals2
+        if goals2 > goals1:
+            return team2, team1, goals1, goals2
+        probabilities = self.match_probabilities(team1, team2)
+        win_share = probabilities["home"] / max(probabilities["home"] + probabilities["away"], 1e-9)
+        if rng.random() <= win_share:
+            return team1, team2, goals1, goals2
+        return team2, team1, goals1, goals2
 COUNTRY_CODES = {
     "Algeria": "dz",
     "Argentina": "ar",
@@ -349,10 +424,29 @@ def training_options() -> Dict[str, Any]:
     return worldcup_training_options()
 
 
+def models_catalog() -> Dict[str, Any]:
+    return list_worldcup_models()
+
+
+def select_model(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    model = set_active_worldcup_model(payload.get("model_id") or payload.get("id"))
+    catalog = list_worldcup_models()
+    return {
+        "selected": model,
+        **catalog,
+    }
+
+
+def delete_model(model_id: str) -> Dict[str, Any]:
+    return delete_worldcup_model(model_id)
+
+
 def training_train(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     tournament, _ = load_tournament_2026(refresh=bool((payload or {}).get("refresh_fixtures", False)))
     result = train_hybrid_model(tournament=tournament, payload=payload or {})
     result["metrics_table"] = table_payload(metrics_dataframe(result.get("metrics", {})), page=1, page_size=10)
+    result["models"] = list_worldcup_models()
     return result
 
 
@@ -377,9 +471,11 @@ def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         away=payload.get("away"),
         use_ml_model=bool(config["use_ml_model"]),
         ml_weight=float(config["ml_weight"]),
+        model_id=config["model_id"],
     )
     result["fixture_source"] = fixture_source
     result["history_source"] = history_source
+    result["active_model"] = read_model_metadata(model_id=config["model_id"] or None)
     return result
 
 
@@ -409,6 +505,7 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
             fixture_id=fixture.get("No."),
             use_ml_model=bool(config["use_ml_model"]),
             ml_weight=float(config["ml_weight"]),
+            model_id=config["model_id"],
         )
         predictions.append(result)
         rows.append(upcoming_prediction_row(result))
@@ -422,6 +519,8 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "fixture_source": fixture_source,
             "history_source": history_source,
             "use_ml_model": config["use_ml_model"],
+            "model_id": config["model_id"],
+            "active_model": read_model_metadata(model_id=config["model_id"] or None),
         },
     }
 
@@ -489,6 +588,9 @@ def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
         adjustments, feature_notes = player_feature_rating_adjustments(tournament, weight=config["player_feature_weight"])
         if adjustments:
             model = model.adjusted(adjustments)
+    active_model = read_model_metadata(model_id=config["model_id"] or None)
+    if config["use_ml_model"] and active_model.get("trained"):
+        model = BlendedWorldCupModel(model, model_id=config["model_id"], ml_weight=float(config["ml_weight"]))
     result = simulate_worldcup(
         tournament=tournament,
         model=model,
@@ -504,6 +606,8 @@ def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
             "use_lineups": config["use_lineups"],
             "use_player_features": config["use_player_features"],
             "use_ml_model": config["use_ml_model"],
+            "model_id": config["model_id"],
+            "active_model": active_model,
             "lineup_notes": lineup_notes,
             "player_feature_notes": feature_notes,
             "anti_leakage": [
@@ -599,6 +703,7 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "host_advantage": _clamp_float(payload.get("host_advantage", DEFAULT_CONFIG["host_advantage"]), 0.0, 120.0),
         "max_goals": int(_clamp_int(payload.get("max_goals", DEFAULT_CONFIG["max_goals"]), 6, 14)),
         "refresh": bool(payload.get("refresh", DEFAULT_CONFIG["refresh"])),
+        "model_id": str(payload.get("model_id") or "").strip(),
     }
 
 

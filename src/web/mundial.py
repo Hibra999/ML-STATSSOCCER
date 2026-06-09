@@ -125,6 +125,22 @@ def create_mundial_app() -> FastAPI:
     def training_options():
         return _wrap(services.training_options)
 
+    @app.get("/api/mundial/models")
+    def models_catalog():
+        return _wrap(services.models_catalog)
+
+    @app.post("/api/mundial/models/train")
+    def models_train(payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.training_train, payload)
+
+    @app.post("/api/mundial/models/select")
+    def models_select(payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.select_model, payload)
+
+    @app.delete("/api/mundial/models/{model_id}")
+    def models_delete(model_id: str):
+        return _wrap(services.delete_model, model_id)
+
     @app.post("/api/mundial/predict-match")
     def predict_match(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.predict_match, payload)

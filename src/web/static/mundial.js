@@ -6,6 +6,8 @@ const state = {
   players: [],
   lineups: [],
   playerFeatures: [],
+  models: [],
+  activeModelId: "",
   training: null,
   trainingOptions: null,
   teamAssets: new Map(),
@@ -20,10 +22,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function bindEvents() {
   document.querySelectorAll("[data-section]").forEach((button) => {
-    button.addEventListener("click", () => scrollToSection(button.dataset.section));
+    button.addEventListener("click", () => switchWorldcupView(button.dataset.section));
   });
   document.getElementById("refresh-btn").addEventListener("click", () => loadAll(true));
   document.getElementById("simulate-btn").addEventListener("click", runSimulation);
+  document.getElementById("model-load").addEventListener("click", loadSelectedModel);
+  document.getElementById("model-delete").addEventListener("click", deleteSelectedModel);
+  document.getElementById("model-active-select").addEventListener("change", syncModelSelects);
+  document.getElementById("upcoming-model-select").addEventListener("change", syncModelSelects);
   document.getElementById("fixture-group-filter").addEventListener("change", renderFixtures);
   document.getElementById("fixture-search").addEventListener("input", renderFixtures);
   document.getElementById("lineup-load").addEventListener("click", () => loadSelectedLineup(false));
@@ -39,6 +45,8 @@ function bindEvents() {
   document.getElementById("predict-match-btn").addEventListener("click", runMatchPrediction);
   document.getElementById("upcoming-predict-btn").addEventListener("click", runUpcomingPredictions);
   document.getElementById("worldcup-model-type").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
+  document.getElementById("worldcup-target").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
+  document.getElementById("worldcup-model-id").addEventListener("input", (event) => { event.target.dataset.autofilled = "false"; });
 }
 
 async function api(path, options = {}) {
@@ -52,7 +60,7 @@ async function loadAll(refresh) {
   clearAlert();
   setLoading();
   try {
-    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, training, procedure] = await Promise.all([
+    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, training, models, procedure] = await Promise.all([
       api(`/api/mundial/overview?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/groups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/fixtures?refresh=${refresh ? "true" : "false"}`),
@@ -61,6 +69,7 @@ async function loadAll(refresh) {
       api(`/api/mundial/players?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/player-features?refresh=${refresh ? "true" : "false"}`),
       api("/api/mundial/training/status"),
+      api("/api/mundial/models"),
       api("/api/mundial/procedure"),
     ]);
     state.overview = overview;
@@ -71,6 +80,8 @@ async function loadAll(refresh) {
     state.players = players.players || [];
     state.playerFeatures = playerFeatures.rows || [];
     state.training = training;
+    state.models = models.models || [];
+    state.activeModelId = models.active_model_id || "";
     state.trainingOptions = training.options || null;
     rebuildTeamAssets();
     applyDefaultConfig(overview.default_config || {});
@@ -84,13 +95,10 @@ async function loadAll(refresh) {
     renderPlayers(players);
     renderPlayerFeatures(playerFeatures);
     renderTrainingStatus(training);
+    renderModelsCatalog(models);
     renderProcedure(procedure);
     fillLineupSelect();
     fillPredictSelect();
-    await loadSelectedLineup(false);
-    await runMatchPrediction();
-    await runUpcomingPredictions();
-    await runSimulation();
   } catch (error) {
     showError(error.message);
   }
@@ -116,6 +124,8 @@ function setLoading() {
   document.getElementById("match-prediction").innerHTML = loadingHtml("Prediccion pendiente");
   document.getElementById("match-prob-breakdown").innerHTML = loadingHtml("Desglose pendiente");
   document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones pendientes");
+  document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
+  document.getElementById("models-list").innerHTML = loadingHtml("Modelos pendientes");
 }
 
 function applyDefaultConfig(config) {
@@ -229,6 +239,92 @@ function fillPredictSelect() {
 function fillUpcomingGroupFilter() {
   const groups = [...new Set(state.fixtures.map((fixture) => fixture.group).filter(Boolean))];
   document.getElementById("upcoming-group-filter").innerHTML = `<option value="">Todos los grupos</option>${groups.map((group) => `<option value="${escapeAttr(group)}">${escapeHtml(group)}</option>`).join("")}`;
+}
+
+async function loadModelsCatalog() {
+  const result = await api("/api/mundial/models");
+  state.models = result.models || [];
+  state.activeModelId = result.active_model_id || "";
+  renderModelsCatalog(result);
+  return result;
+}
+
+function renderModelsCatalog(payload) {
+  const models = (payload && payload.models) || state.models || [];
+  const activeId = (payload && payload.active_model_id) || state.activeModelId || "";
+  state.models = models;
+  state.activeModelId = activeId;
+  const options = models.map((model) => `<option value="${escapeAttr(model.model_id)}">${escapeHtml(model.model_name || model.model_id)}${model.active ? " - activo" : ""}</option>`).join("");
+  const selectHtml = options || `<option value="">Sin modelos entrenados</option>`;
+  ["model-active-select", "upcoming-model-select"].forEach((id) => {
+    const select = document.getElementById(id);
+    if (!select) return;
+    select.innerHTML = selectHtml;
+    select.value = activeId || (models[0] || {}).model_id || "";
+  });
+  const active = models.find((model) => model.model_id === activeId) || models[0] || {};
+  renderActiveModel(active);
+  document.getElementById("models-list").innerHTML = models.map((model) => `
+    <article class="model-row ${model.active ? "active" : ""}">
+      <div><strong>${escapeHtml(model.model_name || model.model_id)}</strong><small>${escapeHtml(model.model_id)} - ${escapeHtml(model.model_label || model.model_type || "")}</small></div>
+      <span>${escapeHtml(model.effective_target || "-")}</span>
+      <b>${model.active ? "Activo" : ""}</b>
+    </article>`).join("") || loadingHtml("Entrena tu primer modelo Mundial");
+}
+
+function renderActiveModel(model) {
+  document.getElementById("active-model-state").innerHTML = [
+    predictionCard("Activo", model && model.trained ? (model.model_name || model.model_id) : "Sin modelo"),
+    predictionCard("Tipo", (model && (model.model_label || model.model_type)) || "-"),
+    predictionCard("Target", (model && model.effective_target) || "-"),
+    predictionCard("Eval", evalStrategyLabel(model && model.eval_strategy)),
+  ].join("");
+}
+
+function syncModelSelects(event) {
+  const value = event && event.target ? event.target.value : selectedModelId();
+  ["model-active-select", "upcoming-model-select"].forEach((id) => {
+    const select = document.getElementById(id);
+    if (select && value) select.value = value;
+  });
+}
+
+function selectedModelId() {
+  const activeSelect = document.getElementById("model-active-select");
+  const upcomingSelect = document.getElementById("upcoming-model-select");
+  return (activeSelect && activeSelect.value) || (upcomingSelect && upcomingSelect.value) || state.activeModelId || "";
+}
+
+async function loadSelectedModel() {
+  clearAlert();
+  const modelId = selectedModelId();
+  if (!modelId) {
+    showError("Entrena o selecciona un modelo Mundial primero.");
+    return;
+  }
+  try {
+    const result = await api("/api/mundial/models/select", jsonOptions({ model_id: modelId }));
+    renderModelsCatalog(result);
+    document.getElementById("sim-use-ml-model").checked = true;
+    document.getElementById("simulation-summary").textContent = `Modelo activo: ${result.selected.model_name || result.selected.model_id}`;
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function deleteSelectedModel() {
+  clearAlert();
+  const modelId = selectedModelId();
+  if (!modelId) {
+    showError("Selecciona un modelo para borrar.");
+    return;
+  }
+  try {
+    const result = await api(`/api/mundial/models/${encodeURIComponent(modelId)}`, { method: "DELETE" });
+    renderModelsCatalog(result);
+  } catch (error) {
+    showError(error.message);
+  }
 }
 
 async function loadSelectedLineup(refresh) {
@@ -452,9 +548,11 @@ async function trainWorldCupModel() {
   clearAlert();
   document.getElementById("training-status").textContent = "Entrenando modelo Mundial...";
   try {
-    const result = await api("/api/mundial/training/train", jsonOptions(trainingPayload()));
+    const result = await api("/api/mundial/models/train", jsonOptions(trainingPayload()));
     renderTrainingResult(result);
     await loadTrainingStatus();
+    if (result.models) renderModelsCatalog(result.models);
+    else await loadModelsCatalog();
     document.getElementById("sim-use-ml-model").checked = true;
     await runMatchPrediction();
   } catch (error) {
@@ -550,6 +648,12 @@ function renderTrainingControls(options, model) {
   modelSelect.value = selectedModel;
   const target = model.requested_target || (options.defaults || {}).training_target || "result";
   document.getElementById("worldcup-target").value = target;
+  const modelId = model.model_id || autoWorldcupModelId(selectedModel, target);
+  const modelIdInput = document.getElementById("worldcup-model-id");
+  if (modelIdInput && (!modelIdInput.value || modelIdInput.dataset.autofilled !== "false")) {
+    modelIdInput.value = modelId;
+    modelIdInput.dataset.autofilled = "true";
+  }
   document.getElementById("worldcup-device").value = (model.hardware || {}).requested_device || (options.defaults || {}).device || "auto";
   document.getElementById("worldcup-n-jobs").value = (model.hardware || {}).n_jobs ?? (options.defaults || {}).n_jobs ?? -1;
   if (!state.trainingControlsApplied) {
@@ -594,6 +698,18 @@ function applyModelDefaults(modelKey, force) {
   const natural = document.getElementById("worldcup-natural-gradient");
   natural.disabled = defaults.natural_gradient === undefined;
   natural.checked = Boolean(defaults.natural_gradient);
+  const target = document.getElementById("worldcup-target").value || "result";
+  const modelIdInput = document.getElementById("worldcup-model-id");
+  if (modelIdInput && (force || !modelIdInput.value || modelIdInput.dataset.autofilled !== "false")) {
+    modelIdInput.value = autoWorldcupModelId(modelKey, target);
+    modelIdInput.dataset.autofilled = "true";
+  }
+}
+
+function autoWorldcupModelId(modelKey, target) {
+  const shortModel = { xgboost: "xgb", lightgbm: "lgbm", catboost: "cat", ngboost: "ngb" }[modelKey] || modelKey || "model";
+  const shortTarget = target === "over_under_25" ? "uo25" : "result";
+  return `mundial-${shortModel}-${shortTarget}`;
 }
 
 function renderHardware(hardware) {
@@ -689,9 +805,10 @@ function paramsTable(model) {
 async function runUpcomingPredictions() {
   const limit = Number(document.getElementById("upcoming-predict-limit").value || 8);
   const group = document.getElementById("upcoming-group-filter").value || "";
+  const modelId = document.getElementById("upcoming-model-select").value || selectedModelId();
   document.getElementById("upcoming-summary").textContent = "Calculando próximos partidos...";
   try {
-    const result = await api("/api/mundial/predict-upcoming", jsonOptions({ ...simulationPayload(), limit, group }));
+    const result = await api("/api/mundial/predict-upcoming", jsonOptions({ ...simulationPayload(), model_id: modelId, limit, group }));
     renderUpcomingPredictions(result);
   } catch (error) {
     document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones no disponibles");
@@ -835,6 +952,8 @@ function predictionCard(label, value) {
 function trainingPayload() {
   const payload = {
     ...simulationPayload(),
+    model_id: document.getElementById("worldcup-model-id").value || "",
+    model_name: document.getElementById("worldcup-model-id").value || "",
     model_type: document.getElementById("worldcup-model-type").value || "xgboost",
     training_target: document.getElementById("worldcup-target").value || "result",
     device: document.getElementById("worldcup-device").value || "auto",
@@ -870,6 +989,7 @@ function trainingPayload() {
 
 function simulationPayload() {
   return {
+    model_id: selectedModelId(),
     iterations: Number(document.getElementById("sim-iterations").value || 5000),
     seed: Number(document.getElementById("sim-seed").value || 2026),
     history_weight: Number(document.getElementById("sim-history-weight").value || 1),
@@ -974,9 +1094,13 @@ function jsonOptions(payload) {
   return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) };
 }
 
-function scrollToSection(id) {
+function switchWorldcupView(id) {
   document.querySelectorAll(".nav-pill").forEach((button) => button.classList.toggle("active", button.dataset.section === id));
-  document.getElementById(id).scrollIntoView({ behavior: "smooth", block: "start" });
+  document.querySelectorAll(".worldcup-view").forEach((view) => view.classList.toggle("active", view.id === id));
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  if (id === "alineaciones" && state.fixtures.length) loadSelectedLineup(false);
+  if (id === "modelo" && state.models.length) syncModelSelects();
+  if (id === "predicciones" && state.fixtures.length) fillUpcomingGroupFilter();
 }
 
 function loadingHtml(text) {

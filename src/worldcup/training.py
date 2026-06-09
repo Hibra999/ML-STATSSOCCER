@@ -6,6 +6,7 @@ import pickle
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -24,6 +25,8 @@ KAGGLE_ROOT = Path("storage") / "worldcup" / "kaggle"
 WORLD_CUP_MODELS_ROOT = Path("storage") / "worldcup" / "models"
 HYBRID_MODEL_FILE = WORLD_CUP_MODELS_ROOT / "hybrid_worldcup_model.pkl"
 HYBRID_MODEL_META_FILE = WORLD_CUP_MODELS_ROOT / "hybrid_worldcup_model.json"
+LEGACY_MODEL_ID = "legacy-hybrid"
+ACTIVE_MODEL_STATE_FILE = "active_model.json"
 BASE_FEATURE_COLUMNS = [
     "rating_home",
     "rating_away",
@@ -201,6 +204,7 @@ def dataset_status() -> Dict[str, Any]:
 def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload = payload or {}
     train_config = training_config(payload)
+    model_id = train_config["model_id"]
     files = list(discover_dataset_files(KAGGLE_ROOT))
     if not files:
         raise WorldCupTrainingError("No hay dataset Kaggle local. Primero descarga el dataset.")
@@ -306,6 +310,8 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "target_column": normalized["target_column"],
         "model_type": train_config["model_type"],
         "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
+        "model_id": model_id,
+        "model_name": train_config["model_name"],
         "model_params": train_config["params"],
         "tuning": tuned,
         "tuning_trace": tuning_trace(tuned),
@@ -314,7 +320,7 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "warnings": [warning for warning in [target_warning, *fit_result.get("warnings", [])] if warning],
         "top_features": top_feature_importances(clf, feature_columns),
     }
-    save_hybrid_model(record)
+    save_hybrid_model(record, model_id=model_id)
     return {
         "model": read_model_metadata(),
         "metrics": metrics,
@@ -328,6 +334,7 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
         "effective_target": effective_target,
         "requested_target": train_config["training_target"],
+        "model_id": model_id,
         "model_type": train_config["model_type"],
         "hardware": hardware,
         "tuning": tuned,
@@ -345,6 +352,7 @@ def predict_match_payload(
         away: Optional[str] = None,
         use_ml_model: bool = True,
         ml_weight: float = 0.5,
+        model_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     fixture = select_prediction_fixture(tournament, fixture_id=fixture_id, home=home, away=away)
     home_team = str(fixture.get("Equipo 1", home or ""))
@@ -354,7 +362,7 @@ def predict_match_payload(
     base_totals = {"over25": poisson["over25"], "under25": poisson["under25"]}
     ml_outputs = {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
     if use_ml_model:
-        ml_outputs = predict_ml_outputs(base_model, home_team, away_team)
+        ml_outputs = predict_ml_outputs(base_model, home_team, away_team, model_id=model_id)
     result_ml = ml_outputs.get("result", {})
     over_under_ml = ml_outputs.get("over_under_25", {})
     result_weight = ml_weight if result_ml else 0.0
@@ -386,6 +394,8 @@ def predict_match_payload(
             "ml_weight": round(float(ml_weight if result_ml or over_under_ml else 0.0), 3),
             "result_weight": round(float(result_weight), 3),
             "over_under_weight": round(float(totals_weight), 3),
+            "model_id": ml_outputs.get("model_id", ""),
+            "model_name": ml_outputs.get("model_name", ""),
         },
         "expected_goals": {
             "home": round(poisson["lambda1"], 3),
@@ -679,9 +689,13 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     device = str(payload.get("device") or "auto").strip().lower()
     if device not in {"auto", "cpu", "cuda"}:
         device = "auto"
+    target = normalize_training_target(payload.get("training_target", payload.get("target", "result")))
+    model_id = normalize_worldcup_model_id(payload.get("model_id") or default_model_id(model_key, target))
     return {
+        "model_id": model_id,
+        "model_name": str(payload.get("model_name") or model_id).strip() or model_id,
         "model_type": model_key,
-        "training_target": normalize_training_target(payload.get("training_target", payload.get("target", "result"))),
+        "training_target": target,
         "params": params,
         "seed": int(float(payload.get("seed", 2026) or 2026)),
         "n_jobs": n_jobs,
@@ -693,6 +707,27 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "objective": str(payload.get("objective") or "F1"),
         "tune_params": payload.get("tune_params", payload.get("tune", "all")),
     }
+
+
+def default_model_id(model_key: str, target: str) -> str:
+    short_model = {
+        "xgboost": "xgb",
+        "lightgbm": "lgbm",
+        "catboost": "cat",
+        "ngboost": "ngb",
+    }.get(model_key, model_key)
+    short_target = "uo25" if target == "over_under_25" else "result"
+    return f"mundial-{short_model}-{short_target}"
+
+
+def normalize_worldcup_model_id(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9_.-]+", "-", text).strip("-._")
+    if not text:
+        raise WorldCupTrainingError("El nombre/id del modelo Mundial es obligatorio.")
+    if len(text) > 80:
+        raise WorldCupTrainingError("El id del modelo Mundial debe tener 80 caracteres o menos.")
+    return text
 
 
 def normalize_training_target(value: Any) -> str:
@@ -1068,15 +1103,17 @@ def top_feature_importances(clf, feature_columns: List[str], limit: int = 12) ->
     return sorted(pairs, key=lambda item: item["importance"], reverse=True)[:limit]
 
 
-def predict_ml_probs(base_model: WorldCupModel, home: str, away: str) -> Tuple[Dict[str, float], str]:
-    outputs = predict_ml_outputs(base_model, home, away)
+def predict_ml_probs(base_model: WorldCupModel, home: str, away: str, model_id: Optional[str] = None) -> Tuple[Dict[str, float], str]:
+    outputs = predict_ml_outputs(base_model, home, away, model_id=model_id)
     return outputs.get("result", {}), " - ".join(outputs.get("notes", []))
 
 
-def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str) -> Dict[str, Any]:
-    record = load_hybrid_model()
+def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str, model_id: Optional[str] = None) -> Dict[str, Any]:
+    record = load_hybrid_model(model_id=model_id)
     if not record:
         return {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
+    active_id = str(record.get("model_id") or active_worldcup_model_id() or "")
+    model_name = str(record.get("model_name") or active_id or record.get("model_label", "Kaggle"))
     if record.get("mode") == "team_strength":
         home_strength = team_strength_score(record, home)
         away_strength = team_strength_score(record, away)
@@ -1088,8 +1125,10 @@ def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str) -> Dict[
         return {
             "result": {"H": float(home_prob), "D": float(draw), "A": float(away_prob)},
             "over_under_25": {},
+            "model_id": active_id,
+            "model_name": model_name,
             "notes": [
-                f"Modelo {record.get('model_label', 'Kaggle')} team-strength aplicado ({record.get('target_column', '')}).",
+                f"Modelo {model_name} team-strength aplicado ({record.get('target_column', '')}).",
                 "Over/Under 2.5 viene de Poisson porque el dataset de equipos no contiene goles de partido.",
             ],
         }
@@ -1114,7 +1153,9 @@ def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str) -> Dict[
         return {
             "result": {},
             "over_under_25": {key: value / total for key, value in output.items()},
-            "notes": [f"Modelo {record.get('model_label', 'Kaggle')} aplicado a Over/Under 2.5."],
+            "model_id": active_id,
+            "model_name": model_name,
+            "notes": [f"Modelo {model_name} aplicado a Over/Under 2.5."],
         }
     output = {label: 0.0 for label in TARGET_LABELS}
     for label, probability in zip(labels, probabilities):
@@ -1124,8 +1165,10 @@ def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str) -> Dict[
     return {
         "result": {key: value / total for key, value in output.items()},
         "over_under_25": {},
+        "model_id": active_id,
+        "model_name": model_name,
         "notes": [
-            f"Modelo {record.get('model_label', 'Kaggle')} aplicado a 1X2.",
+            f"Modelo {model_name} aplicado a 1X2.",
             "Over/Under 2.5 viene de Poisson; entrena target U/O si el dataset trae goles.",
         ],
     }
@@ -1311,13 +1354,41 @@ def tuning_trace(tuned: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def save_hybrid_model(record: Dict[str, Any]) -> None:
+def worldcup_model_path(model_id: Any) -> Path:
+    return WORLD_CUP_MODELS_ROOT / f"{normalize_worldcup_model_id(model_id)}.pkl"
+
+
+def worldcup_model_meta_path(model_id: Any) -> Path:
+    return WORLD_CUP_MODELS_ROOT / f"{normalize_worldcup_model_id(model_id)}.json"
+
+
+def active_model_state_path() -> Path:
+    return WORLD_CUP_MODELS_ROOT / ACTIVE_MODEL_STATE_FILE
+
+
+def save_hybrid_model(record: Dict[str, Any], model_id: Optional[str] = None) -> None:
     WORLD_CUP_MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+    model_id = normalize_worldcup_model_id(model_id or record.get("model_id") or default_model_id(record.get("model_type", "xgboost"), record.get("requested_target", "result")))
+    record["model_id"] = model_id
+    record.setdefault("model_name", model_id)
+    record["trained_at"] = record.get("trained_at") or datetime.now(timezone.utc).isoformat()
+    with worldcup_model_path(model_id).open("wb") as handle:
+        pickle.dump(record, handle)
     with HYBRID_MODEL_FILE.open("wb") as handle:
         pickle.dump(record, handle)
+    meta = model_metadata_payload(record, model_id=model_id, model_path=worldcup_model_path(model_id))
+    worldcup_model_meta_path(model_id).write_text(json.dumps(json_safe(meta), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    HYBRID_MODEL_META_FILE.write_text(json.dumps(json_safe(meta), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    set_active_worldcup_model(model_id)
+
+
+def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Path) -> Dict[str, Any]:
     meta = {
         "trained": True,
-        "model_path": str(HYBRID_MODEL_FILE),
+        "model_id": model_id,
+        "model_name": record.get("model_name") or model_id,
+        "model_path": str(model_path),
+        "trained_at": record.get("trained_at", ""),
         "feature_count": len(record.get("feature_columns", [])),
         "classes": record.get("classes", []),
         "metrics": record.get("metrics", {}),
@@ -1340,27 +1411,34 @@ def save_hybrid_model(record: Dict[str, Any]) -> None:
         "kaggle_files": record.get("kaggle_files", []),
         "history_source": record.get("history_source", ""),
     }
-    HYBRID_MODEL_META_FILE.write_text(json.dumps(json_safe(meta), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return meta
 
 
-def load_hybrid_model() -> Optional[Dict[str, Any]]:
-    if not HYBRID_MODEL_FILE.exists():
+def load_hybrid_model(model_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    path = resolved_model_path(model_id)
+    if path is None or not path.exists():
         return None
-    with HYBRID_MODEL_FILE.open("rb") as handle:
+    with path.open("rb") as handle:
         return pickle.load(handle)
 
 
-def read_model_metadata() -> Dict[str, Any]:
-    if HYBRID_MODEL_META_FILE.exists():
+def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
+    meta_path = resolved_model_meta_path(model_id)
+    if meta_path is not None and meta_path.exists():
         try:
-            data = json.loads(HYBRID_MODEL_META_FILE.read_text(encoding="utf-8"))
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
+                data.setdefault("model_id", active_worldcup_model_id() or LEGACY_MODEL_ID)
+                data["active"] = data.get("model_id") == active_worldcup_model_id()
                 return data
         except Exception:
             pass
     return {
         "trained": False,
+        "model_id": "",
+        "model_name": "",
         "model_path": str(HYBRID_MODEL_FILE),
+        "trained_at": "",
         "feature_count": 0,
         "classes": [],
         "metrics": {},
@@ -1378,6 +1456,133 @@ def read_model_metadata() -> Dict[str, Any]:
         "warnings": [],
         "top_features": [],
     }
+
+
+def list_worldcup_models() -> Dict[str, Any]:
+    WORLD_CUP_MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+    active_id = active_worldcup_model_id()
+    items: Dict[str, Dict[str, Any]] = {}
+    for path in sorted(WORLD_CUP_MODELS_ROOT.glob("*.json")):
+        if path.name == ACTIVE_MODEL_STATE_FILE or path == HYBRID_MODEL_META_FILE:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        model_id = normalize_worldcup_model_id(data.get("model_id") or path.stem)
+        data["model_id"] = model_id
+        data["active"] = model_id == active_id
+        items[model_id] = data
+    if HYBRID_MODEL_META_FILE.exists() and LEGACY_MODEL_ID not in items:
+        try:
+            legacy = json.loads(HYBRID_MODEL_META_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            legacy = {}
+        if isinstance(legacy, dict) and legacy:
+            legacy.setdefault("model_id", LEGACY_MODEL_ID)
+            legacy.setdefault("model_name", "Legacy hybrid")
+            legacy["model_path"] = str(HYBRID_MODEL_FILE)
+            legacy["legacy"] = True
+            legacy["active"] = (active_id in {"", None}) or active_id == LEGACY_MODEL_ID
+            items[LEGACY_MODEL_ID] = legacy
+    models = sorted(
+        items.values(),
+        key=lambda item: (not bool(item.get("active")), str(item.get("trained_at", ""))),
+        reverse=False,
+    )
+    return {
+        "active_model_id": active_id or (models[0]["model_id"] if models else ""),
+        "models": models,
+        "model": read_model_metadata(),
+    }
+
+
+def set_active_worldcup_model(model_id: Any) -> Dict[str, Any]:
+    model_id = normalize_worldcup_model_id(model_id)
+    if model_id == LEGACY_MODEL_ID:
+        if not HYBRID_MODEL_FILE.exists():
+            raise WorldCupTrainingError(f'El modelo "{model_id}" no existe.')
+    elif not worldcup_model_path(model_id).exists():
+        raise WorldCupTrainingError(f'El modelo "{model_id}" no existe.')
+    WORLD_CUP_MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+    active_model_state_path().write_text(json.dumps({"model_id": model_id}, indent=2) + "\n", encoding="utf-8")
+    return read_model_metadata(model_id=model_id)
+
+
+def delete_worldcup_model(model_id: Any) -> Dict[str, Any]:
+    model_id = normalize_worldcup_model_id(model_id)
+    if model_id == LEGACY_MODEL_ID:
+        raise WorldCupTrainingError("El modelo legacy no se borra desde la interfaz; entrena un modelo nuevo y activalo.")
+    was_active = active_worldcup_model_id() == model_id
+    removed = []
+    for path in (worldcup_model_path(model_id), worldcup_model_meta_path(model_id)):
+        if path.exists():
+            path.unlink()
+            removed.append(str(path))
+    if not removed:
+        raise WorldCupTrainingError(f'El modelo "{model_id}" no existe.')
+    if HYBRID_MODEL_META_FILE.exists():
+        try:
+            legacy_meta = json.loads(HYBRID_MODEL_META_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            legacy_meta = {}
+        if isinstance(legacy_meta, dict) and legacy_meta.get("model_id") == model_id:
+            for path in (HYBRID_MODEL_FILE, HYBRID_MODEL_META_FILE):
+                if path.exists():
+                    path.unlink()
+                    removed.append(str(path))
+    if was_active:
+        clear_active_worldcup_model()
+    return {"deleted": model_id, "removed": removed, **list_worldcup_models()}
+
+
+def active_worldcup_model_id() -> str:
+    path = active_model_state_path()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            model_id = normalize_worldcup_model_id(data.get("model_id"))
+            if model_id == LEGACY_MODEL_ID or worldcup_model_path(model_id).exists():
+                return model_id
+        except Exception:
+            pass
+    if HYBRID_MODEL_FILE.exists():
+        return LEGACY_MODEL_ID
+    return ""
+
+
+def clear_active_worldcup_model() -> None:
+    path = active_model_state_path()
+    if path.exists():
+        path.unlink()
+
+
+def resolved_model_path(model_id: Optional[str]) -> Optional[Path]:
+    target = normalize_worldcup_model_id(model_id) if model_id else active_worldcup_model_id()
+    if target and target != LEGACY_MODEL_ID:
+        path = worldcup_model_path(target)
+        if path.exists():
+            return path
+    if target == LEGACY_MODEL_ID and HYBRID_MODEL_FILE.exists():
+        return HYBRID_MODEL_FILE
+    if not target and HYBRID_MODEL_FILE.exists():
+        return HYBRID_MODEL_FILE
+    return None
+
+
+def resolved_model_meta_path(model_id: Optional[str]) -> Optional[Path]:
+    target = normalize_worldcup_model_id(model_id) if model_id else active_worldcup_model_id()
+    if target and target != LEGACY_MODEL_ID:
+        path = worldcup_model_meta_path(target)
+        if path.exists():
+            return path
+    if target == LEGACY_MODEL_ID and HYBRID_MODEL_META_FILE.exists():
+        return HYBRID_MODEL_META_FILE
+    if not target and HYBRID_MODEL_META_FILE.exists():
+        return HYBRID_MODEL_META_FILE
+    return None
 
 
 def select_prediction_fixture(tournament: Dict[str, Any], fixture_id: Optional[Any] = None, home: Optional[str] = None, away: Optional[str] = None) -> pd.Series:

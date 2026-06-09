@@ -121,6 +121,9 @@ main {
 .section-block {
   margin-bottom: 28px;
 }
+.worldcup-view:not(.active) {
+  display: none !important;
+}
 
 .alert {
   margin-bottom: 16px;
@@ -541,7 +544,7 @@ h3 { font-size: 16px; }
   background: #fff;
 }
 .clean-dock {
-  grid-template-columns: minmax(240px, 1fr) 130px minmax(180px, 260px) auto;
+  grid-template-columns: minmax(240px, 1fr) 130px minmax(190px, 260px) minmax(180px, 260px) auto;
 }
 .training-panel {
   grid-template-columns: minmax(220px, 1fr) auto;
@@ -551,6 +554,50 @@ h3 { font-size: 16px; }
   grid-template-columns: repeat(2, minmax(320px, 1fr));
   gap: 14px;
   margin-bottom: 16px;
+}
+.model-management-grid {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(520px, 1.1fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.compact-panel {
+  min-height: auto;
+}
+.model-loader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: end;
+}
+.models-list {
+  display: grid;
+  gap: 8px;
+}
+.model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px 70px;
+  gap: 10px;
+  align-items: center;
+  min-height: 54px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+}
+.model-row.active {
+  border-color: rgba(15, 122, 95, 0.45);
+  background: #eef8f4;
+}
+.model-row small {
+  display: block;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.model-row span,
+.model-row b {
+  color: var(--muted);
+  font-size: 12px;
 }
 .flow-step {
   display: grid;
@@ -965,6 +1012,7 @@ th {
   .training-panel,
   .clean-dock,
   .model-flow,
+  .model-management-grid,
   .training-visual-grid,
   .results-grid,
   .data-grid {
@@ -1020,6 +1068,8 @@ th {
     grid-template-columns: 1fr;
   }
   .metric-card-grid,
+  .model-loader,
+  .model-row,
   .feature-bar {
     grid-template-columns: 1fr;
   }
