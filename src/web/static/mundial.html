@@ -53,7 +53,9 @@
         <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
         <label>Max goles<input id="sim-max-goals" type="number" min="6" max="14" step="1" value="10"></label>
         <label>Peso 11<input id="sim-lineup-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
+        <label>Peso features<input id="sim-player-feature-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
         <label class="check"><input id="sim-use-lineups" type="checkbox"> Usar 11</label>
+        <label class="check"><input id="sim-use-player-features" type="checkbox"> Features XI</label>
       </div>
       <div class="actions-row">
         <button id="simulate-btn" class="primary" type="button">Simular</button>
@@ -94,6 +96,8 @@
         <select id="lineup-fixture"></select>
         <input id="lineup-url" placeholder="URL SofaScore del partido">
         <button id="lineup-load" type="button">Cargar</button>
+        <button id="lineup-autodetect" class="primary" type="button">Auto detectar</button>
+        <button id="lineup-auto-refresh" type="button">Auto todos</button>
         <button id="lineup-link" type="button">Vincular URL</button>
         <button id="lineup-refresh" type="button">Actualizar 11</button>
       </div>
@@ -102,6 +106,10 @@
       <details class="data-drawer">
         <summary>Tabla de alineacion</summary>
         <div id="lineup-table"></div>
+      </details>
+      <details class="data-drawer" open>
+        <summary>Features del XI</summary>
+        <div id="lineup-features-table"></div>
       </details>
       <div id="lineups-summary" class="lineups-summary"></div>
     </section>
@@ -143,6 +151,10 @@
       <details class="data-drawer">
         <summary>Tabla de jugadores</summary>
         <div id="players-table"></div>
+      </details>
+      <details class="data-drawer">
+        <summary>Features globales del XI</summary>
+        <div id="player-features-table"></div>
       </details>
     </section>
   </main>

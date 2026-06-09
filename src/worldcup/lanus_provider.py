@@ -4,8 +4,10 @@ import json
 import math
 import re
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from unicodedata import normalize as unicode_normalize
 
 import pandas as pd
 
@@ -14,12 +16,35 @@ from src.worldcup.data import clean_team_name, tournament_fixtures_dataframe
 
 LINEUPS_ROOT = Path("storage") / "worldcup" / "lineups"
 LINEUP_LINKS_FILE = LINEUPS_ROOT / "links.json"
+SOFASCORE_ROOT = Path("storage") / "worldcup" / "sofascore"
+SOFASCORE_EVENTS_FILE = SOFASCORE_ROOT / "events.json"
+PLAYER_STATS_ROOT = Path("storage") / "worldcup" / "player_stats"
 LINEUP_STATUSES = {
     "official": "Oficial",
     "probable": "Probable",
     "last_xi": "Ultimo XI",
     "pending": "Pendiente",
 }
+PLAYER_FEATURE_COLUMNS = [
+    "Fixture",
+    "Fecha",
+    "Grupo",
+    "Equipo",
+    "Rival",
+    "Prediction safe",
+    "Titulares",
+    "Stats conocidos",
+    "XI rating prom",
+    "XI rating std",
+    "XI rating min",
+    "XI rating max",
+    "POR rating",
+    "DEF rating",
+    "MED rating",
+    "ATA rating",
+    "Formacion",
+    "Fuente",
+]
 
 
 class LineupProviderError(RuntimeError):
@@ -58,9 +83,64 @@ def lineup_payload_for_fixture(
     return pending_lineup_payload(fixture, fixture_key, match_url="", error="")
 
 
+def autodetect_fixture_event(tournament: Dict[str, Any], fixture_id: Any, refresh: bool = False) -> Dict[str, Any]:
+    fixture = find_fixture(tournament=tournament, fixture_id=fixture_id)
+    fixture_key = str(fixture["No."])
+    event_cache = read_event_cache()
+    if fixture_key in event_cache and not refresh:
+        return event_cache[fixture_key]
+
+    event = fetch_best_sofascore_event(fixture)
+    if not event.get("event_id"):
+        event_cache[fixture_key] = event
+        write_event_cache(event_cache)
+        return event
+
+    event_cache[fixture_key] = event
+    write_event_cache(event_cache)
+    links = read_lineup_links()
+    links[fixture_key] = event["match_url"]
+    write_lineup_links(links)
+    return event
+
+
+def auto_refresh_lineups(tournament: Dict[str, Any], refresh_events: bool = False, limit: int = 0) -> Dict[str, Any]:
+    rows = []
+    refreshed = 0
+    failures = 0
+    for _, fixture in tournament_fixtures_dataframe(tournament).iterrows():
+        if not str(fixture.get("Grupo", "")):
+            continue
+        if limit and len(rows) >= int(limit):
+            break
+        fixture_key = str(fixture["No."])
+        event = autodetect_fixture_event(tournament, fixture_key, refresh=refresh_events)
+        if not event.get("event_id"):
+            failures += 1
+            rows.append({**event, "fixture_id": fixture_key, "status": "No detectado"})
+            continue
+        lineup = lineup_payload_for_fixture(tournament, fixture_key, refresh=True, match_url=event["match_url"])
+        write_player_stats_cache(player_stats_cache_path(fixture_key), player_stats_payload(lineup))
+        refreshed += int(lineup.get("starters_home", 0) == 11 and lineup.get("starters_away", 0) == 11)
+        rows.append({
+            **event,
+            "fixture_id": fixture_key,
+            "status": lineup.get("status", ""),
+            "starters_home": lineup.get("starters_home", 0),
+            "starters_away": lineup.get("starters_away", 0),
+        })
+    return {
+        "attempted": len(rows),
+        "refreshed": refreshed,
+        "failures": failures,
+        "rows": rows,
+    }
+
+
 def lineups_summary(tournament: Dict[str, Any]) -> pd.DataFrame:
     rows = []
     links = read_lineup_links()
+    event_cache = read_event_cache()
     for _, fixture in tournament_fixtures_dataframe(tournament).iterrows():
         fixture_key = str(fixture["No."])
         if not str(fixture.get("Grupo", "")):
@@ -78,6 +158,8 @@ def lineups_summary(tournament: Dict[str, Any]) -> pd.DataFrame:
             "Local 11": payload.get("starters_home", 0) if payload else 0,
             "Visitante 11": payload.get("starters_away", 0) if payload else 0,
             "URL SofaScore": links.get(fixture_key, payload.get("match_url", "") if payload else ""),
+            "SofaScore ID": event_cache.get(fixture_key, {}).get("event_id", ""),
+            "Auto match": event_cache.get(fixture_key, {}).get("confidence", ""),
         })
     return pd.DataFrame(rows)
 
@@ -97,6 +179,7 @@ def link_fixture_lineup(tournament: Dict[str, Any], fixture_id: Any, match_url: 
 def lineups_table(payload: Dict[str, Any]) -> pd.DataFrame:
     rows = []
     for player in payload.get("players", []):
+        stats = player.get("stats", {}) if isinstance(player.get("stats"), dict) else {}
         rows.append({
             "Equipo": player.get("team", ""),
             "Lado": player.get("side", ""),
@@ -107,11 +190,17 @@ def lineups_table(payload: Dict[str, Any]) -> pd.DataFrame:
             "Capitan": "Si" if player.get("captain") else "",
             "SofaScore ID": player.get("id", ""),
             "Rating": player.get("rating", ""),
+            "Minutos": stats.get("minutesPlayed", stats.get("minutes", "")),
+            "Goles": stats.get("goals", ""),
+            "Asistencias": stats.get("goalAssist", stats.get("assists", "")),
+            "Tiros": stats.get("totalShots", ""),
+            "Pases %": stats.get("accuratePassesPercentage", ""),
             "Estado": payload.get("status", ""),
             "Fuente": payload.get("source", ""),
         })
     return pd.DataFrame(rows, columns=[
-        "Equipo", "Lado", "Jugador", "Posicion", "Dorsal", "Titular", "Capitan", "SofaScore ID", "Rating", "Estado", "Fuente",
+        "Equipo", "Lado", "Jugador", "Posicion", "Dorsal", "Titular", "Capitan", "SofaScore ID", "Rating",
+        "Minutos", "Goles", "Asistencias", "Tiros", "Pases %", "Estado", "Fuente",
     ])
 
 
@@ -147,6 +236,115 @@ def lineup_rating_adjustments(tournament: Dict[str, Any], weight: float = 1.0) -
     return output, notes
 
 
+def player_feature_rating_adjustments(tournament: Dict[str, Any], weight: float = 1.0) -> Tuple[Dict[str, float], List[str]]:
+    df = player_features_dataframe(tournament)
+    if df.empty:
+        return {}, []
+    weight = max(min(float(weight or 1.0), 2.0), 0.0)
+    usable = df[df["Prediction safe"] == "Si"].copy()
+    adjustments_by_team: Dict[str, List[float]] = {}
+    for _, row in usable.iterrows():
+        rating = _to_float(row.get("XI rating prom"))
+        known = _to_float(row.get("Stats conocidos")) or 0.0
+        starters = _to_float(row.get("Titulares")) or 0.0
+        if rating is None or starters < 11:
+            continue
+        confidence = min(max(known / 11.0, 0.25), 1.0)
+        adjustment = max(min((rating - 6.75) * 42.0 * confidence * weight, 45.0), -45.0)
+        adjustments_by_team.setdefault(str(row["Equipo"]), []).append(adjustment)
+    adjustments = {team: sum(values) / len(values) for team, values in adjustments_by_team.items() if values}
+    notes = []
+    if adjustments:
+        notes.append(f"Features pre-partido de XI aplicadas a {len(adjustments)} equipos con peso {weight:g}.")
+    return adjustments, notes
+
+
+def player_features_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    fixtures = tournament_fixtures_dataframe(tournament)
+    for _, fixture in fixtures.iterrows():
+        if not str(fixture.get("Grupo", "")):
+            continue
+        fixture_key = str(fixture["No."])
+        payload = read_prediction_payload(fixture_key)
+        if not payload:
+            continue
+        rows.extend(team_feature_rows(payload))
+    return pd.DataFrame(rows, columns=PLAYER_FEATURE_COLUMNS)
+
+
+def player_stats_payload_for_fixture(tournament: Dict[str, Any], fixture_id: Any, refresh: bool = False) -> Dict[str, Any]:
+    fixture = find_fixture(tournament=tournament, fixture_id=fixture_id)
+    fixture_key = str(fixture["No."])
+    stats_path = player_stats_cache_path(fixture_key)
+    lineup_path = lineup_cache_path(fixture_key)
+    if stats_path.exists() and not refresh:
+        return read_player_stats_cache(stats_path)
+    if lineup_path.exists() and not refresh:
+        payload = player_stats_payload(read_lineup_cache(lineup_path))
+        write_player_stats_cache(stats_path, payload)
+        return payload
+    lineup = lineup_payload_for_fixture(tournament=tournament, fixture_id=fixture_key, refresh=refresh)
+    payload = player_stats_payload(lineup)
+    write_player_stats_cache(stats_path, payload)
+    return payload
+
+
+def player_stats_payload(lineup: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {
+        "fixture_id": lineup.get("fixture_id", ""),
+        "date": lineup.get("date", ""),
+        "group": lineup.get("group", ""),
+        "home": lineup.get("home", ""),
+        "away": lineup.get("away", ""),
+        "status": lineup.get("status", ""),
+        "source": lineup.get("source", ""),
+        "match_url": lineup.get("match_url", ""),
+        "fetched_at": lineup.get("fetched_at", ""),
+        "formation_home": lineup.get("formation_home", ""),
+        "formation_away": lineup.get("formation_away", ""),
+        "prediction_safe": lineup_is_prediction_safe(lineup),
+        "players": lineup.get("players", []),
+        "features": team_feature_rows(lineup),
+    }
+    return payload
+
+
+def team_feature_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = []
+    for team, rival, formation in (
+            (payload.get("home", ""), payload.get("away", ""), payload.get("formation_home", "")),
+            (payload.get("away", ""), payload.get("home", ""), payload.get("formation_away", "")),
+    ):
+        if not team:
+            continue
+        starters = [player for player in payload.get("players", []) if player.get("team") == team and player.get("starter")]
+        ratings = [_to_float(player.get("rating")) for player in starters]
+        ratings = [rating for rating in ratings if rating is not None]
+        row = {
+            "Fixture": payload.get("fixture_id", ""),
+            "Fecha": payload.get("date", ""),
+            "Grupo": payload.get("group", ""),
+            "Equipo": team,
+            "Rival": rival,
+            "Prediction safe": "Si" if lineup_is_prediction_safe(payload) else "No",
+            "Titulares": len(starters),
+            "Stats conocidos": sum(1 for player in starters if player_has_stats(player)),
+            "XI rating prom": round(sum(ratings) / len(ratings), 3) if ratings else "",
+            "XI rating std": round(_std(ratings), 3) if len(ratings) > 1 else "",
+            "XI rating min": round(min(ratings), 3) if ratings else "",
+            "XI rating max": round(max(ratings), 3) if ratings else "",
+            "POR rating": _position_avg(starters, ("G",)),
+            "DEF rating": _position_avg(starters, ("D",)),
+            "MED rating": _position_avg(starters, ("M",)),
+            "ATA rating": _position_avg(starters, ("F", "A")),
+            "Formacion": formation,
+            "Fuente": payload.get("source", ""),
+        }
+        rows.append(row)
+    return rows
+
+
 def fetch_lanus_lineup(fixture: pd.Series, fixture_key: str, match_url: str) -> Dict[str, Any]:
     lanus = import_lanusstats()
     sofascore = lanus.SofaScore()
@@ -168,6 +366,48 @@ def fetch_lanus_lineup(fixture: pd.Series, fixture_key: str, match_url: str) -> 
         home_stats=home_stats,
         away_stats=away_stats,
     )
+
+
+def fetch_best_sofascore_event(fixture: pd.Series) -> Dict[str, Any]:
+    fixture_key = str(fixture.get("No.", ""))
+    date = str(fixture.get("Fecha", ""))[:10]
+    home = clean_team_name(fixture.get("Equipo 1"))
+    away = clean_team_name(fixture.get("Equipo 2"))
+    if not date or not home or not away:
+        return pending_event_payload(fixture_key, date, home, away, "Fixture incompleto para autodeteccion.")
+    lanus = import_lanusstats()
+    sofascore = lanus.SofaScore()
+    try:
+        data = sofascore.sofascore_request(f"api/v1/sport/football/scheduled-events/{date}")
+    finally:
+        close = getattr(sofascore, "close", None)
+        if callable(close):
+            close()
+    events = data.get("events", []) if isinstance(data, dict) else []
+    best = best_event_match(events, home, away)
+    if not best:
+        return pending_event_payload(fixture_key, date, home, away, "No se encontro evento SofaScore para fecha/equipos.")
+    event, confidence, reverse = best
+    event_id = str(event.get("id", ""))
+    event_home = event_team_name(event, "home")
+    event_away = event_team_name(event, "away")
+    match_url = sofa_event_url(event_id=event_id, home=event_home, away=event_away)
+    return {
+        "fixture_id": fixture_key,
+        "date": date,
+        "home": home,
+        "away": away,
+        "event_home": event_home,
+        "event_away": event_away,
+        "event_id": event_id,
+        "match_url": match_url,
+        "confidence": round(confidence, 3),
+        "reverse": bool(reverse),
+        "source": "SofaScore scheduled-events",
+        "status": "Detectado",
+        "error": "",
+        "detected_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def normalize_lanus_lineups(
@@ -206,6 +446,64 @@ def normalize_lanus_lineups(
         "players": players,
         "error": "",
     }
+
+
+def best_event_match(events: Iterable[Dict[str, Any]], home: str, away: str) -> Optional[Tuple[Dict[str, Any], float, bool]]:
+    candidates: List[Tuple[Dict[str, Any], float, bool]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_home = event_team_name(event, "home")
+        event_away = event_team_name(event, "away")
+        if not event_home or not event_away:
+            continue
+        direct = (team_similarity(home, event_home) + team_similarity(away, event_away)) / 2.0
+        reverse = (team_similarity(home, event_away) + team_similarity(away, event_home)) / 2.0
+        if direct >= reverse:
+            confidence = direct
+            is_reverse = False
+        else:
+            confidence = reverse
+            is_reverse = True
+        if confidence >= 0.72:
+            candidates.append((event, confidence, is_reverse))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item[1], reverse=True)[0]
+
+
+def event_team_name(event: Dict[str, Any], side: str) -> str:
+    team = event.get(f"{side}Team", {})
+    if not isinstance(team, dict):
+        return ""
+    return clean_team_name(team.get("name") or team.get("shortName") or team.get("slug") or "")
+
+
+def team_similarity(expected: str, candidate: str) -> float:
+    expected_key = normalize_team_key(expected)
+    candidate_key = normalize_team_key(candidate)
+    if not expected_key or not candidate_key:
+        return 0.0
+    if expected_key == candidate_key:
+        return 1.0
+    aliases = TEAM_ALIASES.get(expected_key, set())
+    if candidate_key in aliases:
+        return 1.0
+    if expected_key in candidate_key or candidate_key in expected_key:
+        return 0.9
+    return SequenceMatcher(None, expected_key, candidate_key).ratio()
+
+
+TEAM_ALIASES = {
+    "usa": {"united states", "united states of america"},
+    "united states": {"usa", "united states of america"},
+    "south korea": {"korea republic", "republic of korea", "korea"},
+    "czech republic": {"czechia"},
+    "ivory coast": {"cote divoire", "cote d ivoire"},
+    "dr congo": {"congo dr", "democratic republic congo", "d r congo"},
+    "curacao": {"curaçao"},
+    "bosnia herzegovina": {"bosnia and herzegovina"},
+}
 
 
 def detect_lineup_status(raw: Dict[str, Any], starters_home: int, starters_away: int) -> str:
@@ -272,6 +570,21 @@ def read_lineup_links() -> Dict[str, str]:
     return {}
 
 
+def read_event_cache() -> Dict[str, Dict[str, Any]]:
+    try:
+        if SOFASCORE_EVENTS_FILE.exists():
+            data = json.loads(SOFASCORE_EVENTS_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+
+def write_event_cache(events: Dict[str, Dict[str, Any]]) -> None:
+    SOFASCORE_ROOT.mkdir(parents=True, exist_ok=True)
+    SOFASCORE_EVENTS_FILE.write_text(json.dumps(_json_safe(events), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def write_lineup_links(links: Dict[str, str]) -> None:
     LINEUPS_ROOT.mkdir(parents=True, exist_ok=True)
     LINEUP_LINKS_FILE.write_text(json.dumps(links, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -286,8 +599,48 @@ def write_lineup_cache(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def read_player_stats_cache(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_player_stats_cache(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def lineup_cache_path(fixture_key: str) -> Path:
     return LINEUPS_ROOT / f"fixture_{safe_key(fixture_key)}.json"
+
+
+def player_stats_cache_path(fixture_key: str) -> Path:
+    return PLAYER_STATS_ROOT / f"fixture_{safe_key(fixture_key)}.json"
+
+
+def read_prediction_payload(fixture_key: str) -> Optional[Dict[str, Any]]:
+    stats_path = player_stats_cache_path(fixture_key)
+    lineup_path = lineup_cache_path(fixture_key)
+    try:
+        if stats_path.exists():
+            stats = read_player_stats_cache(stats_path)
+            return {
+                "fixture_id": stats.get("fixture_id", ""),
+                "date": stats.get("date", ""),
+                "group": stats.get("group", ""),
+                "home": stats.get("home", ""),
+                "away": stats.get("away", ""),
+                "status": stats.get("status", ""),
+                "source": stats.get("source", ""),
+                "match_url": stats.get("match_url", ""),
+                "fetched_at": stats.get("fetched_at", ""),
+                "formation_home": stats.get("formation_home", ""),
+                "formation_away": stats.get("formation_away", ""),
+                "players": stats.get("players", []),
+            }
+        if lineup_path.exists():
+            return read_lineup_cache(lineup_path)
+    except Exception:
+        return None
+    return None
 
 
 def normalize_match_url(value: Any) -> str:
@@ -301,6 +654,40 @@ def normalize_match_url(value: Any) -> str:
 
 def safe_key(value: Any) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value)).strip("_") or "unknown"
+
+
+def normalize_team_key(value: Any) -> str:
+    text = unicode_normalize("NFKD", str(value or ""))
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.lower().replace("&", " and ")
+    text = re.sub(r"\b(fc|cf|national team|team)\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def sofa_event_url(event_id: str, home: str, away: str) -> str:
+    home_slug = re.sub(r"[^a-z0-9]+", "-", normalize_team_key(home)).strip("-") or "home"
+    away_slug = re.sub(r"[^a-z0-9]+", "-", normalize_team_key(away)).strip("-") or "away"
+    return f"https://www.sofascore.com/football/match/{home_slug}-{away_slug}#id:{event_id}"
+
+
+def pending_event_payload(fixture_key: str, date: str, home: str, away: str, error: str) -> Dict[str, Any]:
+    return {
+        "fixture_id": str(fixture_key),
+        "date": date,
+        "home": home,
+        "away": away,
+        "event_home": "",
+        "event_away": "",
+        "event_id": "",
+        "match_url": "",
+        "confidence": 0.0,
+        "reverse": False,
+        "source": "SofaScore scheduled-events",
+        "status": "Pendiente",
+        "error": error,
+        "detected_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def clean_error(exc: Exception) -> str:
@@ -324,6 +711,8 @@ def _normalize_side_players(side_data: Any, side: str, team: str, stats_df: Opti
         if rating in {None, ""} and isinstance(item.get("statistics"), dict):
             rating = item.get("statistics", {}).get("rating")
         rating = rating if rating not in {None, ""} else stats.get("rating", "")
+        player_stats = item.get("statistics") if isinstance(item.get("statistics"), dict) else {}
+        player_stats = {**stats, **player_stats}
         players.append({
             "team": team,
             "side": "Local" if side == "home" else "Visitante",
@@ -335,6 +724,7 @@ def _normalize_side_players(side_data: Any, side: str, team: str, stats_df: Opti
             "id": _clean_scalar(player_id or ""),
             "photo_url": sofa_player_photo_url(player_id),
             "rating": _clean_scalar(rating),
+            "stats": _json_safe(player_stats),
         })
     return players
 
@@ -353,6 +743,32 @@ def _stats_lookup(stats_df: Optional[pd.DataFrame]) -> Tuple[Dict[str, Dict[str,
         if "player" in record:
             by_name[str(record.get("player")).lower()] = record
     return by_id, by_name
+
+
+def player_has_stats(player: Dict[str, Any]) -> bool:
+    stats = player.get("stats")
+    if not isinstance(stats, dict) or not stats:
+        return False
+    return any(value not in {"", None} for value in stats.values())
+
+
+def _std(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+
+
+def _position_avg(players: List[Dict[str, Any]], prefixes: Tuple[str, ...]) -> Any:
+    ratings = []
+    for player in players:
+        position = str(player.get("position") or "").upper()
+        if not any(position.startswith(prefix) for prefix in prefixes):
+            continue
+        rating = _to_float(player.get("rating"))
+        if rating is not None:
+            ratings.append(rating)
+    return round(sum(ratings) / len(ratings), 3) if ratings else ""
 
 
 def _side_formation(side_data: Any) -> str:

@@ -22,10 +22,15 @@ from src.worldcup import (
 )
 from src.worldcup.data import group_letter, groups_from_tournament
 from src.worldcup.lanus_provider import (
+    auto_refresh_lineups,
+    autodetect_fixture_event,
     link_fixture_lineup,
     lineup_payload_for_fixture,
     lineup_rating_adjustments,
     lineups_summary,
+    player_feature_rating_adjustments,
+    player_features_dataframe,
+    player_stats_payload_for_fixture,
     sofa_player_photo_url,
 )
 
@@ -35,7 +40,9 @@ DEFAULT_CONFIG = {
     "iterations": 5000,
     "seed": 2026,
     "use_lineups": False,
+    "use_player_features": False,
     "lineup_weight": 1.0,
+    "player_feature_weight": 1.0,
     "history_weight": 1.0,
     "recency_weight": 0.35,
     "host_advantage": 45.0,
@@ -233,6 +240,8 @@ def lineups(refresh: bool = False) -> Dict[str, Any]:
             "starters_home": int(row.get("Local 11", 0) or 0),
             "starters_away": int(row.get("Visitante 11", 0) or 0),
             "match_url": row.get("URL SofaScore", ""),
+            "event_id": row.get("SofaScore ID", ""),
+            "auto_match": row.get("Auto match", ""),
         })
     return {
         "lineups": rows,
@@ -245,6 +254,29 @@ def fixture_lineup(fixture_id: str, refresh: bool = False) -> Dict[str, Any]:
     tournament, _ = load_tournament_2026(refresh=False)
     payload = lineup_payload_for_fixture(tournament=tournament, fixture_id=fixture_id, refresh=bool(refresh))
     return lineup_response(payload)
+
+
+def autodetect_fixture(fixture_id: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    tournament, _ = load_tournament_2026(refresh=bool(payload.get("refresh_fixtures", False)))
+    event = autodetect_fixture_event(tournament=tournament, fixture_id=fixture_id, refresh=bool(payload.get("refresh", False)))
+    lineup = {}
+    if event.get("match_url") and bool(payload.get("fetch_lineup", True)):
+        lineup = lineup_response(lineup_payload_for_fixture(tournament=tournament, fixture_id=fixture_id, refresh=True, match_url=event["match_url"]))
+    return {
+        "event": event,
+        "lineup": lineup,
+    }
+
+
+def auto_refresh(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    tournament, _ = load_tournament_2026(refresh=bool(payload.get("refresh_fixtures", False)))
+    return auto_refresh_lineups(
+        tournament=tournament,
+        refresh_events=bool(payload.get("refresh_events", False)),
+        limit=int(payload.get("limit") or 0),
+    )
 
 
 def refresh_fixture_lineup(fixture_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -269,6 +301,25 @@ def link_lineup(fixture_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return lineup_response(lineup)
 
 
+def fixture_player_stats(fixture_id: str, refresh: bool = False) -> Dict[str, Any]:
+    tournament, _ = load_tournament_2026(refresh=False)
+    payload = player_stats_payload_for_fixture(tournament=tournament, fixture_id=fixture_id, refresh=bool(refresh))
+    return {
+        "stats": enrich_lineup_payload(payload),
+        "features": table_payload(pd.DataFrame(payload.get("features", [])), page=1, page_size=10),
+        "players": table_payload(lineups_table(payload), page=1, page_size=40),
+    }
+
+
+def player_features(refresh: bool = False) -> Dict[str, Any]:
+    tournament, _ = load_tournament_2026(refresh=bool(refresh))
+    df = player_features_dataframe(tournament)
+    return {
+        "features": table_payload(df, page=1, page_size=120),
+        "rows": jsonable(df.to_dict(orient="records")) if not df.empty else [],
+    }
+
+
 def lineup_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     enriched = enrich_lineup_payload(payload)
     return {
@@ -286,6 +337,11 @@ def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
         adjustments, lineup_notes = lineup_rating_adjustments(tournament, weight=config["lineup_weight"])
         if adjustments:
             model = model.adjusted(adjustments)
+    feature_notes: List[str] = []
+    if config["use_player_features"]:
+        adjustments, feature_notes = player_feature_rating_adjustments(tournament, weight=config["player_feature_weight"])
+        if adjustments:
+            model = model.adjusted(adjustments)
     result = simulate_worldcup(
         tournament=tournament,
         model=model,
@@ -299,10 +355,13 @@ def simulate(payload: Dict[str, Any]) -> Dict[str, Any]:
             "fixture_source": fixture_source,
             "history_source": history_source,
             "use_lineups": config["use_lineups"],
+            "use_player_features": config["use_player_features"],
             "lineup_notes": lineup_notes,
+            "player_feature_notes": feature_notes,
             "anti_leakage": [
                 "Historico filtrado antes del 2026-06-11.",
                 "Alineaciones ignoradas si fueron obtenidas despues de la fecha del partido.",
+                "Features del XI ignoradas si fueron obtenidas despues de la fecha del partido.",
                 "No se usan resultados del Mundial 2026 para entrenar ni calibrar.",
             ],
         },
@@ -334,7 +393,11 @@ def procedure() -> Dict[str, Any]:
             },
             {
                 "name": "11 iniciales",
-                "detail": "Si hay URL SofaScore, LanusStats extrae titulares, formacion y ratings; la simulacion solo usa alineaciones seguras por fecha.",
+                "detail": "Detecta automaticamente eventos SofaScore por fecha/equipos, extrae titulares, formacion, ratings y stats disponibles.",
+            },
+            {
+                "name": "Features del XI",
+                "detail": "Calcula rating promedio, dispersion, min/max y promedios por linea; solo impactan la prediccion si son pre-partido.",
             },
             {
                 "name": "Monte Carlo",
@@ -371,7 +434,9 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "iterations": int(_clamp_int(payload.get("iterations", DEFAULT_CONFIG["iterations"]), 100, 20000)),
         "seed": int(payload.get("seed") if payload.get("seed") is not None else DEFAULT_CONFIG["seed"]),
         "use_lineups": bool(payload.get("use_lineups", DEFAULT_CONFIG["use_lineups"])),
+        "use_player_features": bool(payload.get("use_player_features", DEFAULT_CONFIG["use_player_features"])),
         "lineup_weight": _clamp_float(payload.get("lineup_weight", DEFAULT_CONFIG["lineup_weight"]), 0.0, 2.0),
+        "player_feature_weight": _clamp_float(payload.get("player_feature_weight", DEFAULT_CONFIG["player_feature_weight"]), 0.0, 2.0),
         "history_weight": _clamp_float(payload.get("history_weight", DEFAULT_CONFIG["history_weight"]), 0.2, 2.0),
         "recency_weight": _clamp_float(payload.get("recency_weight", DEFAULT_CONFIG["recency_weight"]), 0.0, 1.0),
         "host_advantage": _clamp_float(payload.get("host_advantage", DEFAULT_CONFIG["host_advantage"]), 0.0, 120.0),

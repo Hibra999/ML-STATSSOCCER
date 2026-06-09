@@ -5,6 +5,7 @@ const state = {
   teams: [],
   players: [],
   lineups: [],
+  playerFeatures: [],
   teamAssets: new Map(),
   defaultsApplied: false,
 };
@@ -23,6 +24,8 @@ function bindEvents() {
   document.getElementById("fixture-group-filter").addEventListener("change", renderFixtures);
   document.getElementById("fixture-search").addEventListener("input", renderFixtures);
   document.getElementById("lineup-load").addEventListener("click", () => loadSelectedLineup(false));
+  document.getElementById("lineup-autodetect").addEventListener("click", autodetectSelectedLineup);
+  document.getElementById("lineup-auto-refresh").addEventListener("click", autoRefreshLineups);
   document.getElementById("lineup-refresh").addEventListener("click", refreshSelectedLineup);
   document.getElementById("lineup-link").addEventListener("click", linkSelectedLineup);
   document.getElementById("lineup-fixture").addEventListener("change", () => loadSelectedLineup(false));
@@ -40,13 +43,14 @@ async function loadAll(refresh) {
   clearAlert();
   setLoading();
   try {
-    const [overview, groups, fixtures, teams, lineups, players, procedure] = await Promise.all([
+    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, procedure] = await Promise.all([
       api(`/api/mundial/overview?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/groups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/fixtures?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/teams?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/lineups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/players?refresh=${refresh ? "true" : "false"}`),
+      api(`/api/mundial/player-features?refresh=${refresh ? "true" : "false"}`),
       api("/api/mundial/procedure"),
     ]);
     state.overview = overview;
@@ -55,6 +59,7 @@ async function loadAll(refresh) {
     state.teams = teams.teams || [];
     state.lineups = lineups.lineups || [];
     state.players = players.players || [];
+    state.playerFeatures = playerFeatures.rows || [];
     rebuildTeamAssets();
     applyDefaultConfig(overview.default_config || {});
     renderOverview(overview);
@@ -64,6 +69,7 @@ async function loadAll(refresh) {
     renderFixtures();
     renderLineupsSummary(lineups);
     renderPlayers(players);
+    renderPlayerFeatures(playerFeatures);
     renderProcedure(procedure);
     fillLineupSelect();
     await loadSelectedLineup(false);
@@ -79,6 +85,8 @@ function setLoading() {
   document.getElementById("fixtures-list").innerHTML = loadingHtml("Cargando fixtures");
   document.getElementById("lineup-stage").innerHTML = loadingHtml("Cargando alineaciones");
   document.getElementById("players-list").innerHTML = loadingHtml("Cargando jugadores");
+  document.getElementById("lineup-features-table").innerHTML = loadingHtml("Features pendientes");
+  document.getElementById("player-features-table").innerHTML = loadingHtml("Features pendientes");
 }
 
 function applyDefaultConfig(config) {
@@ -91,12 +99,14 @@ function applyDefaultConfig(config) {
     "sim-host-advantage": config.host_advantage,
     "sim-max-goals": config.max_goals,
     "sim-lineup-weight": config.lineup_weight,
+    "sim-player-feature-weight": config.player_feature_weight,
   };
   Object.entries(pairs).forEach(([id, value]) => {
     const input = document.getElementById(id);
     if (input && value !== undefined) input.value = value;
   });
   document.getElementById("sim-use-lineups").checked = Boolean(config.use_lineups);
+  document.getElementById("sim-use-player-features").checked = Boolean(config.use_player_features);
   state.defaultsApplied = true;
 }
 
@@ -185,8 +195,44 @@ async function loadSelectedLineup(refresh) {
   try {
     const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/lineups?refresh=${refresh ? "true" : "false"}`);
     renderLineup(result);
+    await loadFixturePlayerStats(fixtureId, false);
   } catch (error) {
     document.getElementById("lineup-status").innerHTML = "";
+    showError(error.message);
+  }
+}
+
+async function autodetectSelectedLineup() {
+  const fixtureId = document.getElementById("lineup-fixture").value;
+  if (!fixtureId) return;
+  document.getElementById("lineup-status").innerHTML = `<span>Buscando evento SofaScore...</span>`;
+  try {
+    const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect`, jsonOptions({ fetch_lineup: true }));
+    const event = result.event || {};
+    if (event.match_url) document.getElementById("lineup-url").value = event.match_url;
+    if (result.lineup && result.lineup.lineup) renderLineup(result.lineup);
+    await loadFixturePlayerStats(fixtureId, true);
+    await reloadLineupsSummary();
+    await loadPlayerFeatures(false);
+    document.getElementById("lineup-status").insertAdjacentHTML("beforeend", `<span>Auto match ${escapeHtml(event.confidence || 0)}</span>`);
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function autoRefreshLineups() {
+  clearAlert();
+  document.getElementById("lineup-status").innerHTML = `<span>Detectando eventos y 11 iniciales...</span>`;
+  try {
+    const result = await api("/api/mundial/lineups/auto-refresh", jsonOptions({ refresh_events: true }));
+    await reloadLineupsSummary();
+    await loadPlayerFeatures(false);
+    await loadSelectedLineup(false);
+    document.getElementById("lineup-status").innerHTML = `
+      <span>Fixtures revisados: ${escapeHtml(result.attempted || 0)}</span>
+      <span>Con 11 completo: ${escapeHtml(result.refreshed || 0)}</span>
+      <span>Sin detectar: ${escapeHtml(result.failures || 0)}</span>`;
+  } catch (error) {
     showError(error.message);
   }
 }
@@ -198,7 +244,9 @@ async function refreshSelectedLineup() {
   try {
     const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/lineups/refresh`, jsonOptions({ match_url: matchUrl }));
     renderLineup(result);
+    await loadFixturePlayerStats(fixtureId, true);
     await reloadLineupsSummary();
+    await loadPlayerFeatures(false);
   } catch (error) {
     showError(error.message);
   }
@@ -214,10 +262,34 @@ async function linkSelectedLineup() {
   try {
     const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/lineups/link`, jsonOptions({ match_url: matchUrl, refresh: true }));
     renderLineup(result);
+    await loadFixturePlayerStats(fixtureId, true);
     await reloadLineupsSummary();
+    await loadPlayerFeatures(false);
   } catch (error) {
     showError(error.message);
   }
+}
+
+async function loadFixturePlayerStats(fixtureId, refresh) {
+  try {
+    const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/player-stats?refresh=${refresh ? "true" : "false"}`);
+    renderTable("lineup-features-table", result.features);
+    return result;
+  } catch (error) {
+    document.getElementById("lineup-features-table").innerHTML = loadingHtml("Features no disponibles");
+    return null;
+  }
+}
+
+async function loadPlayerFeatures(refresh) {
+  const result = await api(`/api/mundial/player-features?refresh=${refresh ? "true" : "false"}`);
+  state.playerFeatures = result.rows || [];
+  renderPlayerFeatures(result);
+  return result;
+}
+
+function renderPlayerFeatures(payload) {
+  renderTable("player-features-table", payload.features);
 }
 
 async function reloadLineupsSummary() {
@@ -258,10 +330,17 @@ function playerTokenHtml(player) {
   const x = Number(player.x || 50);
   const y = Number(player.y || 50);
   const detail = [player.shirt_number, player.position, player.rating ? `R ${player.rating}` : ""].filter(Boolean).join(" - ");
+  const stats = player.stats || {};
+  const statDetail = [
+    stats.minutesPlayed ? `${stats.minutesPlayed} min` : "",
+    stats.goals ? `${stats.goals} gol` : "",
+    stats.goalAssist ? `${stats.goalAssist} ast` : "",
+  ].filter(Boolean).join(" - ");
   return `<div class="player-token" style="left:${escapeAttr(x)}%;top:${escapeAttr(y)}%">
     ${playerPhotoHtml(player)}
     <strong>${escapeHtml(shortName(player.name || ""))}</strong>
     <small>${escapeHtml(detail)}</small>
+    ${statDetail ? `<small>${escapeHtml(statDetail)}</small>` : ""}
   </div>`;
 }
 
@@ -322,15 +401,19 @@ function simulationPayload() {
     host_advantage: Number(document.getElementById("sim-host-advantage").value || 45),
     max_goals: Number(document.getElementById("sim-max-goals").value || 10),
     lineup_weight: Number(document.getElementById("sim-lineup-weight").value || 1),
+    player_feature_weight: Number(document.getElementById("sim-player-feature-weight").value || 1),
     use_lineups: document.getElementById("sim-use-lineups").checked,
+    use_player_features: document.getElementById("sim-use-player-features").checked,
   };
 }
 
 function renderSimulation(result) {
   const summary = result.summary || {};
   const config = summary.config || {};
+  const lineupState = config.use_lineups ? "11 activo" : "11 off";
+  const featureState = config.use_player_features ? "features XI activas" : "features XI off";
   document.getElementById("simulation-summary").textContent =
-    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""}`;
+    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState}`;
   const rows = (result.advancement && result.advancement.rows) || [];
   const topChampions = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 8);
   document.getElementById("champion-strip").innerHTML = topChampions.map((row) => {

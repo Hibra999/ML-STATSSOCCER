@@ -54,6 +54,10 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/simulate" in paths
     assert "/api/mundial/lineups" in paths
     assert "/api/mundial/fixtures/{fixture_id}/lineups" in paths
+    assert "/api/mundial/fixtures/{fixture_id}/autodetect" in paths
+    assert "/api/mundial/lineups/auto-refresh" in paths
+    assert "/api/mundial/fixtures/{fixture_id}/player-stats" in paths
+    assert "/api/mundial/player-features" in paths
     assert "/api/mundial/procedure" in paths
     assert "/api/worldcup/overview" not in paths
     assert "/assets" in paths
@@ -138,7 +142,12 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-host-advantage" in html_source
     assert "lineup-fixture" in html_source
     assert "lineup-stage" in html_source
+    assert "lineup-autodetect" in html_source
+    assert "sim-use-player-features" in html_source
+    assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
+    assert "/api/mundial/player-features" in app_source
+    assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
     assert "/api/worldcup/simulate" not in app_source
     assert "player-photo" in app_source
 
@@ -207,6 +216,55 @@ def test_worldcup_lanus_lineup_normalization_extracts_starting_elevens():
     assert result["starters_away"] == 11
     assert len([player for player in result["players"] if player["team"] == "Mexico" and player["starter"]]) == 11
     assert result["formation_home"] == "4-3-3"
+    assert all(isinstance(player["stats"], dict) for player in result["players"])
+
+
+def test_worldcup_sofascore_event_matching_finds_fixture():
+    from src.worldcup.lanus_provider import best_event_match, sofa_event_url, team_similarity
+
+    events = [
+        {"id": 123, "homeTeam": {"name": "Mexico"}, "awayTeam": {"name": "South Africa"}},
+        {"id": 456, "homeTeam": {"name": "Canada"}, "awayTeam": {"name": "Qatar"}},
+    ]
+
+    event, confidence, reverse = best_event_match(events, "Mexico", "South Africa")
+
+    assert event["id"] == 123
+    assert confidence >= 0.99
+    assert reverse is False
+    assert team_similarity("USA", "United States") == 1.0
+    assert sofa_event_url("123", "Mexico", "South Africa").endswith("#id:123")
+
+
+def test_worldcup_autodetect_fixture_event_caches_match(tmp_path, monkeypatch):
+    from src.worldcup import lanus_provider
+    from src.worldcup.data import fallback_tournament_2026
+
+    monkeypatch.setattr(lanus_provider, "LINEUPS_ROOT", tmp_path / "lineups")
+    monkeypatch.setattr(lanus_provider, "LINEUP_LINKS_FILE", tmp_path / "lineups" / "links.json")
+    monkeypatch.setattr(lanus_provider, "SOFASCORE_ROOT", tmp_path / "sofascore")
+    monkeypatch.setattr(lanus_provider, "SOFASCORE_EVENTS_FILE", tmp_path / "sofascore" / "events.json")
+
+    def fake_fetch(fixture):
+        return {
+            "fixture_id": str(fixture["No."]),
+            "date": fixture["Fecha"],
+            "home": "Mexico",
+            "away": "South Africa",
+            "event_id": "987",
+            "match_url": "https://www.sofascore.com/football/match/mexico-south-africa#id:987",
+            "confidence": 1.0,
+            "status": "Detectado",
+        }
+
+    monkeypatch.setattr(lanus_provider, "fetch_best_sofascore_event", fake_fetch)
+
+    result = lanus_provider.autodetect_fixture_event(fallback_tournament_2026(), fixture_id=1)
+    cached = lanus_provider.autodetect_fixture_event(fallback_tournament_2026(), fixture_id=1)
+
+    assert result["event_id"] == "987"
+    assert cached == result
+    assert lanus_provider.read_lineup_links()["1"].endswith("#id:987")
 
 
 def test_worldcup_lineup_fallback_pending_without_match_url(tmp_path, monkeypatch):
@@ -252,6 +310,49 @@ def test_worldcup_lineup_rating_adjustments_use_safe_cached_lineups(tmp_path, mo
     assert notes
 
 
+def test_worldcup_player_features_dataframe_uses_safe_cached_lineups(tmp_path, monkeypatch):
+    from src.worldcup import lanus_provider
+    from src.worldcup.data import fallback_tournament_2026
+
+    monkeypatch.setattr(lanus_provider, "LINEUPS_ROOT", tmp_path / "lineups")
+    monkeypatch.setattr(lanus_provider, "LINEUP_LINKS_FILE", tmp_path / "lineups" / "links.json")
+    monkeypatch.setattr(lanus_provider, "PLAYER_STATS_ROOT", tmp_path / "player_stats")
+    positions = ["G", "D", "D", "D", "D", "M", "M", "M", "F", "F", "F"]
+    payload = {
+        "fixture_id": "1",
+        "date": "2026-06-11",
+        "group": "Group A",
+        "status": lanus_provider.LINEUP_STATUSES["official"],
+        "source": "LanusStats/SofaScore",
+        "home": "Mexico",
+        "away": "South Africa",
+        "formation_home": "4-3-3",
+        "formation_away": "4-3-3",
+        "players": [
+            {"team": "Mexico", "starter": True, "rating": 7.2, "position": position, "stats": {"minutesPlayed": 90}}
+            for position in positions
+        ] + [
+            {"team": "South Africa", "starter": True, "rating": 6.2, "position": position, "stats": {"minutesPlayed": 90}}
+            for position in positions
+        ],
+        "fetched_at": "2026-06-10T18:00:00+00:00",
+    }
+    lanus_provider.write_lineup_cache(lanus_provider.lineup_cache_path("1"), payload)
+
+    features = lanus_provider.player_features_dataframe(fallback_tournament_2026())
+    mexico = features[features["Equipo"] == "Mexico"].iloc[0]
+    adjustments, notes = lanus_provider.player_feature_rating_adjustments(fallback_tournament_2026(), weight=1.0)
+
+    assert mexico["Prediction safe"] == "Si"
+    assert mexico["Titulares"] == 11
+    assert mexico["Stats conocidos"] == 11
+    assert mexico["XI rating prom"] == pytest.approx(7.2)
+    assert mexico["DEF rating"] == pytest.approx(7.2)
+    assert adjustments["Mexico"] > 0
+    assert adjustments["South Africa"] < 0
+    assert notes
+
+
 def test_mundial_simulation_config_is_clamped():
     from src.web.mundial_services import simulation_config
 
@@ -262,7 +363,9 @@ def test_mundial_simulation_config_is_clamped():
         "host_advantage": -5,
         "max_goals": 99,
         "lineup_weight": 9,
+        "player_feature_weight": 9,
         "use_lineups": True,
+        "use_player_features": True,
     })
 
     assert config["iterations"] == 20000
@@ -271,7 +374,9 @@ def test_mundial_simulation_config_is_clamped():
     assert config["host_advantage"] == 0.0
     assert config["max_goals"] == 14
     assert config["lineup_weight"] == 2.0
+    assert config["player_feature_weight"] == 2.0
     assert config["use_lineups"] is True
+    assert config["use_player_features"] is True
 
 
 def test_mundial_lineup_payload_adds_visual_positions_and_photos():
