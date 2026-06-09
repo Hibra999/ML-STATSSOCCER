@@ -71,7 +71,7 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/maintenance/clear" in paths
     assert "/api/mundial/predict-match" in paths
     assert "/api/mundial/predict-upcoming" in paths
-    assert "/api/mundial/procedure" in paths
+    assert "/api/mundial/procedure" not in paths
     assert "/api/jobs/{job_id}" in paths
     assert "/api/worldcup/overview" not in paths
     assert "/assets" in paths
@@ -158,6 +158,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     app_source = open("src/web/static/mundial.js", "r", encoding="utf-8").read()
 
     assert "Mundial 2026" in html_source
+    assert "Datos y procedimiento" not in html_source
+    assert "procedure-list" not in html_source
+    assert "renderProcedure" not in app_source
     assert "worldcup-view active" in html_source
     nav_source = html_source.split("<nav>", 1)[1].split("</nav>", 1)[0]
     nav_order = [
@@ -251,6 +254,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "/api/jobs/${jobId}" in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
+    assert "/api/mundial/procedure" not in app_source
     assert "renderHeroCountdown" in app_source
     assert "heroNextCardHtml" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
@@ -272,6 +276,55 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert options["defaults"]["market_mode"] == "dual_markets"
     assert [target["key"] for target in options["targets"]] == ["dual_markets"]
     assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
+
+
+def test_worldcup_accelerator_cpu_sanitizes_float32_matrix():
+    from src.worldcup.accelerators import prepare_numeric_matrix, training_acceleration_backend
+
+    raw = np.array([[1.0, np.nan], [np.inf, -np.inf]], dtype=np.float64)
+    matrix = prepare_numeric_matrix(raw, use_cuda=False)
+    backend = training_acceleration_backend(prefer_cuda=False)
+
+    assert matrix.dtype == np.float32
+    assert matrix.tolist() == [[1.0, 0.0], [0.0, 0.0]]
+    assert backend["backend"] == "cpu"
+    assert "numba_cuda_available" in backend
+
+
+def test_worldcup_xgboost_cpu_hist_training_and_cuda_fallback(monkeypatch):
+    from src.worldcup import training
+
+    monkeypatch.setattr(training, "detect_hardware", lambda: {
+        "cpu_count": 2,
+        "default_n_jobs": -1,
+        "cuda_available": False,
+        "cuda_devices": [],
+        "cuda_error": "sin cuda en test",
+        "numba_cuda_available": False,
+        "device_default": "cpu",
+    })
+    x = pd.DataFrame({
+        "a": [0.0, 1.0, 2.0, 3.0, np.nan, np.inf],
+        "b": [1.0, 0.0, 1.0, 0.0, 2.0, -np.inf],
+    })
+    y = pd.Series([0, 1, 2, 0, 1, 2])
+    result = training.fit_configured_classifier(
+        x_train=x,
+        y_train=y,
+        model_key="xgboost",
+        params={"n_estimators": 5, "max_depth": 2, "learning_rate": 0.2},
+        n_jobs=1,
+        requested_device="cuda",
+        seed=7,
+        num_classes=3,
+    )
+    params = result["classifier"].get_params()
+
+    assert result["device"] == "cpu"
+    assert result["accelerator"]["backend"] == "cpu"
+    assert params["tree_method"] == "hist"
+    assert params["device"] == "cpu"
+    assert any("CUDA no disponible" in warning for warning in result["warnings"])
 
 
 def test_worldcup_fallback_has_2026_groups_opener_and_bracket():

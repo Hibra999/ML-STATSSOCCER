@@ -775,7 +775,6 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         },
         "advancement": table_payload(result["advancement"], page=1, page_size=80),
         "matches": table_payload(result["matches"], page=1, page_size=120),
-        "procedure": procedure()["steps"],
     }
     emit_job_progress(progress_callback, "complete", 100, 100, "Monte Carlo completado")
     return output
@@ -796,57 +795,6 @@ def emit_job_progress(callback, stage: str, current: int, total: int, message: s
         "message": message,
         **extra,
     })
-
-def procedure() -> Dict[str, Any]:
-    return {
-        "title": "Procedimiento de prediccion Mundial 2026",
-        "steps": [
-            {
-                "name": "Datos del torneo",
-                "detail": "Carga grupos y fixtures 2026 desde cache/openfootball, con fallback local si la fuente publica no responde.",
-            },
-            {
-                "name": "Historico sin leakage",
-                "detail": "Carga partidos 1930-2022 y filtra cualquier registro igual o posterior al 2026-06-11.",
-            },
-            {
-                "name": "Modelo base",
-                "detail": "Actualiza ratings Elo, ataque y defensa por seleccion; despues transforma esos perfiles a goles esperados Poisson.",
-            },
-            {
-                "name": "Fine-tuning",
-                "detail": "Ajusta peso historico, recencia, ventaja local, limite de goles y peso opcional de alineaciones.",
-            },
-            {
-                "name": "11 iniciales",
-                "detail": "Detecta automaticamente eventos SofaScore por fecha/equipos, extrae titulares, formacion, ratings y stats disponibles.",
-            },
-            {
-                "name": "Features del XI",
-                "detail": "Calcula rating promedio, dispersion, min/max y promedios por linea; solo impactan la prediccion si son pre-partido.",
-            },
-            {
-                "name": "Walk-forward",
-                "detail": "Cuando ya existe XI con stats por partido, guarda snapshot de jugadores y features de equipo para un futuro reentreno incremental sin mezclar datos incompletos.",
-            },
-            {
-                "name": "Monte Carlo",
-                "detail": "Simula fase de grupos, mejores terceros y bracket completo para estimar avance, final y campeon.",
-            },
-            {
-                "name": "Predicciones futuras",
-                "detail": "Combina Elo/Poisson con el modelo Kaggle si esta entrenado, y reporta 1X2, marcador modal y Over/Under 2.5 para los proximos N partidos.",
-            },
-        ],
-        "sources": [
-            "openfootball/worldcup.json",
-            "Kaggle: harrachimustapha/fifa-world-cup-team-dataset",
-            "FotMob JSON publico para autodeteccion/lineups cuando existan",
-            "storage/worldcup/cache/*.json",
-            "LanusStats/SofaScore opcional para alineaciones",
-            "Wikipedia squads opcional para jugadores",
-        ],
-    }
 
 
 def build_model(tournament: Dict[str, Any], config: Dict[str, Any]) -> Tuple[WorldCupModel, str]:

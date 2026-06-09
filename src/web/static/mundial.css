@@ -401,8 +401,7 @@ h3 { font-size: 16px; }
 .team-card,
 .lineup-side,
 .player-row,
-.champion-card,
-.procedure-step {
+.champion-card {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -1206,6 +1205,9 @@ h3 { font-size: 16px; }
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
 }
+.single-data-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
 
 .players-list {
   display: grid;
@@ -1230,31 +1232,6 @@ h3 { font-size: 16px; }
   display: block;
   color: var(--muted);
   margin-top: 2px;
-}
-
-.procedure-list {
-  display: grid;
-  gap: 10px;
-}
-.procedure-step {
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 10px;
-  padding: 12px;
-}
-.procedure-step span:first-child {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: #e9f3ef;
-  color: var(--green);
-  font-weight: 800;
-}
-.procedure-step p {
-  margin: 4px 0 0;
-  color: var(--muted);
 }
 
 .data-drawer {

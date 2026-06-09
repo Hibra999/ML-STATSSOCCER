@@ -16,6 +16,12 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precisio
 from sklearn.model_selection import train_test_split as sklearn_train_test_split
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
+from src.worldcup.accelerators import (
+    numba_cuda_available,
+    prepare_xgboost_prediction_array,
+    prepare_xgboost_training_arrays,
+    training_acceleration_backend,
+)
 from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
 from src.worldcup.model import HOST_TEAMS, WorldCupModel
 
@@ -131,6 +137,7 @@ def detect_hardware() -> Dict[str, Any]:
     cpu_count = int(os.cpu_count() or 1)
     cuda_devices: List[str] = []
     cuda_error = ""
+    numba_cuda = numba_cuda_available()
     if shutil.which("nvidia-smi"):
         try:
             result = subprocess.run(
@@ -148,12 +155,15 @@ def detect_hardware() -> Dict[str, Any]:
             cuda_error = f"{exc.__class__.__name__}: {exc}"
     else:
         cuda_error = "nvidia-smi no disponible"
+    if numba_cuda and not cuda_devices:
+        cuda_devices = ["CUDA detectado por Numba"]
     return {
         "cpu_count": cpu_count,
         "default_n_jobs": -1,
-        "cuda_available": bool(cuda_devices),
+        "cuda_available": bool(cuda_devices) or numba_cuda,
         "cuda_devices": cuda_devices,
         "cuda_error": cuda_error,
+        "numba_cuda_available": numba_cuda,
         "device_default": "cuda" if cuda_devices else "cpu",
     }
 
@@ -387,6 +397,7 @@ def train_single_hybrid_model(
         "actual_device": fit_result["device"],
         "n_jobs": train_config["n_jobs"],
         "effective_n_jobs": effective_n_jobs(train_config["n_jobs"], hardware["cpu_count"]),
+        "training_accelerator": fit_result.get("accelerator", {}),
     })
     record = {
         "classifier": clf,
@@ -1826,6 +1837,14 @@ def fit_configured_classifier(
         num_classes: int,
 ) -> Dict[str, Any]:
     device, device_warnings = resolve_device(model_key, requested_device)
+    accelerator = training_acceleration_backend(prefer_cuda=device == "cuda")
+    fit_x, fit_y = x_train, y_train
+    if model_key == "xgboost":
+        fit_x, fit_y = prepare_xgboost_training_arrays(
+            x_train,
+            y_train,
+            use_cuda=accelerator["backend"] == "cuda",
+        )
     try:
         classifier = build_worldcup_classifier(
             model_key=model_key,
@@ -1835,9 +1854,9 @@ def fit_configured_classifier(
             seed=seed,
             num_classes=num_classes,
         )
-        classifier.fit(x_train, y_train)
+        classifier.fit(fit_x, fit_y)
         finalize_classifier_for_inference(classifier, model_key=model_key, trained_device=device)
-        return {"classifier": classifier, "device": device, "warnings": device_warnings}
+        return {"classifier": classifier, "device": device, "warnings": device_warnings, "accelerator": accelerator}
     except Exception as exc:
         if device == "cuda":
             fallback = build_worldcup_classifier(
@@ -1848,12 +1867,13 @@ def fit_configured_classifier(
                 seed=seed,
                 num_classes=num_classes,
             )
-            fallback.fit(x_train, y_train)
+            fallback.fit(fit_x, fit_y)
             finalize_classifier_for_inference(fallback, model_key=model_key, trained_device="cpu")
             return {
                 "classifier": fallback,
                 "device": "cpu",
                 "warnings": [*device_warnings, f"CUDA fallo durante fit ({exc.__class__.__name__}); se reintento en CPU."],
+                "accelerator": training_acceleration_backend(prefer_cuda=False),
             }
         raise
 
@@ -1910,14 +1930,15 @@ def build_worldcup_classifier(
             "reg_alpha": float(params.get("alpha_regularization", 0.0)),
             "random_state": seed,
             "n_jobs": n_jobs,
+            "tree_method": "hist",
+            "device": "cuda" if device == "cuda" else "cpu",
             "eval_metric": "mlogloss" if num_classes > 2 else "logloss",
+            "verbosity": 0,
         }
         if num_classes > 2:
             kwargs.update({"objective": "multi:softprob", "num_class": num_classes})
         else:
             kwargs["objective"] = "binary:logistic"
-        if device == "cuda":
-            kwargs.update({"tree_method": "hist", "device": "cuda"})
         return XGBClassifier(**kwargs)
     if model_key == "lightgbm":
         from src.models.classifiers.boosting import WarningFreeLGBMClassifier
@@ -2367,13 +2388,13 @@ def blend_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, float]
 
 def classifier_predict(classifier, x: pd.DataFrame) -> np.ndarray:
     if classifier.__class__.__module__.startswith("xgboost"):
-        return np.asarray(classifier.predict(np.asarray(x, dtype=np.float32)))
+        return np.asarray(classifier.predict(prepare_xgboost_prediction_array(x)))
     return np.asarray(classifier.predict(x))
 
 
 def classifier_predict_proba(classifier, x: pd.DataFrame) -> np.ndarray:
     if classifier.__class__.__module__.startswith("xgboost"):
-        return np.asarray(classifier.predict_proba(np.asarray(x, dtype=np.float32)))
+        return np.asarray(classifier.predict_proba(prepare_xgboost_prediction_array(x)))
     return np.asarray(classifier.predict_proba(x))
 
 

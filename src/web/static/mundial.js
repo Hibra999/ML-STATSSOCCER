@@ -76,7 +76,7 @@ async function loadAll(refresh) {
   clearAlert();
   setLoading();
   try {
-    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, training, models, procedure] = await Promise.all([
+    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, training, models] = await Promise.all([
       api(`/api/mundial/overview?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/groups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/fixtures?refresh=${refresh ? "true" : "false"}`),
@@ -86,7 +86,6 @@ async function loadAll(refresh) {
       api(`/api/mundial/player-features?refresh=${refresh ? "true" : "false"}`),
       api("/api/mundial/training/status"),
       api("/api/mundial/models"),
-      api("/api/mundial/procedure"),
     ]);
     state.overview = overview;
     state.groups = groups.groups || [];
@@ -112,7 +111,6 @@ async function loadAll(refresh) {
     renderPlayerFeatures(playerFeatures);
     renderTrainingStatus(training);
     renderModelsCatalog(models);
-    renderProcedure(procedure);
     fillLineupSelect();
   } catch (error) {
     showError(error.message);
@@ -1458,14 +1456,6 @@ function renderSimulation(result) {
   }).join("");
   renderTable("advancement-table", result.advancement);
   renderTable("match-probs-table", result.matches);
-}
-
-function renderProcedure(payload) {
-  document.getElementById("procedure-list").innerHTML = (payload.steps || []).map((step, index) => `
-    <article class="procedure-step">
-      <span>${escapeHtml(index + 1)}</span>
-      <div><strong>${escapeHtml(step.name)}</strong><p>${escapeHtml(step.detail)}</p></div>
-    </article>`).join("");
 }
 
 function rebuildTeamAssets() {
