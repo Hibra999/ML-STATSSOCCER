@@ -91,9 +91,9 @@ def training_options() -> Dict[str, Any]:
     return {
         "models": json_safe(models),
         "targets": [
+            {"key": "dual_markets", "label": "Ambos: 1X2 + O/U 2.5"},
             {"key": "result", "label": "Resultado 1/X/2"},
             {"key": "over_under_25", "label": "Over/Under 2.5"},
-            {"key": "dual_markets", "label": "Ambos: 1X2 + O/U 2.5"},
         ],
         "hardware": detect_hardware(),
         "defaults": default_training_payload(),
@@ -135,7 +135,7 @@ def default_training_payload() -> Dict[str, Any]:
     return {
         "model_type": "xgboost",
         "training_target": "result",
-        "market_mode": "result",
+        "market_mode": "dual_markets",
         "device": "auto",
         "n_jobs": -1,
         "tuning_enabled": False,
@@ -858,7 +858,7 @@ def default_model_id(model_key: str, target: str) -> str:
         "catboost": "cat",
         "ngboost": "ngb",
     }.get(model_key, model_key)
-    short_target = "dual" if target == "dual_markets" else "uo25" if target == "over_under_25" else "result"
+    short_target = "hibrido" if target == "dual_markets" else "uo25" if target == "over_under_25" else "result"
     return f"mundial-{short_model}-{short_target}"
 
 

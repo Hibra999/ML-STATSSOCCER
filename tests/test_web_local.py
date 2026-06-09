@@ -156,9 +156,28 @@ def test_mundial_ui_is_standalone_and_personalizable():
 
     assert "Mundial 2026" in html_source
     assert "worldcup-view active" in html_source
+    nav_source = html_source.split("<nav>", 1)[1].split("</nav>", 1)[0]
+    nav_order = [
+        "Resumen",
+        "Grupos",
+        "Calendario",
+        "11 Iniciales",
+        "Entrenamiento",
+        "Modelo Híbrido",
+        "Predicciones Futuras",
+        "Datos",
+    ]
+    assert [nav_source.index(label) for label in nav_order] == sorted(nav_source.index(label) for label in nav_order)
     assert "scrollIntoView" not in app_source
     assert "switchWorldcupView" in app_source
     assert "data-section=\"predicciones\"" in html_source
+    assert "Calendario" in html_source
+    assert "Modelo Híbrido" in html_source
+    assert "Predicciones Futuras" in html_source
+    assert "Entrenar Modelo Híbrido" in html_source
+    assert "Algoritmo boosting" in html_source
+    assert "mundial-xgb-hibrido" in html_source
+    assert "ML híbrido" in html_source
     assert "model-active-select" in html_source
     assert "model-load" in html_source
     assert "worldcup-model-id" in html_source
@@ -208,6 +227,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "renderEtlFlow" in app_source
     assert "renderTuningFlow" in app_source
     assert "dual_markets" in app_source
+    assert "hibrido" in app_source
     assert "market-panel" in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
@@ -218,7 +238,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
 
 
 def test_worldcup_training_options_expose_boosting_models_and_hardware():
-    from src.worldcup.training import training_options
+    from src.worldcup.training import default_model_id, training_options
 
     options = training_options()
     keys = {model["key"] for model in options["models"]}
@@ -228,6 +248,9 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert options["hardware"]["default_n_jobs"] == -1
     assert options["defaults"]["model_type"] == "xgboost"
     assert options["defaults"]["training_target"] == "result"
+    assert options["defaults"]["market_mode"] == "dual_markets"
+    assert options["targets"][0]["key"] == "dual_markets"
+    assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
 
 
 def test_worldcup_fallback_has_2026_groups_opener_and_bracket():

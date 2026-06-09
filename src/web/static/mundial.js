@@ -121,7 +121,7 @@ function setLoading() {
   document.getElementById("training-tuning-flow").innerHTML = loadingHtml("Tuning pendiente");
   document.getElementById("training-features").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
-  document.getElementById("match-prediction").innerHTML = loadingHtml("Prediccion pendiente");
+  document.getElementById("match-prediction").innerHTML = loadingHtml("Predicción pendiente");
   document.getElementById("match-prob-breakdown").innerHTML = loadingHtml("Desglose pendiente");
   document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones pendientes");
   document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
@@ -306,7 +306,7 @@ async function loadSelectedModel() {
     const result = await api("/api/mundial/models/select", jsonOptions({ model_id: modelId }));
     renderModelsCatalog(result);
     document.getElementById("sim-use-ml-model").checked = true;
-    document.getElementById("simulation-summary").textContent = `Modelo activo: ${result.selected.model_name || result.selected.model_id}`;
+    document.getElementById("simulation-summary").textContent = `Híbrido activo: ${result.selected.model_name || result.selected.model_id}`;
   } catch (error) {
     showError(error.message);
   }
@@ -368,7 +368,7 @@ async function autoRefreshLineups() {
     await loadPlayerFeatures(false);
     await loadSelectedLineup(false);
     document.getElementById("lineup-status").innerHTML = `
-      <span>Fixtures revisados: ${escapeHtml(result.attempted || 0)}</span>
+      <span>Calendario revisado: ${escapeHtml(result.attempted || 0)}</span>
       <span>Con 11 completo: ${escapeHtml(result.refreshed || 0)}</span>
       <span>Sin detectar: ${escapeHtml(result.failures || 0)}</span>`;
   } catch (error) {
@@ -546,7 +546,7 @@ async function downloadTrainingDataset() {
 
 async function trainWorldCupModel() {
   clearAlert();
-  document.getElementById("training-status").textContent = "Entrenando modelo Mundial...";
+  document.getElementById("training-status").textContent = "Entrenando híbrido Mundial...";
   try {
     const result = await api("/api/mundial/models/train", jsonOptions(trainingPayload()));
     renderTrainingResult(result);
@@ -566,7 +566,7 @@ function renderTrainingStatus(payload) {
   renderTrainingControls(state.trainingOptions, model);
   renderHardware((model.hardware && model.trained) ? model.hardware : ((state.trainingOptions || {}).hardware || {}));
   document.getElementById("training-status").textContent = payload.available
-    ? `${payload.train_rows || 0} train etiquetado - ${evalStrategyLabel(payload.eval_strategy)} - ${payload.prediction_rows || 0} prediccion`
+    ? `${payload.train_rows || 0} train etiquetado - ${evalStrategyLabel(payload.eval_strategy)} - ${payload.prediction_rows || 0} predicción`
     : "Dataset Kaggle no descargado";
   document.getElementById("training-source").textContent = `${payload.dataset_slug || "Kaggle"} - ${payload.training_mode || "sin modo"}`;
   document.getElementById("training-summary").innerHTML = datasetSummaryHtml(payload);
@@ -631,7 +631,7 @@ function datasetSummaryHtml(payload) {
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
     datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
     datasetCard("Evaluacion", evalValue, evalStrategyLabel(payload.eval_strategy)),
-    datasetCard("Prediccion 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
+    datasetCard("Predicción 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
     datasetCard("Target", payload.target_column || "-", "label entrenable"),
   ].join("");
@@ -751,7 +751,7 @@ function applyModelDefaults(modelKey, force) {
 
 function autoWorldcupModelId(modelKey, target) {
   const shortModel = { xgboost: "xgb", lightgbm: "lgbm", catboost: "cat", ngboost: "ngb" }[modelKey] || modelKey || "model";
-  const shortTarget = target === "dual_markets" ? "dual" : target === "over_under_25" ? "uo25" : "result";
+  const shortTarget = target === "dual_markets" ? "hibrido" : target === "over_under_25" ? "uo25" : "result";
   return `mundial-${shortModel}-${shortTarget}`;
 }
 
@@ -958,7 +958,7 @@ async function runMatchPrediction() {
     const result = await api("/api/mundial/predict-match", jsonOptions({ ...simulationPayload(), fixture_id: fixtureId }));
     renderMatchPrediction(result);
   } catch (error) {
-    document.getElementById("match-prediction").innerHTML = loadingHtml("Prediccion no disponible");
+    document.getElementById("match-prediction").innerHTML = loadingHtml("Predicción no disponible");
     showError(error.message);
   }
 }
@@ -979,7 +979,7 @@ function renderMatchPrediction(result) {
   renderTable("match-prediction-detail", objectTable({
     Partido: `${fixture.home || ""} vs ${fixture.away || ""}`,
     Fecha: fixture.date || "",
-    Prediccion: result.prediction || "",
+    Predicción: result.prediction || "",
     Marcador: result.modal_score || "",
     "xG local": (result.expected_goals || {}).home || "",
     "xG visita": (result.expected_goals || {}).away || "",
@@ -1116,7 +1116,7 @@ function renderSimulation(result) {
   const config = summary.config || {};
   const lineupState = config.use_lineups ? "11 activo" : "11 off";
   const featureState = config.use_player_features ? "features XI activas" : "features XI off";
-  const mlState = config.use_ml_model ? "Kaggle ML activo" : "Kaggle ML off";
+  const mlState = config.use_ml_model ? "ML híbrido activo" : "ML híbrido off";
   document.getElementById("simulation-summary").textContent =
     `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState} - ${mlState}`;
   const rows = (result.advancement && result.advancement.rows) || [];

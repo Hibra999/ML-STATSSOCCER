@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260609-4">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260609-5">
 </head>
 <body>
   <header class="topbar">
@@ -15,11 +15,11 @@
     <nav>
       <button class="nav-pill active" data-section="resumen">Resumen</button>
       <button class="nav-pill" data-section="grupos">Grupos</button>
-      <button class="nav-pill" data-section="fixtures">Fixtures</button>
-      <button class="nav-pill" data-section="alineaciones">11 iniciales</button>
-      <button class="nav-pill" data-section="modelo">Modelo</button>
-      <button class="nav-pill" data-section="predicciones">Predicciones</button>
+      <button class="nav-pill" data-section="fixtures">Calendario</button>
+      <button class="nav-pill" data-section="alineaciones">11 Iniciales</button>
       <button class="nav-pill" data-section="entrenamiento">Entrenamiento</button>
+      <button class="nav-pill" data-section="modelo">Modelo Híbrido</button>
+      <button class="nav-pill" data-section="predicciones">Predicciones Futuras</button>
       <button class="nav-pill" data-section="datos">Datos</button>
     </nav>
   </header>
@@ -57,7 +57,7 @@
 
     <section id="fixtures" class="section-block worldcup-view">
       <div class="section-heading">
-        <h2>Fixtures</h2>
+        <h2>Calendario</h2>
         <div class="filters">
           <select id="fixture-group-filter"></select>
           <input id="fixture-search" placeholder="Buscar equipo">
@@ -95,12 +95,12 @@
 
     <section id="modelo" class="section-block worldcup-view">
       <div class="section-heading">
-        <h2>Monte Carlo</h2>
+        <h2>Modelo Híbrido</h2>
         <small id="simulation-summary"></small>
       </div>
       <div class="model-management-grid">
         <article class="visual-panel compact-panel">
-          <header><h3>Modelo activo</h3><small>Catálogo local Mundial</small></header>
+          <header><h3>Modelo híbrido activo</h3><small>Catálogo local Mundial</small></header>
           <div class="model-loader">
             <select id="model-active-select"></select>
             <button id="model-load" class="primary" type="button">Cargar modelo</button>
@@ -110,7 +110,7 @@
           <div id="models-list" class="models-list"></div>
         </article>
         <article class="visual-panel compact-panel">
-          <header><h3>Fine-tuning de simulación</h3><small id="model-source">Elo + Poisson Monte Carlo</small></header>
+          <header><h3>Ajustes Monte Carlo</h3><small id="model-source">Elo + Poisson + ML híbrido</small></header>
           <div class="control-grid compact-controls">
             <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
             <label>Seed<input id="sim-seed" type="number" value="2026"></label>
@@ -120,10 +120,10 @@
             <label>Max goles<input id="sim-max-goals" type="number" min="6" max="14" step="1" value="10"></label>
             <label>Peso 11<input id="sim-lineup-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
             <label>Peso features<input id="sim-player-feature-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
-            <label>Peso Kaggle<input id="sim-ml-weight" type="number" min="0" max="1" step="0.05" value="0.5"></label>
+            <label>Peso ML híbrido<input id="sim-ml-weight" type="number" min="0" max="1" step="0.05" value="0.5"></label>
             <label class="check"><input id="sim-use-lineups" type="checkbox"> Usar 11</label>
             <label class="check"><input id="sim-use-player-features" type="checkbox"> Features XI</label>
-            <label class="check"><input id="sim-use-ml-model" type="checkbox"> Kaggle ML</label>
+            <label class="check"><input id="sim-use-ml-model" type="checkbox"> ML híbrido</label>
           </div>
           <div class="actions-row">
             <button id="simulate-btn" class="primary" type="button">Simular</button>
@@ -133,7 +133,7 @@
       </div>
       <div class="prediction-dock">
         <div>
-          <h3>Prediccion del partido</h3>
+          <h3>Predicción puntual</h3>
           <small>1X2, marcador modal y Over/Under 2.5</small>
         </div>
         <select id="predict-fixture"></select>
@@ -141,7 +141,7 @@
       </div>
       <div id="match-prediction" class="prediction-grid"></div>
       <details class="data-drawer">
-        <summary>Detalle prediccion partido</summary>
+        <summary>Detalle predicción partido</summary>
         <div id="match-prediction-detail"></div>
       </details>
       <details class="data-drawer" open>
@@ -163,12 +163,12 @@
 
     <section id="predicciones" class="section-block worldcup-view">
       <div class="section-heading">
-        <h2>Próximos partidos</h2>
+        <h2>Predicciones Futuras</h2>
         <small id="upcoming-summary">Modelo entrenado si esta disponible</small>
       </div>
       <div class="prediction-dock clean-dock">
         <div>
-          <h3>Predecir futuros N</h3>
+          <h3>Próximos N partidos</h3>
           <small>1X2, Over/Under 2.5 y marcador modal por fixture</small>
         </div>
         <label>N partidos<input id="upcoming-predict-limit" type="number" min="1" max="72" step="1" value="8"></label>
@@ -185,8 +185,8 @@
 
     <section id="entrenamiento" class="section-block worldcup-view">
       <div class="section-heading">
-        <h2>Entrenamiento Mundial</h2>
-        <small id="training-source">Kaggle + Elo/Poisson</small>
+        <h2>Entrenar Modelo Híbrido</h2>
+        <small id="training-source">Kaggle + Elo/Poisson + boosting seleccionado</small>
       </div>
       <div class="model-flow">
         <article class="flow-step">
@@ -208,10 +208,10 @@
         </article>
 
         <article class="flow-step">
-          <header><span>3</span><div><strong>Modelo</strong><small>Boosting del proyecto principal</small></div></header>
+          <header><span>3</span><div><strong>Boosting del híbrido</strong><small>El algoritmo seleccionado entrena 1X2 y O/U</small></div></header>
           <div class="control-grid compact-controls">
-            <label>Nombre modelo<input id="worldcup-model-id" placeholder="mundial-xgb-result"></label>
-            <label>Modelo<select id="worldcup-model-type"></select></label>
+            <label>Nombre modelo<input id="worldcup-model-id" placeholder="mundial-xgb-hibrido"></label>
+            <label>Algoritmo boosting<select id="worldcup-model-type"></select></label>
             <label>Mercados<select id="worldcup-target"><option value="dual_markets">Ambos: 1X2 + O/U 2.5</option><option value="result">Resultado 1/X/2</option><option value="over_under_25">Over/Under 2.5</option></select></label>
             <label>N estimadores<input id="worldcup-n-estimators" type="number" min="1" step="1"></label>
             <label>Learning rate<input id="worldcup-learning-rate" type="number" min="0.001" step="0.001"></label>
@@ -248,7 +248,7 @@
         <article class="flow-step">
           <header><span>5</span><div><strong>Entrenar y auditar</strong><small>Metricas, features y warnings</small></div></header>
           <div class="actions-row">
-            <button id="training-train" class="primary" type="button">Entrenar modelo Mundial</button>
+            <button id="training-train" class="primary" type="button">Entrenar híbrido Mundial</button>
           </div>
           <div id="training-model-state" class="model-state-grid"></div>
           <div id="training-warnings" class="status-strip"></div>
@@ -311,6 +311,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260609-5"></script>
+  <script src="/static/mundial.js?v=20260609-6"></script>
 </body>
 </html>
