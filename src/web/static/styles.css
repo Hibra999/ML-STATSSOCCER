@@ -280,69 +280,6 @@ button.primary {
   color: var(--muted);
 }
 
-.worldcup-hero {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: end;
-}
-
-.worldcup-hero p {
-  margin: 6px 0 0;
-  color: var(--muted);
-}
-
-.worldcup-hero label {
-  width: 130px;
-}
-
-.lineup-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin: 12px 0;
-}
-
-.lineup-card {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #f9fbfc;
-  padding: 12px;
-  min-width: 0;
-}
-
-.lineup-card h3 {
-  margin: 0 0 10px;
-  font-size: 15px;
-}
-
-.lineup-card h3 small,
-.lineup-card li small {
-  color: var(--muted);
-  font-weight: 400;
-}
-
-.lineup-card ol {
-  margin: 0;
-  padding-left: 0;
-  list-style: none;
-  display: grid;
-  gap: 6px;
-}
-
-.lineup-card li {
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-  min-width: 0;
-}
-
-.lineup-card li span {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
 .odd-input {
   min-width: 82px;
 }
@@ -540,15 +477,5 @@ th {
   }
   .catalog-flag {
     justify-content: flex-start;
-  }
-  .worldcup-hero {
-    display: grid;
-    align-items: start;
-  }
-  .worldcup-hero label {
-    width: 100%;
-  }
-  .lineup-grid {
-    grid-template-columns: 1fr;
   }
 }

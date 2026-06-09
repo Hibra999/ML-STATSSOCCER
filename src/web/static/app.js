@@ -1,4 +1,4 @@
-const state = { catalog: [], leagues: [], models: {}, specs: [], jobs: new Map(), predictionFixtures: [], worldcupLoaded: false, worldcupFixtures: [] };
+const state = { catalog: [], leagues: [], models: {}, specs: [], jobs: new Map(), predictionFixtures: [] };
 const titles = {
   dashboard: "Inicio",
   leagues: "Ligas",
@@ -6,7 +6,6 @@ const titles = {
   models: "Modelos",
   evaluate: "Evaluar",
   predict: "Predecir",
-  worldcup: "Mundial 2026",
   analysis: "Analisis",
   config: "Configuracion",
 };
@@ -42,7 +41,6 @@ function switchView(view) {
   document.querySelectorAll(".view").forEach((panel) => panel.classList.toggle("active", panel.id === view));
   document.getElementById("view-title").textContent = titles[view] || view;
   if (view === "predict" && !state.predictionFixtures.length) loadUpcomingFixtures();
-  if (view === "worldcup" && !state.worldcupLoaded) loadWorldCup();
 }
 
 async function refreshAll() {
@@ -145,12 +143,6 @@ function bindForms() {
   document.getElementById("evaluate-form").addEventListener("submit", evaluateModel);
   document.getElementById("fixtures-load").addEventListener("click", loadUpcomingFixtures);
   document.getElementById("fixtures-form").addEventListener("submit", fixturesPredict);
-  document.getElementById("worldcup-simulate").addEventListener("click", simulateWorldCup);
-  document.getElementById("worldcup-refresh-players").addEventListener("click", () => loadWorldCupPlayers(true));
-  document.getElementById("worldcup-lineup-load").addEventListener("click", () => loadSelectedWorldCupLineup(false));
-  document.getElementById("worldcup-lineup-refresh").addEventListener("click", refreshSelectedWorldCupLineup);
-  document.getElementById("worldcup-lineup-link").addEventListener("click", linkSelectedWorldCupLineup);
-  document.getElementById("worldcup-lineup-fixture").addEventListener("change", () => loadSelectedWorldCupLineup(false));
   document.getElementById("analysis-form").addEventListener("submit", analysisPlot);
   document.getElementById("config-form").addEventListener("submit", saveConfig);
   toggleTuningControls();
@@ -480,167 +472,6 @@ function selectedFixtureRows() {
     selected.push(fixture);
   });
   return selected;
-}
-
-async function loadWorldCup() {
-  clearAlert();
-  state.worldcupLoaded = true;
-  document.getElementById("worldcup-groups-table").innerHTML = `<div class="item"><div>Cargando grupos...</div></div>`;
-  document.getElementById("worldcup-fixtures-table").innerHTML = `<div class="item"><div>Cargando fixtures...</div></div>`;
-  document.getElementById("worldcup-teams-table").innerHTML = `<div class="item"><div>Cargando equipos...</div></div>`;
-  try {
-    const [overview, groups, fixtures, teams] = await Promise.all([
-      api("/api/worldcup/overview"),
-      api("/api/worldcup/groups"),
-      api("/api/worldcup/fixtures"),
-      api("/api/worldcup/teams"),
-    ]);
-    renderWorldCupOverview(overview);
-    renderTable("worldcup-groups-table", groups);
-    renderTable("worldcup-fixtures-table", fixtures);
-    renderTable("worldcup-teams-table", teams.teams);
-    state.worldcupFixtures = (fixtures.rows || []).filter((row) => row.Grupo);
-    fillWorldCupFixtureSelect();
-    await loadWorldCupLineupsSummary();
-    await loadSelectedWorldCupLineup(false);
-    await loadWorldCupPlayers(false);
-    await simulateWorldCup();
-  } catch (error) {
-    state.worldcupLoaded = false;
-    showError(error.message);
-  }
-}
-
-function renderWorldCupOverview(overview) {
-  document.getElementById("worldcup-teams-count").textContent = overview.teams || 0;
-  document.getElementById("worldcup-groups-count").textContent = overview.groups || 0;
-  document.getElementById("worldcup-fixtures-count").textContent = overview.fixtures || 0;
-  document.getElementById("worldcup-meta").textContent = `${overview.opener.match} - ${overview.opener.date} - ${overview.fixture_source}`;
-}
-
-function fillWorldCupFixtureSelect() {
-  const select = document.getElementById("worldcup-lineup-fixture");
-  select.innerHTML = state.worldcupFixtures.map((fixture) => `
-    <option value="${escapeAttr(fixture["No."])}">${escapeHtml(fixture["No."])} - ${escapeHtml(fixture.Grupo)} - ${escapeHtml(fixture["Equipo 1"])} vs ${escapeHtml(fixture["Equipo 2"])}</option>
-  `).join("");
-}
-
-async function loadWorldCupLineupsSummary() {
-  try {
-    const result = await api("/api/worldcup/lineups");
-    renderTable("worldcup-lineups-summary", result.lineups);
-  } catch (error) {
-    document.getElementById("worldcup-lineups-summary").innerHTML = `<div class="item"><div>${escapeHtml(error.message)}</div></div>`;
-  }
-}
-
-async function loadSelectedWorldCupLineup(refresh) {
-  const fixtureId = document.getElementById("worldcup-lineup-fixture").value;
-  if (!fixtureId) return;
-  document.getElementById("worldcup-lineup-status").innerHTML = `<small>Cargando alineacion...</small>`;
-  try {
-    const result = await api(`/api/worldcup/fixtures/${encodeURIComponent(fixtureId)}/lineups?refresh=${refresh ? "true" : "false"}`);
-    renderWorldCupLineup(result);
-  } catch (error) {
-    showError(error.message);
-    document.getElementById("worldcup-lineup-status").innerHTML = "";
-  }
-}
-
-async function refreshSelectedWorldCupLineup() {
-  const fixtureId = document.getElementById("worldcup-lineup-fixture").value;
-  if (!fixtureId) return;
-  const matchUrl = document.getElementById("worldcup-lineup-url").value;
-  try {
-    const result = await api(`/api/worldcup/fixtures/${encodeURIComponent(fixtureId)}/lineups/refresh`, jsonOptions({ match_url: matchUrl }));
-    renderWorldCupLineup(result);
-    await loadWorldCupLineupsSummary();
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function linkSelectedWorldCupLineup() {
-  const fixtureId = document.getElementById("worldcup-lineup-fixture").value;
-  const matchUrl = document.getElementById("worldcup-lineup-url").value;
-  if (!fixtureId || !matchUrl) {
-    showError("Pega la URL SofaScore del partido");
-    return;
-  }
-  try {
-    const result = await api(`/api/worldcup/fixtures/${encodeURIComponent(fixtureId)}/lineups/link`, jsonOptions({ match_url: matchUrl, refresh: true }));
-    renderWorldCupLineup(result);
-    await loadWorldCupLineupsSummary();
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-function renderWorldCupLineup(result) {
-  const lineup = result.lineup || {};
-  document.getElementById("worldcup-lineup-url").value = lineup.match_url || document.getElementById("worldcup-lineup-url").value || "";
-  document.getElementById("worldcup-lineup-status").innerHTML = `
-    <small>Estado: ${escapeHtml(lineup.status || "Pendiente")} - Fuente: ${escapeHtml(lineup.source || "")}</small>
-    <small>${escapeHtml(lineup.home || "")}: ${escapeHtml(lineup.starters_home || 0)}/11 - ${escapeHtml(lineup.away || "")}: ${escapeHtml(lineup.starters_away || 0)}/11</small>
-    ${lineup.error ? `<small>${escapeHtml(lineup.error)}</small>` : ""}`;
-  document.getElementById("worldcup-lineup-cards").innerHTML = `
-    ${lineupTeamHtml(lineup, lineup.home, lineup.formation_home)}
-    ${lineupTeamHtml(lineup, lineup.away, lineup.formation_away)}`;
-  renderTable("worldcup-lineup-table", result.players);
-}
-
-function lineupTeamHtml(lineup, team, formation) {
-  const players = (lineup.players || []).filter((player) => player.team === team && player.starter).slice(0, 11);
-  if (!players.length) {
-    return `<div class="lineup-card"><h3>${escapeHtml(team || "Equipo")}</h3><div class="item"><div>11 pendiente</div></div></div>`;
-  }
-  return `<div class="lineup-card">
-    <h3>${escapeHtml(team)}${formation ? ` <small>${escapeHtml(formation)}</small>` : ""}</h3>
-    <ol>${players.map((player) => `<li><span>${escapeHtml(player.shirt_number || "")}</span>${escapeHtml(player.name)} <small>${escapeHtml(player.position || "")}${player.rating ? " - " + escapeHtml(player.rating) : ""}</small></li>`).join("")}</ol>
-  </div>`;
-}
-
-async function loadWorldCupPlayers(refresh) {
-  const source = document.getElementById("worldcup-players-source");
-  const table = document.getElementById("worldcup-players-table");
-  source.innerHTML = `<small>${refresh ? "Actualizando jugadores desde fuente publica..." : "Cargando jugadores..."}</small>`;
-  try {
-    const result = await api(`/api/worldcup/players?refresh=${refresh ? "true" : "false"}`);
-    source.innerHTML = `<small>Fuente: ${escapeHtml(result.source)}</small>`;
-    renderTable("worldcup-players-table", result.players);
-  } catch (error) {
-    table.innerHTML = "";
-    source.innerHTML = `<small>${escapeHtml(error.message)}</small>`;
-  }
-}
-
-async function simulateWorldCup() {
-  clearAlert();
-  const payload = {
-    iterations: Number(document.getElementById("worldcup-iterations").value || 5000),
-    seed: Number(document.getElementById("worldcup-seed").value || 2026),
-    use_lineups: document.getElementById("worldcup-use-lineups").checked,
-  };
-  document.getElementById("worldcup-summary").innerHTML = `<small>Ejecutando Monte Carlo...</small>`;
-  document.getElementById("worldcup-advancement").innerHTML = "";
-  try {
-    const result = await api("/api/worldcup/simulate", jsonOptions(payload));
-    renderWorldCupSimulation(result);
-  } catch (error) {
-    showError(error.message);
-    document.getElementById("worldcup-summary").innerHTML = "";
-  }
-}
-
-function renderWorldCupSimulation(result) {
-  const summary = result.summary || {};
-  document.getElementById("worldcup-summary").innerHTML = `
-    <small>${escapeHtml(summary.model)} - ${escapeHtml(summary.iterations)} iteraciones - seed ${escapeHtml(summary.seed)}</small>
-    <small>Fixtures: ${escapeHtml(summary.fixture_source)}</small>
-    <small>Historico: ${escapeHtml(summary.history_source)}</small>
-    ${(summary.lineup_notes || []).map((note) => `<small>${escapeHtml(note)}</small>`).join("")}`;
-  renderTable("worldcup-advancement", result.advancement);
-  renderTable("worldcup-match-probs", result.matches);
 }
 
 async function analysisPlot(event) {

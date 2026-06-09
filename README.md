@@ -55,6 +55,18 @@ Para usar otro puerto:
 python app.py --port 5051
 ```
 
+Iniciar la aplicacion independiente del Mundial 2026:
+
+```bash
+python mundial.py
+```
+
+Abrir en:
+
+```text
+http://127.0.0.1:5052
+```
+
 La aplicacion se enlaza a `127.0.0.1`. No esta pensada para exponerse publicamente.
 
 ## Uso Basico
@@ -129,7 +141,7 @@ storage/graphics/countries
 ## Verificacion
 
 ```bash
-python -m compileall app.py cli.py install.py src
+python -m compileall app.py mundial.py cli.py install.py src
 python -m pytest tests -q
 ```
 

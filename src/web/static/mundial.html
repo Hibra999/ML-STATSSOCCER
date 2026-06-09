@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mundial 2026 | ML-STATSSOCCER</title>
+  <link rel="stylesheet" href="/static/mundial.css?v=20260609-1">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="brand-mark">26</span>
+      <span><strong>Mundial 2026</strong><small>ML-STATSSOCCER</small></span>
+    </a>
+    <nav>
+      <button class="nav-pill active" data-section="resumen">Resumen</button>
+      <button class="nav-pill" data-section="grupos">Grupos</button>
+      <button class="nav-pill" data-section="fixtures">Fixtures</button>
+      <button class="nav-pill" data-section="alineaciones">11 iniciales</button>
+      <button class="nav-pill" data-section="modelo">Modelo</button>
+      <button class="nav-pill" data-section="datos">Datos</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="alert" class="alert hidden"></section>
+
+    <section id="resumen" class="hero section-block">
+      <div class="hero-copy">
+        <span class="eyebrow">Apartado independiente</span>
+        <h1>Mundial 2026</h1>
+        <p id="hero-meta">Cargando fixture inaugural...</p>
+        <div class="hero-match" id="hero-match"></div>
+      </div>
+      <div class="hero-metrics">
+        <div class="metric"><span>Equipos</span><strong id="metric-teams">0</strong></div>
+        <div class="metric"><span>Grupos</span><strong id="metric-groups">0</strong></div>
+        <div class="metric"><span>Partidos</span><strong id="metric-fixtures">0</strong></div>
+        <div class="metric"><span>Jugadores</span><strong id="metric-players">0</strong></div>
+      </div>
+    </section>
+
+    <section class="control-dock section-block">
+      <div class="control-title">
+        <strong>Fine-tuning de simulacion</strong>
+        <small id="model-source">Elo + Poisson Monte Carlo</small>
+      </div>
+      <div class="control-grid">
+        <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
+        <label>Seed<input id="sim-seed" type="number" value="2026"></label>
+        <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
+        <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
+        <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
+        <label>Max goles<input id="sim-max-goals" type="number" min="6" max="14" step="1" value="10"></label>
+        <label>Peso 11<input id="sim-lineup-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
+        <label class="check"><input id="sim-use-lineups" type="checkbox"> Usar 11</label>
+      </div>
+      <div class="actions-row">
+        <button id="simulate-btn" class="primary" type="button">Simular</button>
+        <button id="refresh-btn" type="button">Actualizar datos</button>
+      </div>
+    </section>
+
+    <section id="grupos" class="section-block">
+      <div class="section-heading">
+        <h2>Grupos</h2>
+        <small id="groups-source"></small>
+      </div>
+      <div id="groups-grid" class="groups-grid"></div>
+      <div class="section-heading subheading">
+        <h2>Equipos y perfil</h2>
+        <small>Ratings derivados del historico sin resultados 2026</small>
+      </div>
+      <div id="teams-grid" class="teams-grid"></div>
+    </section>
+
+    <section id="fixtures" class="section-block">
+      <div class="section-heading">
+        <h2>Fixtures</h2>
+        <div class="filters">
+          <select id="fixture-group-filter"></select>
+          <input id="fixture-search" placeholder="Buscar equipo">
+        </div>
+      </div>
+      <div id="fixtures-list" class="fixtures-list"></div>
+    </section>
+
+    <section id="alineaciones" class="section-block">
+      <div class="section-heading">
+        <h2>11 iniciales</h2>
+        <small id="lineup-source"></small>
+      </div>
+      <div class="lineup-toolbar">
+        <select id="lineup-fixture"></select>
+        <input id="lineup-url" placeholder="URL SofaScore del partido">
+        <button id="lineup-load" type="button">Cargar</button>
+        <button id="lineup-link" type="button">Vincular URL</button>
+        <button id="lineup-refresh" type="button">Actualizar 11</button>
+      </div>
+      <div id="lineup-status" class="status-strip"></div>
+      <div id="lineup-stage" class="lineup-stage"></div>
+      <details class="data-drawer">
+        <summary>Tabla de alineacion</summary>
+        <div id="lineup-table"></div>
+      </details>
+      <div id="lineups-summary" class="lineups-summary"></div>
+    </section>
+
+    <section id="modelo" class="section-block">
+      <div class="section-heading">
+        <h2>Monte Carlo</h2>
+        <small id="simulation-summary"></small>
+      </div>
+      <div id="champion-strip" class="champion-strip"></div>
+      <div class="results-grid">
+        <div>
+          <h3>Avance por seleccion</h3>
+          <div id="advancement-table"></div>
+        </div>
+        <div>
+          <h3>Probabilidades por partido</h3>
+          <div id="match-probs-table"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="datos" class="section-block">
+      <div class="section-heading">
+        <h2>Datos y procedimiento</h2>
+        <button id="players-refresh" type="button">Actualizar jugadores</button>
+      </div>
+      <div class="data-grid">
+        <div>
+          <h3>Procedimiento</h3>
+          <div id="procedure-list" class="procedure-list"></div>
+        </div>
+        <div>
+          <h3>Jugadores</h3>
+          <small id="players-source"></small>
+          <div id="players-list" class="players-list"></div>
+        </div>
+      </div>
+      <details class="data-drawer">
+        <summary>Tabla de jugadores</summary>
+        <div id="players-table"></div>
+      </details>
+    </section>
+  </main>
+
+  <script src="/static/mundial.js?v=20260609-1"></script>
+</body>
+</html>

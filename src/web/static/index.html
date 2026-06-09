@@ -20,7 +20,6 @@
         <button class="nav-button" data-view="models">Modelos</button>
         <button class="nav-button" data-view="evaluate">Evaluar</button>
         <button class="nav-button" data-view="predict">Predecir</button>
-        <button class="nav-button" data-view="worldcup">Mundial 2026</button>
         <button class="nav-button" data-view="analysis">Analisis</button>
         <button class="nav-button" data-view="config">Configuracion</button>
       </nav>
@@ -185,72 +184,6 @@
           <div id="fixtures-picker" class="output"></div>
         </div>
         <div id="predict-output" class="panel output"></div>
-      </section>
-
-      <section id="worldcup" class="view">
-        <div class="panel worldcup-hero">
-          <div>
-            <h2>Mundial 2026</h2>
-            <p id="worldcup-meta">Mexico vs South Africa - 2026-06-11</p>
-          </div>
-          <div class="actions-row">
-            <label>Iteraciones<input id="worldcup-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
-            <label>Seed<input id="worldcup-seed" type="number" value="2026"></label>
-            <label class="check"><input id="worldcup-use-lineups" type="checkbox"> Usar 11</label>
-            <button id="worldcup-simulate" class="primary" type="button">Simular</button>
-            <button id="worldcup-refresh-players" type="button">Actualizar jugadores</button>
-          </div>
-        </div>
-        <div class="metric-grid">
-          <div class="metric"><span>Equipos</span><strong id="worldcup-teams-count">0</strong></div>
-          <div class="metric"><span>Grupos</span><strong id="worldcup-groups-count">0</strong></div>
-          <div class="metric"><span>Partidos</span><strong id="worldcup-fixtures-count">0</strong></div>
-        </div>
-        <div class="grid two">
-          <div class="panel">
-            <div class="panel-header"><h2>Grupos</h2></div>
-            <div id="worldcup-groups-table"></div>
-          </div>
-          <div class="panel">
-            <div class="panel-header"><h2>Equipos</h2></div>
-            <div id="worldcup-teams-table"></div>
-          </div>
-        </div>
-        <div class="panel">
-          <div class="panel-header"><h2>Fixtures</h2></div>
-          <div id="worldcup-fixtures-table"></div>
-        </div>
-        <div class="panel">
-          <div class="panel-header"><h2>11 iniciales</h2></div>
-          <div class="toolbar">
-            <select id="worldcup-lineup-fixture"></select>
-            <input id="worldcup-lineup-url" placeholder="URL SofaScore del partido">
-            <button id="worldcup-lineup-load" type="button">Cargar</button>
-            <button id="worldcup-lineup-link" type="button">Vincular URL</button>
-            <button id="worldcup-lineup-refresh" type="button">Actualizar 11</button>
-          </div>
-          <div id="worldcup-lineup-status" class="fixture-notes"></div>
-          <div id="worldcup-lineup-cards" class="lineup-grid"></div>
-          <div id="worldcup-lineup-table"></div>
-        </div>
-        <div class="panel">
-          <div class="panel-header"><h2>Estados de alineaciones</h2></div>
-          <div id="worldcup-lineups-summary"></div>
-        </div>
-        <div class="panel">
-          <div class="panel-header"><h2>Jugadores</h2></div>
-          <div id="worldcup-players-source" class="fixture-notes"></div>
-          <div id="worldcup-players-table"></div>
-        </div>
-        <div class="panel">
-          <div class="panel-header"><h2>Probabilidades por partido</h2></div>
-          <div id="worldcup-match-probs"></div>
-        </div>
-        <div class="panel">
-          <div class="panel-header"><h2>Monte Carlo</h2></div>
-          <div id="worldcup-summary" class="fixture-notes"></div>
-          <div id="worldcup-advancement"></div>
-        </div>
       </section>
 
       <section id="analysis" class="view">

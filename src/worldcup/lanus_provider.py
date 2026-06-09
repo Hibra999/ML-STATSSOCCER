@@ -115,9 +115,10 @@ def lineups_table(payload: Dict[str, Any]) -> pd.DataFrame:
     ])
 
 
-def lineup_rating_adjustments(tournament: Dict[str, Any]) -> Tuple[Dict[str, float], List[str]]:
+def lineup_rating_adjustments(tournament: Dict[str, Any], weight: float = 1.0) -> Tuple[Dict[str, float], List[str]]:
     adjustments: Dict[str, List[float]] = {}
     notes: List[str] = []
+    weight = max(min(float(weight or 1.0), 2.0), 0.0)
     for _, fixture in tournament_fixtures_dataframe(tournament).iterrows():
         cache_path = lineup_cache_path(str(fixture["No."]))
         if not cache_path.exists():
@@ -138,11 +139,11 @@ def lineup_rating_adjustments(tournament: Dict[str, Any]) -> Tuple[Dict[str, flo
             ratings = [rating for rating in ratings if rating is not None]
             if not ratings:
                 continue
-            adjustment = max(min((sum(ratings) / len(ratings) - 6.75) * 35.0, 30.0), -30.0)
+            adjustment = max(min((sum(ratings) / len(ratings) - 6.75) * 35.0 * weight, 45.0), -45.0)
             adjustments.setdefault(team, []).append(adjustment)
     output = {team: sum(values) / len(values) for team, values in adjustments.items() if values}
     if output:
-        notes.append(f"Lineups aplicados a {len(output)} equipos con rating de SofaScore.")
+        notes.append(f"Lineups aplicados a {len(output)} equipos con rating de SofaScore y peso {weight:g}.")
     return output, notes
 
 
@@ -332,6 +333,7 @@ def _normalize_side_players(side_data: Any, side: str, team: str, stats_df: Opti
             "starter": not bool(item.get("substitute", False)),
             "captain": bool(item.get("captain", False)),
             "id": _clean_scalar(player_id or ""),
+            "photo_url": sofa_player_photo_url(player_id),
             "rating": _clean_scalar(rating),
         })
     return players
@@ -389,6 +391,13 @@ def _to_float(value: Any) -> Optional[float]:
         return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
+
+
+def sofa_player_photo_url(player_id: Any) -> str:
+    player_id = _clean_scalar(player_id)
+    if player_id in {"", None}:
+        return ""
+    return f"https://api.sofascore.app/api/v1/player/{player_id}/image"
 
 
 def lineup_is_prediction_safe(payload: Dict[str, Any]) -> bool:

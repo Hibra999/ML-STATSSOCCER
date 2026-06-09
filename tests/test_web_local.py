@@ -32,13 +32,30 @@ def test_fastapi_app_imports_when_dependency_available():
     assert "/api/health" in paths
     assert "/api/leagues" in paths
     assert "/api/dashboard/fixtures" in paths
-    assert "/api/worldcup/overview" in paths
-    assert "/api/worldcup/simulate" in paths
-    assert "/api/worldcup/lineups" in paths
-    assert "/api/worldcup/fixtures/{fixture_id}/lineups" in paths
+    assert "/api/worldcup/overview" not in paths
+    assert "/api/worldcup/simulate" not in paths
+    assert "/api/worldcup/lineups" not in paths
     assert "/api/leagues/{league_id}/fixtures/upcoming" in paths
     assert "/api/leagues/{league_id}/predict/manual" not in paths
     assert "/favicon.ico" in paths
+    assert "/assets" in paths
+
+
+def test_mundial_app_imports_as_independent_fastapi_app():
+    pytest.importorskip("fastapi")
+    from src.web.mundial import create_mundial_app
+
+    app = create_mundial_app()
+    paths = {route.path for route in app.routes}
+
+    assert "/" in paths
+    assert "/api/health" in paths
+    assert "/api/mundial/overview" in paths
+    assert "/api/mundial/simulate" in paths
+    assert "/api/mundial/lineups" in paths
+    assert "/api/mundial/fixtures/{fixture_id}/lineups" in paths
+    assert "/api/mundial/procedure" in paths
+    assert "/api/worldcup/overview" not in paths
     assert "/assets" in paths
 
 
@@ -102,13 +119,28 @@ def test_predict_ui_uses_automatic_fixtures_only():
     assert "fixtures-browser" in index_source
     assert "fixtures-picker" in index_source
     assert "dashboard-fixtures" in index_source
-    assert "Mundial 2026" in index_source
-    assert "/api/worldcup/simulate" in app_source
-    assert "worldcup-lineup-fixture" in index_source
-    assert "worldcup-use-lineups" in index_source
+    assert "Mundial 2026" not in index_source
+    assert "/api/worldcup/simulate" not in app_source
+    assert "worldcup-lineup-fixture" not in index_source
+    assert "worldcup-use-lineups" not in index_source
     assert "/static/app.js?v=" in index_source
     assert "renderJobs();" in app_source
     assert "dashboardFixtureSummaryHtml" in app_source
+
+
+def test_mundial_ui_is_standalone_and_personalizable():
+    html_source = open("src/web/static/mundial.html", "r", encoding="utf-8").read()
+    app_source = open("src/web/static/mundial.js", "r", encoding="utf-8").read()
+
+    assert "Mundial 2026" in html_source
+    assert "sim-history-weight" in html_source
+    assert "sim-recency-weight" in html_source
+    assert "sim-host-advantage" in html_source
+    assert "lineup-fixture" in html_source
+    assert "lineup-stage" in html_source
+    assert "/api/mundial/simulate" in app_source
+    assert "/api/worldcup/simulate" not in app_source
+    assert "player-photo" in app_source
 
 
 def test_worldcup_fallback_has_2026_groups_opener_and_bracket():
@@ -218,6 +250,55 @@ def test_worldcup_lineup_rating_adjustments_use_safe_cached_lineups(tmp_path, mo
     assert adjustments["Mexico"] > 0
     assert adjustments["South Africa"] < 0
     assert notes
+
+
+def test_mundial_simulation_config_is_clamped():
+    from src.web.mundial_services import simulation_config
+
+    config = simulation_config({
+        "iterations": 999999,
+        "history_weight": 0,
+        "recency_weight": 2,
+        "host_advantage": -5,
+        "max_goals": 99,
+        "lineup_weight": 9,
+        "use_lineups": True,
+    })
+
+    assert config["iterations"] == 20000
+    assert config["history_weight"] == 0.2
+    assert config["recency_weight"] == 1.0
+    assert config["host_advantage"] == 0.0
+    assert config["max_goals"] == 14
+    assert config["lineup_weight"] == 2.0
+    assert config["use_lineups"] is True
+
+
+def test_mundial_lineup_payload_adds_visual_positions_and_photos():
+    from src.web.mundial_services import enrich_lineup_payload
+
+    payload = {
+        "home": "Mexico",
+        "away": "South Africa",
+        "formation_home": "4-3-3",
+        "formation_away": "4-4-2",
+        "players": [
+            {"team": "Mexico", "name": f"Mexico {index}", "id": index, "starter": True, "shirt_number": index, "position": "M"}
+            for index in range(1, 12)
+        ] + [
+            {"team": "South Africa", "name": f"SA {index}", "id": 100 + index, "starter": True, "shirt_number": index, "position": "D"}
+            for index in range(1, 12)
+        ],
+    }
+
+    result = enrich_lineup_payload(payload)
+    starters = [player for player in result["players"] if player["team"] == "Mexico" and player["starter"]]
+
+    assert result["home_asset"]["flag_url"]
+    assert len(starters) == 11
+    assert all(player["photo_url"].startswith("https://api.sofascore.app/api/v1/player/") for player in starters)
+    assert all(player["x"] != "" and player["y"] != "" for player in starters)
+    assert starters[0]["initials"] == "M1"
 
 
 def test_confusion_matrix_payload_for_result_target():
