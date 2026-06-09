@@ -822,12 +822,14 @@ function renderUpcomingPredictions(result) {
   document.getElementById("upcoming-predictions").innerHTML = (result.predictions || []).map((prediction) => {
     const fixture = prediction.fixture || {};
     const probs = prediction.probabilities || {};
+    const homeAsset = assetFor(fixture.home || "");
+    const awayAsset = assetFor(fixture.away || "");
     return `<article class="upcoming-card">
       <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
       <div class="upcoming-match">
-        <strong>${escapeHtml(fixture.home || "")}</strong>
+        <div class="upcoming-team">${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
         <span>vs</span>
-        <strong>${escapeHtml(fixture.away || "")}</strong>
+        <div class="upcoming-team away">${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
       </div>
       <div class="prob-strip">
         <span>1 <b>${escapeHtml(probs.home ?? "")}%</b></span>

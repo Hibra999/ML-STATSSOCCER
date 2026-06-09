@@ -185,6 +185,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "training-tuning-flow" in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-predictions" in html_source
+    assert "upcoming-team" in app_source
+    assert "flagHtml(homeAsset)" in app_source
+    assert "flagHtml(awayAsset)" in app_source
     assert "predict-match-btn" in html_source
     assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
