@@ -17,6 +17,7 @@ from sklearn.model_selection import train_test_split as sklearn_train_test_split
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
 from src.worldcup.accelerators import (
+    numba_jit_available,
     numba_cuda_available,
     prepare_xgboost_prediction_array,
     prepare_xgboost_training_arrays,
@@ -137,8 +138,10 @@ def detect_hardware() -> Dict[str, Any]:
     cpu_count = int(os.cpu_count() or 1)
     cuda_devices: List[str] = []
     cuda_error = ""
+    nvidia_smi = bool(shutil.which("nvidia-smi"))
     numba_cuda = numba_cuda_available()
-    if shutil.which("nvidia-smi"):
+    numba_jit = numba_jit_available()
+    if nvidia_smi:
         try:
             result = subprocess.run(
                 ["nvidia-smi", "-L"],
@@ -157,14 +160,20 @@ def detect_hardware() -> Dict[str, Any]:
         cuda_error = "nvidia-smi no disponible"
     if numba_cuda and not cuda_devices:
         cuda_devices = ["CUDA detectado por Numba"]
+    cuda_available = bool(cuda_devices) or numba_cuda
     return {
         "cpu_count": cpu_count,
         "default_n_jobs": -1,
-        "cuda_available": bool(cuda_devices) or numba_cuda,
+        "cuda_available": cuda_available,
+        "system_cuda_available": bool(cuda_devices),
+        "xgboost_cuda_ready": cuda_available,
         "cuda_devices": cuda_devices,
         "cuda_error": cuda_error,
+        "nvidia_smi_available": nvidia_smi,
+        "numba": numba_jit,
         "numba_cuda_available": numba_cuda,
-        "device_default": "cuda" if cuda_devices else "cpu",
+        "numba_backend": "cuda" if numba_cuda else ("cpu" if numba_jit else "none"),
+        "device_default": "cuda" if cuda_available else "cpu",
     }
 
 
@@ -395,6 +404,8 @@ def train_single_hybrid_model(
     hardware.update({
         "requested_device": train_config["device"],
         "actual_device": fit_result["device"],
+        "model_type": train_config["model_type"],
+        "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
         "n_jobs": train_config["n_jobs"],
         "effective_n_jobs": effective_n_jobs(train_config["n_jobs"], hardware["cpu_count"]),
         "training_accelerator": fit_result.get("accelerator", {}),
@@ -1836,14 +1847,17 @@ def fit_configured_classifier(
         seed: int,
         num_classes: int,
 ) -> Dict[str, Any]:
-    device, device_warnings = resolve_device(model_key, requested_device)
-    accelerator = training_acceleration_backend(prefer_cuda=device == "cuda")
+    device, device_warnings, hardware = resolve_device(model_key, requested_device)
+    accelerator = training_acceleration_backend(
+        prefer_cuda=device == "cuda",
+        cuda_available=hardware.get("xgboost_cuda_ready") if model_key == "xgboost" else hardware.get("cuda_available"),
+    )
     fit_x, fit_y = x_train, y_train
     if model_key == "xgboost":
         fit_x, fit_y = prepare_xgboost_training_arrays(
             x_train,
             y_train,
-            use_cuda=accelerator["backend"] == "cuda",
+            use_cuda=accelerator.get("numba_backend") == "cuda",
         )
     try:
         classifier = build_worldcup_classifier(
@@ -1873,7 +1887,7 @@ def fit_configured_classifier(
                 "classifier": fallback,
                 "device": "cpu",
                 "warnings": [*device_warnings, f"CUDA fallo durante fit ({exc.__class__.__name__}); se reintento en CPU."],
-                "accelerator": training_acceleration_backend(prefer_cuda=False),
+                "accelerator": training_acceleration_backend(prefer_cuda=False, cuda_available=False),
             }
         raise
 
@@ -1893,20 +1907,20 @@ def finalize_classifier_for_inference(classifier, model_key: str, trained_device
         pass
 
 
-def resolve_device(model_key: str, requested_device: str) -> Tuple[str, List[str]]:
+def resolve_device(model_key: str, requested_device: str) -> Tuple[str, List[str], Dict[str, Any]]:
     hardware = detect_hardware()
     warnings_out: List[str] = []
     if model_key == "ngboost":
         if requested_device == "cuda":
-            warnings_out.append("NGBoost no usa CUDA en esta integracion; se entreno en CPU.")
-        return "cpu", warnings_out
+            warnings_out.append("NGBoost es CPU-only en esta integracion; se entreno en CPU.")
+        return "cpu", warnings_out, hardware
     if requested_device == "cpu":
-        return "cpu", warnings_out
+        return "cpu", warnings_out, hardware
     if requested_device in {"auto", "cuda"} and hardware["cuda_available"]:
-        return "cuda", warnings_out
+        return "cuda", warnings_out, hardware
     if requested_device == "cuda":
         warnings_out.append(f"CUDA no disponible ({hardware.get('cuda_error') or 'sin dispositivos'}); se entreno en CPU.")
-    return "cpu", warnings_out
+    return "cpu", warnings_out, hardware
 
 
 def build_worldcup_classifier(

@@ -317,29 +317,41 @@ function renderHeroHardware(hardware) {
   const accelerator = hardware.training_accelerator || {};
   const cudaDetected = Boolean(hardware.cuda_available);
   const device = String(hardware.actual_device || hardware.device_default || (cudaDetected ? "cuda" : "cpu")).toLowerCase();
+  const modelType = String(hardware.model_type || (document.getElementById("worldcup-model-type") || {}).value || "").toLowerCase();
+  const modelLabel = hardware.model_label || ({ xgboost: "XGBoost", lightgbm: "LightGBM", catboost: "CatBoost", ngboost: "NGBoost" }[modelType]) || "Modelo";
+  const cpuOnly = modelType === "ngboost";
   const cudaDevices = Array.isArray(hardware.cuda_devices) ? hardware.cuda_devices.filter(Boolean) : [];
+  const cudaDevice = shortCudaDevice(cudaDevices[0] || "");
   const cudaDetail = cudaDetected
-    ? cudaDevices[0] || "GPU disponible"
+    ? cudaDevice || "GPU disponible"
     : cleanMessage(hardware.cuda_error || "CPU fallback");
-  const xgboostMode = device === "cuda" || cudaDetected ? "GPU hist" : "CPU hist";
-  const numbaMode = hardware.numba_cuda_available ? "CUDA" : "CPU njit";
-  const acceleratorName = accelerator.backend
-    ? String(accelerator.backend).toUpperCase()
-    : (hardware.numba_cuda_available ? "NUMBA CUDA" : "NUMBA CPU");
-  const acceleratorDetail = accelerator.device || accelerator.mode || (hardware.numba_cuda_available ? "sanitizado GPU" : "prange/fastmath");
+  const modelUsesCuda = !cpuOnly && device === "cuda";
+  const modelMode = cpuOnly ? "CPU-only" : (modelUsesCuda ? "GPU" : "CPU");
+  const xgboostCuda = modelType === "xgboost" ? modelUsesCuda : Boolean(hardware.xgboost_cuda_ready || cudaDetected);
+  const xgboostMode = xgboostCuda ? "CUDA hist" : "CPU hist";
+  const numbaMode = hardware.numba_cuda_available ? "CUDA kernel" : (hardware.numba === false ? "No disponible" : "CPU njit");
+  const numbaDetail = hardware.numba_cuda_available ? "kernel GPU" : (hardware.numba === false ? "sin numba" : "prange/fastmath");
+  const modelBackend = accelerator.model_backend || accelerator.backend || (modelUsesCuda ? "cuda" : "cpu");
+  const acceleratorName = cpuOnly ? "CPU-only" : `${modelLabel} ${String(modelBackend).toUpperCase()}`;
+  const acceleratorDetail = cpuOnly ? "NGBoost sin CUDA" : (modelBackend === "cuda" ? "entrenamiento GPU" : "entrenamiento CPU");
   const threads = hardware.effective_n_jobs || hardware.n_jobs || hardware.default_n_jobs || hardware.cpu_count || "-";
   container.innerHTML = [
-    hardwareChip("CUDA", cudaDetected ? "Detectado" : "No detectado", cudaDetail, cudaDetected ? "ok" : "warn"),
-    hardwareChip("Device", device, "motor activo", device === "cuda" ? "ok" : ""),
-    hardwareChip("XGBoost", xgboostMode, device === "cuda" ? "tree_method GPU" : "tree_method hist", device === "cuda" ? "ok" : ""),
-    hardwareChip("Numba", numbaMode, acceleratorDetail, hardware.numba_cuda_available ? "ok" : ""),
-    hardwareChip("Threads", threads, `${hardware.cpu_count || "-"} nucleos CPU`, ""),
-    hardwareChip("Acelerador", acceleratorName, acceleratorDetail, accelerator.backend === "cuda" ? "ok" : ""),
+    hardwareChip("CUDA", cudaDetected ? "Detectado" : "No detectado", cudaDetail, cudaDetected ? "ok" : "warn", cudaDevices[0] || cudaDetail),
+    hardwareChip("Modelo", modelMode, modelLabel, modelUsesCuda ? "ok" : (cpuOnly ? "warn" : "")),
+    hardwareChip("XGBoost", xgboostMode, xgboostCuda ? "device cuda" : "tree_method hist", xgboostCuda ? "ok" : ""),
+    hardwareChip("Numba", numbaMode, numbaDetail, hardware.numba_cuda_available ? "ok" : ""),
+    hardwareChip("CPU", threads, `${hardware.cpu_count || "-"} nucleos`, ""),
+    hardwareChip("Acelerador", acceleratorName, acceleratorDetail, modelBackend === "cuda" ? "ok" : ""),
   ].join("");
 }
 
-function hardwareChip(label, value, detail, tone = "") {
-  return `<div class="hardware-chip ${tone ? `hardware-${escapeAttr(tone)}` : ""}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
+function hardwareChip(label, value, detail, tone = "", title = "") {
+  const titleAttr = title ? ` title="${escapeAttr(title)}"` : "";
+  return `<div class="hardware-chip ${tone ? `hardware-${escapeAttr(tone)}` : ""}"${titleAttr}><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
+}
+
+function shortCudaDevice(value) {
+  return String(value || "").replace(/\s*\(UUID:.*\)$/i, "");
 }
 
 async function loadModelsCatalog() {

@@ -185,10 +185,13 @@ h3 { font-size: 16px; }
   margin-top: 2px;
 }
 .hero-hardware {
+  grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
+  grid-template-columns: repeat(6, minmax(118px, 1fr));
   gap: 10px;
-  max-width: 860px;
+  width: min(1120px, 100%);
+  justify-self: center;
+  margin-top: 2px;
 }
 .hardware-chip {
   min-width: 0;
@@ -197,6 +200,7 @@ h3 { font-size: 16px; }
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.14);
   box-shadow: 0 10px 22px rgba(4, 18, 31, 0.08);
+  text-align: center;
 }
 .hardware-chip.hardware-ok {
   border-color: rgba(131, 224, 180, 0.58);
@@ -211,12 +215,20 @@ h3 { font-size: 16px; }
   display: block;
   color: rgba(255, 255, 255, 0.72);
   font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hardware-chip strong {
   display: block;
   margin: 3px 0;
   font-size: 18px;
   line-height: 1.1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   overflow-wrap: anywhere;
 }
 .countdown-chip {
@@ -1273,6 +1285,9 @@ th {
   .hero-next-grid {
     grid-template-columns: 1fr;
   }
+  .hero-hardware {
+    grid-template-columns: repeat(3, minmax(130px, 1fr));
+  }
   .control-grid {
     grid-template-columns: repeat(3, minmax(110px, 1fr));
   }
@@ -1305,6 +1320,9 @@ th {
   }
   .countdown-chip strong {
     font-size: 27px;
+  }
+  .hero-hardware {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .hero-match,
   .hero-metrics,

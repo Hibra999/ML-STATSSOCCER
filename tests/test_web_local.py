@@ -256,6 +256,10 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "XGBoost" in app_source
     assert "Numba" in app_source
     assert "Detectado" in app_source
+    assert "CUDA kernel" in app_source
+    assert "CPU-only" in app_source
+    assert "shortCudaDevice" in app_source
+    assert "grid-column: 1 / -1" in css_source
     assert "trackWorldcupJob" in app_source
     assert "/api/jobs/${jobId}" in app_source
     assert "runUpcomingPredictions" in app_source
@@ -277,6 +281,8 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert keys == {"ngboost", "catboost", "lightgbm", "xgboost"}
     assert options["hardware"]["cpu_count"] >= 1
     assert options["hardware"]["default_n_jobs"] == -1
+    assert "xgboost_cuda_ready" in options["hardware"]
+    assert "numba_backend" in options["hardware"]
     assert options["defaults"]["model_type"] == "xgboost"
     assert options["defaults"]["training_target"] == "result"
     assert options["defaults"]["market_mode"] == "dual_markets"
@@ -294,7 +300,82 @@ def test_worldcup_accelerator_cpu_sanitizes_float32_matrix():
     assert matrix.dtype == np.float32
     assert matrix.tolist() == [[1.0, 0.0], [0.0, 0.0]]
     assert backend["backend"] == "cpu"
+    assert backend["model_backend"] == "cpu"
+    assert backend["numba_backend"] == "cpu"
     assert "numba_cuda_available" in backend
+
+
+def test_worldcup_accelerator_separates_model_cuda_from_numba_cuda(monkeypatch):
+    from src.worldcup import accelerators
+
+    monkeypatch.setattr(accelerators, "numba_cuda_available", lambda: False)
+    backend = accelerators.training_acceleration_backend(prefer_cuda=True, cuda_available=True)
+
+    assert backend["backend"] == "cuda"
+    assert backend["model_backend"] == "cuda"
+    assert backend["numba_backend"] == "cpu"
+    assert backend["xgboost_cuda_ready"] is True
+
+
+def test_worldcup_accelerator_reports_numba_cuda_when_kernel_available(monkeypatch):
+    from src.worldcup import accelerators
+
+    monkeypatch.setattr(accelerators, "numba_cuda_available", lambda: True)
+    monkeypatch.setattr(accelerators, "_sanitize_float32_cuda", object())
+    backend = accelerators.training_acceleration_backend(prefer_cuda=True, cuda_available=True)
+
+    assert backend["backend"] == "cuda"
+    assert backend["numba_backend"] == "cuda"
+    assert backend["numba_cuda_available"] is True
+
+
+def test_worldcup_resolve_device_keeps_xgboost_cuda_when_numba_cuda_missing(monkeypatch):
+    from src.worldcup import training
+
+    monkeypatch.setattr(training, "detect_hardware", lambda: {
+        "cpu_count": 32,
+        "default_n_jobs": -1,
+        "cuda_available": True,
+        "system_cuda_available": True,
+        "xgboost_cuda_ready": True,
+        "cuda_devices": ["GPU 0: NVIDIA GeForce RTX 5070 (UUID: test)"],
+        "cuda_error": "",
+        "nvidia_smi_available": True,
+        "numba": True,
+        "numba_cuda_available": False,
+        "numba_backend": "cpu",
+        "device_default": "cuda",
+    })
+    device, warnings, hardware = training.resolve_device("xgboost", "auto")
+    backend = training.training_acceleration_backend(prefer_cuda=device == "cuda", cuda_available=hardware["xgboost_cuda_ready"])
+
+    assert device == "cuda"
+    assert warnings == []
+    assert backend["backend"] == "cuda"
+    assert backend["numba_backend"] == "cpu"
+
+
+def test_worldcup_resolve_device_keeps_ngboost_cpu_only_on_cuda_request(monkeypatch):
+    from src.worldcup import training
+
+    monkeypatch.setattr(training, "detect_hardware", lambda: {
+        "cpu_count": 32,
+        "default_n_jobs": -1,
+        "cuda_available": True,
+        "system_cuda_available": True,
+        "xgboost_cuda_ready": True,
+        "cuda_devices": ["GPU 0: NVIDIA GeForce RTX 5070"],
+        "cuda_error": "",
+        "nvidia_smi_available": True,
+        "numba": True,
+        "numba_cuda_available": True,
+        "numba_backend": "cuda",
+        "device_default": "cuda",
+    })
+    device, warnings, _ = training.resolve_device("ngboost", "cuda")
+
+    assert device == "cpu"
+    assert any("CPU-only" in warning for warning in warnings)
 
 
 def test_worldcup_xgboost_cpu_hist_training_and_cuda_fallback(monkeypatch):

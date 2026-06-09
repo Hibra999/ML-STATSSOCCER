@@ -47,12 +47,23 @@ def numba_cuda_available() -> bool:
         return False
 
 
-def training_acceleration_backend(prefer_cuda: bool = False) -> Dict[str, Any]:
-    cuda_ready = numba_cuda_available()
+def numba_jit_available() -> bool:
+    return bool(njit is not None)
+
+
+def training_acceleration_backend(prefer_cuda: bool = False, cuda_available: bool | None = None) -> Dict[str, Any]:
+    numba_cuda = numba_cuda_available()
+    model_cuda = numba_cuda if cuda_available is None else bool(cuda_available)
+    backend = "cuda" if prefer_cuda and model_cuda else "cpu"
+    numba_backend = "cuda" if prefer_cuda and numba_cuda and _sanitize_float32_cuda is not None else "cpu"
     return {
-        "backend": "cuda" if prefer_cuda and cuda_ready else "cpu",
-        "numba": bool(njit is not None),
-        "numba_cuda_available": cuda_ready,
+        "backend": backend,
+        "model_backend": backend,
+        "numba_backend": numba_backend,
+        "numba": numba_jit_available(),
+        "numba_cuda_available": numba_cuda,
+        "xgboost_cuda_ready": backend == "cuda",
+        "cpu_jit_available": numba_jit_available(),
     }
 
 
