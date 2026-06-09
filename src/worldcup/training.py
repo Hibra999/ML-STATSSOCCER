@@ -64,6 +64,12 @@ WORLD_CUP_MODEL_LABELS = {
     "lightgbm": "LightGBM",
     "xgboost": "XGBoost",
 }
+HISTORY_FEATURE_WINDOWS = (3, 5, 10)
+HISTORY_REFERENCE_DATE = "2026-06-11"
+WALK_FORWARD_ROOT = Path("storage") / "worldcup" / "walk_forward"
+WALK_FORWARD_MATCHES_FILE = WALK_FORWARD_ROOT / "matches.csv"
+WALK_FORWARD_PLAYERS_FILE = WALK_FORWARD_ROOT / "player_match_stats.csv"
+WALK_FORWARD_TEAM_FEATURES_FILE = WALK_FORWARD_ROOT / "team_match_features.csv"
 
 
 class WorldCupTrainingError(RuntimeError):
@@ -182,6 +188,7 @@ def dataset_status() -> Dict[str, Any]:
     train_rows = labeled_train_row_count(normalized)
     test_rows = labeled_test_row_count(normalized)
     eval_strategy = evaluation_strategy(normalized)
+    walk_forward = walk_forward_status()
     return {
         "dataset_slug": KAGGLE_DATASET_SLUG,
         "local_path": str(KAGGLE_ROOT),
@@ -198,6 +205,7 @@ def dataset_status() -> Dict[str, Any]:
         "training_mode": normalized["training_mode"],
         "etl_steps": etl_steps(files, normalized, eval_strategy),
         "trainable": bool(normalized["trainable"]),
+        "walk_forward": walk_forward,
         "model": model_meta,
         "preview": normalized["preview"],
     }
@@ -236,6 +244,8 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
         max_goals=int(payload.get("max_goals", 10) or 10),
     )
     feature_store = normalized["team_features"]
+    history_team_features = build_history_feature_table(history_df)
+    matchup_features = build_matchup_feature_table(history_df)
     target_warning = ""
     eval_strategy = "unavailable"
     if normalized["training_mode"] == "team_strength":
@@ -259,7 +269,14 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
         if effective_target == "over_under_25" and not has_over_under_target(train_rows):
             effective_target = "result"
             target_warning = "El dataset no tiene goles suficientes para entrenar Over/Under 2.5; U/O queda con Poisson."
-        x_train, y_train, feature_columns = build_training_matrix(train_rows, base_model, feature_store, target=effective_target)
+        x_train, y_train, feature_columns = build_training_matrix(
+            train_rows,
+            base_model,
+            feature_store,
+            history_team_features=history_team_features,
+            matchup_features=matchup_features,
+            target=effective_target,
+        )
         if test_rows.empty:
             eval_strategy = "holdout_from_train"
             x_train, x_eval, y_train, y_eval = safe_train_eval_split(
@@ -270,7 +287,15 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
             )
         else:
             eval_strategy = "test_file"
-            x_eval, y_eval, _ = build_training_matrix(test_rows, base_model, feature_store, feature_columns=feature_columns, target=effective_target)
+            x_eval, y_eval, _ = build_training_matrix(
+                test_rows,
+                base_model,
+                feature_store,
+                history_team_features=history_team_features,
+                matchup_features=matchup_features,
+                feature_columns=feature_columns,
+                target=effective_target,
+            )
 
     if x_train.empty or pd.Series(y_train).dropna().empty:
         raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
@@ -306,6 +331,8 @@ def train_single_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict
         "classifier": clf,
         "feature_columns": feature_columns,
         "team_features": feature_store.to_dict(orient="records"),
+        "history_team_features": history_team_features.to_dict(orient="records"),
+        "matchup_features": matchup_features.to_dict(orient="records"),
         "kaggle_files": [str(path) for path in files],
         "history_source": history_source,
         "metrics": metrics,
@@ -426,6 +453,8 @@ def train_dual_market_model(
         "classifier": None,
         "feature_columns": result_record.get("feature_columns", []),
         "team_features": result_record.get("team_features", []),
+        "history_team_features": result_record.get("history_team_features", []),
+        "matchup_features": result_record.get("matchup_features", []),
         "kaggle_files": [str(path) for path in files],
         "history_source": result_record.get("history_source", over_record.get("history_source", "")),
         "metrics": result_record.get("metrics", {}),
@@ -737,13 +766,25 @@ def build_training_matrix(
         rows: pd.DataFrame,
         base_model: WorldCupModel,
         team_features: pd.DataFrame,
+        history_team_features: Optional[pd.DataFrame] = None,
+        matchup_features: Optional[pd.DataFrame] = None,
         feature_columns: Optional[List[str]] = None,
         target: str = "result",
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     working = rows.copy()
     if target == "over_under_25":
         working = working[working["OverUnder25"].notna()] if "OverUnder25" in working.columns else working.iloc[0:0]
-    records = [match_feature_row(base_model, team_features, row["Home"], row["Away"]) for _, row in working.iterrows()]
+    records = [
+        match_feature_row(
+            base_model,
+            team_features,
+            row["Home"],
+            row["Away"],
+            history_team_features=history_team_features,
+            matchup_features=matchup_features,
+        )
+        for _, row in working.iterrows()
+    ]
     x = pd.DataFrame(records).fillna(0.0)
     if feature_columns is None:
         feature_columns = list(x.columns)
@@ -756,9 +797,17 @@ def build_training_matrix(
     return x, working["Label"].astype(str), feature_columns
 
 
-def match_feature_row(base_model: WorldCupModel, team_features: pd.DataFrame, home: str, away: str) -> Dict[str, float]:
+def match_feature_row(
+        base_model: WorldCupModel,
+        team_features: pd.DataFrame,
+        home: str,
+        away: str,
+        history_team_features: Optional[pd.DataFrame] = None,
+        matchup_features: Optional[pd.DataFrame] = None,
+) -> Dict[str, float]:
     p_home = base_model.profile(home)
     p_away = base_model.profile(away)
+    poisson = base_model.match_probabilities(home, away)
     row = {
         "rating_home": p_home.rating,
         "rating_away": p_away.rating,
@@ -773,19 +822,210 @@ def match_feature_row(base_model: WorldCupModel, team_features: pd.DataFrame, ho
         "matches_away": float(p_away.matches),
         "home_is_host": 1.0 if home in HOST_TEAMS else 0.0,
         "away_is_host": 1.0 if away in HOST_TEAMS else 0.0,
+        "poisson_home_win": float(poisson.get("home", 0.0)),
+        "poisson_draw": float(poisson.get("draw", 0.0)),
+        "poisson_away_win": float(poisson.get("away", 0.0)),
+        "poisson_over25": float(poisson.get("over25", 0.0)),
+        "poisson_under25": float(poisson.get("under25", 0.0)),
+        "poisson_xg_home": float(poisson.get("lambda1", 0.0)),
+        "poisson_xg_away": float(poisson.get("lambda2", 0.0)),
+        "poisson_xg_diff": float(poisson.get("lambda1", 0.0)) - float(poisson.get("lambda2", 0.0)),
     }
-    if not team_features.empty and "Team" in team_features.columns:
-        home_features = team_features[team_features["Team"].map(normalize_team_key) == normalize_team_key(home)]
-        away_features = team_features[team_features["Team"].map(normalize_team_key) == normalize_team_key(away)]
-        numeric_cols = [column for column in team_features.columns if column != "Team" and pd.api.types.is_numeric_dtype(team_features[column])]
-        for column in numeric_cols[:24]:
-            home_value = float(home_features[column].iloc[0]) if not home_features.empty else 0.0
-            away_value = float(away_features[column].iloc[0]) if not away_features.empty else 0.0
-            safe = normalize_column(column)
-            row[f"kaggle_{safe}_home"] = home_value
-            row[f"kaggle_{safe}_away"] = away_value
-            row[f"kaggle_{safe}_diff"] = home_value - away_value
+    merge_team_feature_block(row, team_features, home, away, prefix="kaggle", limit=24)
+    merge_team_feature_block(
+        row,
+        history_team_features if history_team_features is not None else pd.DataFrame(),
+        home,
+        away,
+        prefix="history",
+    )
+    merge_matchup_feature_block(row, matchup_features if matchup_features is not None else pd.DataFrame(), home, away)
     return row
+
+
+def merge_team_feature_block(
+        row: Dict[str, float],
+        features: pd.DataFrame,
+        home: str,
+        away: str,
+        prefix: str,
+        limit: Optional[int] = None,
+) -> None:
+    if features.empty or "Team" not in features.columns:
+        return
+    home_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(home)]
+    away_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(away)]
+    numeric_cols = [column for column in features.columns if column != "Team" and pd.api.types.is_numeric_dtype(features[column])]
+    if limit is not None:
+        numeric_cols = numeric_cols[:limit]
+    for column in numeric_cols:
+        home_value = float(home_features[column].iloc[0]) if not home_features.empty else 0.0
+        away_value = float(away_features[column].iloc[0]) if not away_features.empty else 0.0
+        safe = normalize_column(column)
+        row[f"{prefix}_{safe}_home"] = home_value
+        row[f"{prefix}_{safe}_away"] = away_value
+        row[f"{prefix}_{safe}_diff"] = home_value - away_value
+
+
+def merge_matchup_feature_block(
+        row: Dict[str, float],
+        matchup_features: pd.DataFrame,
+        home: str,
+        away: str,
+) -> None:
+    if matchup_features.empty or not {"HomeKey", "AwayKey"}.issubset(matchup_features.columns):
+        return
+    match = matchup_features[
+        (matchup_features["HomeKey"] == normalize_team_key(home)) &
+        (matchup_features["AwayKey"] == normalize_team_key(away))
+    ]
+    if match.empty:
+        return
+    record = match.iloc[0].to_dict()
+    for column, value in record.items():
+        if column in {"HomeKey", "AwayKey"}:
+            continue
+        if isinstance(value, (int, float, np.integer, np.floating)) and not pd.isna(value):
+            row[f"h2h_{normalize_column(column)}"] = float(value)
+
+
+def build_history_feature_table(history_df: pd.DataFrame, reference_date: str = HISTORY_REFERENCE_DATE) -> pd.DataFrame:
+    team_rows = team_history_rows(history_df)
+    if team_rows.empty:
+        return pd.DataFrame(columns=["Team"])
+    reference_ts = pd.Timestamp(reference_date)
+    rows: List[Dict[str, Any]] = []
+    for team, team_df in team_rows.groupby("Team", sort=True):
+        team_df = team_df.sort_values("Date", kind="stable").reset_index(drop=True)
+        last_date = team_df["Date"].max()
+        days_since = int(max((reference_ts - last_date).days, 0)) if pd.notna(last_date) else 0
+        base = {
+            "Team": team,
+            "matches_total": float(team_df.shape[0]),
+            "days_since_last_match": float(days_since),
+            "recent_match_volume_365d": float(team_df[team_df["Date"] >= (reference_ts - pd.Timedelta(days=365))].shape[0]),
+            "recent_match_volume_730d": float(team_df[team_df["Date"] >= (reference_ts - pd.Timedelta(days=730))].shape[0]),
+        }
+        base.update(window_summary_features(team_df, len(team_df), prefix="all"))
+        for window in HISTORY_FEATURE_WINDOWS:
+            base.update(window_summary_features(team_df, window, prefix=f"last_{window}"))
+        base["trend_points_ppg_3_vs_10"] = base.get("last_3_points_ppg", 0.0) - base.get("last_10_points_ppg", 0.0)
+        base["trend_goal_diff_3_vs_10"] = base.get("last_3_goal_diff_avg", 0.0) - base.get("last_10_goal_diff_avg", 0.0)
+        base["trend_win_rate_3_vs_10"] = base.get("last_3_win_rate", 0.0) - base.get("last_10_win_rate", 0.0)
+        base["trend_clean_sheet_3_vs_10"] = base.get("last_3_clean_sheet_rate", 0.0) - base.get("last_10_clean_sheet_rate", 0.0)
+        base["trend_over25_3_vs_10"] = base.get("last_3_over25_rate", 0.0) - base.get("last_10_over25_rate", 0.0)
+        rows.append(base)
+    return pd.DataFrame(rows).fillna(0.0)
+
+
+def team_history_rows(history_df: pd.DataFrame) -> pd.DataFrame:
+    if history_df.empty:
+        return pd.DataFrame(columns=["Team", "Date", "GF", "GA", "GoalDiff", "Points", "Win", "Draw", "Loss", "Over25", "BTTS", "CleanSheet", "Scored"])
+    working = history_df.copy()
+    working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
+    working = working[working["Date"].notna()].copy()
+    rows: List[Dict[str, Any]] = []
+    for _, row in working.iterrows():
+        try:
+            home_goals = float(row.get("G1", 0) or 0)
+            away_goals = float(row.get("G2", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        home_team = clean_team_name(row.get("Team 1"))
+        away_team = clean_team_name(row.get("Team 2"))
+        if home_team:
+            rows.append(team_match_row(home_team, row["Date"], home_goals, away_goals))
+        if away_team:
+            rows.append(team_match_row(away_team, row["Date"], away_goals, home_goals))
+    return pd.DataFrame(rows)
+
+
+def team_match_row(team: str, match_date: pd.Timestamp, gf: float, ga: float) -> Dict[str, Any]:
+    return {
+        "Team": team,
+        "Date": match_date,
+        "GF": float(gf),
+        "GA": float(ga),
+        "GoalDiff": float(gf - ga),
+        "Points": float(3 if gf > ga else 1 if gf == ga else 0),
+        "Win": float(gf > ga),
+        "Draw": float(gf == ga),
+        "Loss": float(gf < ga),
+        "Over25": float((gf + ga) >= 3.0),
+        "BTTS": float(gf > 0 and ga > 0),
+        "CleanSheet": float(ga == 0),
+        "Scored": float(gf > 0),
+    }
+
+
+def window_summary_features(team_df: pd.DataFrame, window: int, prefix: str) -> Dict[str, float]:
+    if team_df.empty:
+        return {
+            f"{prefix}_points_ppg": 0.0,
+            f"{prefix}_goals_for_avg": 0.0,
+            f"{prefix}_goals_against_avg": 0.0,
+            f"{prefix}_goal_diff_avg": 0.0,
+            f"{prefix}_win_rate": 0.0,
+            f"{prefix}_draw_rate": 0.0,
+            f"{prefix}_loss_rate": 0.0,
+            f"{prefix}_over25_rate": 0.0,
+            f"{prefix}_btts_rate": 0.0,
+            f"{prefix}_clean_sheet_rate": 0.0,
+            f"{prefix}_scoring_rate": 0.0,
+        }
+    recent = team_df.tail(int(window)).copy()
+    return {
+        f"{prefix}_points_ppg": float(recent["Points"].mean()),
+        f"{prefix}_goals_for_avg": float(recent["GF"].mean()),
+        f"{prefix}_goals_against_avg": float(recent["GA"].mean()),
+        f"{prefix}_goal_diff_avg": float(recent["GoalDiff"].mean()),
+        f"{prefix}_win_rate": float(recent["Win"].mean()),
+        f"{prefix}_draw_rate": float(recent["Draw"].mean()),
+        f"{prefix}_loss_rate": float(recent["Loss"].mean()),
+        f"{prefix}_over25_rate": float(recent["Over25"].mean()),
+        f"{prefix}_btts_rate": float(recent["BTTS"].mean()),
+        f"{prefix}_clean_sheet_rate": float(recent["CleanSheet"].mean()),
+        f"{prefix}_scoring_rate": float(recent["Scored"].mean()),
+    }
+
+
+def build_matchup_feature_table(history_df: pd.DataFrame) -> pd.DataFrame:
+    if history_df.empty:
+        return pd.DataFrame(columns=["HomeKey", "AwayKey"])
+    working = history_df.copy()
+    working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
+    working = working[working["Date"].notna()].copy()
+    rows: List[Dict[str, Any]] = []
+    grouped: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
+    for _, row in working.iterrows():
+        home = clean_team_name(row.get("Team 1"))
+        away = clean_team_name(row.get("Team 2"))
+        try:
+            g1 = float(row.get("G1", 0) or 0)
+            g2 = float(row.get("G2", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if home and away:
+            grouped.setdefault((normalize_team_key(home), normalize_team_key(away)), []).append((g1, g2))
+            grouped.setdefault((normalize_team_key(away), normalize_team_key(home)), []).append((g2, g1))
+    for (home_key, away_key), matches in grouped.items():
+        total = float(len(matches))
+        home_goals = [item[0] for item in matches]
+        away_goals = [item[1] for item in matches]
+        rows.append({
+            "HomeKey": home_key,
+            "AwayKey": away_key,
+            "matches": total,
+            "home_win_rate": float(sum(1 for g1, g2 in matches if g1 > g2) / max(total, 1.0)),
+            "draw_rate": float(sum(1 for g1, g2 in matches if g1 == g2) / max(total, 1.0)),
+            "away_win_rate": float(sum(1 for g1, g2 in matches if g2 > g1) / max(total, 1.0)),
+            "goal_diff_avg": float(np.mean([g1 - g2 for g1, g2 in matches])),
+            "goals_for_avg": float(np.mean(home_goals)),
+            "goals_against_avg": float(np.mean(away_goals)),
+            "over25_rate": float(np.mean([(g1 + g2) >= 3.0 for g1, g2 in matches])),
+            "btts_rate": float(np.mean([(g1 > 0 and g2 > 0) for g1, g2 in matches])),
+        })
+    return pd.DataFrame(rows).fillna(0.0)
 
 
 def labeled_train_row_count(normalized: Dict[str, Any]) -> int:
@@ -1333,7 +1573,18 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
             ],
         }
     team_features = pd.DataFrame(record.get("team_features", []))
-    x = pd.DataFrame([match_feature_row(base_model, team_features, home, away)])
+    history_team_features = pd.DataFrame(record.get("history_team_features", []))
+    matchup_features = pd.DataFrame(record.get("matchup_features", []))
+    x = pd.DataFrame([
+        match_feature_row(
+            base_model,
+            team_features,
+            home,
+            away,
+            history_team_features=history_team_features,
+            matchup_features=matchup_features,
+        )
+    ])
     feature_columns = record.get("feature_columns", BASE_FEATURE_COLUMNS)
     for column in feature_columns:
         if column not in x.columns:
@@ -1469,6 +1720,7 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "top_features": record.get("top_features", []),
         "warnings": record.get("warnings", []),
         "hardware": record.get("hardware", result.get("hardware", {})),
+        "feature_count": len(record.get("feature_columns", result.get("features", [])) or []),
     }
 
 
@@ -1587,6 +1839,7 @@ def etl_steps(files: Iterable[Path], normalized: Dict[str, Any], eval_strategy: 
     test_rows = labeled_test_row_count(normalized)
     prediction_rows = int(normalized["team_prediction"].shape[0])
     feature_rows = int(normalized["team_features"].shape[0])
+    walk_forward = walk_forward_status()
     return [
         {
             "name": "Descarga Kaggle",
@@ -1611,6 +1864,12 @@ def etl_steps(files: Iterable[Path], normalized: Dict[str, Any], eval_strategy: 
             "status": "ok" if feature_rows else "pending",
             "count": feature_rows,
             "detail": "Features numericas por seleccion listas para el modelo.",
+        },
+        {
+            "name": "Walk-forward XI",
+            "status": "ok" if walk_forward["matches"] else "info",
+            "count": walk_forward["matches"],
+            "detail": f"{walk_forward['ready_for_retrain']} listos para reentreno, {walk_forward['pending_results']} esperando resultado final.",
         },
         {
             "name": "Prediccion 2026",
@@ -2019,6 +2278,97 @@ def preview_payload(df: pd.DataFrame, rows: int = 8) -> Dict[str, Any]:
         "rows": json_safe(preview.to_dict(orient="records")),
         "total": int(df.shape[0]),
     }
+
+
+def walk_forward_status() -> Dict[str, int]:
+    matches = read_optional_csv(WALK_FORWARD_MATCHES_FILE)
+    players = read_optional_csv(WALK_FORWARD_PLAYERS_FILE)
+    team_features = read_optional_csv(WALK_FORWARD_TEAM_FEATURES_FILE)
+    pending_results = int(matches[matches.get("status", "").astype(str) == "pending_result"].shape[0]) if not matches.empty and "status" in matches.columns else 0
+    ready_for_retrain = int(matches[matches.get("status", "").astype(str) == "ready_for_retrain"].shape[0]) if not matches.empty and "status" in matches.columns else 0
+    return {
+        "matches": int(matches.shape[0]),
+        "players": int(players.shape[0]),
+        "team_rows": int(team_features.shape[0]),
+        "pending_results": pending_results,
+        "ready_for_retrain": ready_for_retrain,
+    }
+
+
+def capture_walk_forward_snapshot(payload: Dict[str, Any]) -> Dict[str, int]:
+    data = dict(payload or {})
+    fixture_id = str(data.get("fixture_id") or "").strip()
+    if not fixture_id:
+        return walk_forward_status()
+    WALK_FORWARD_ROOT.mkdir(parents=True, exist_ok=True)
+    players = pd.DataFrame(data.get("players", []) or [])
+    features = pd.DataFrame(data.get("features", []) or [])
+    prediction_safe = bool(data.get("prediction_safe"))
+    starters_home = 0
+    starters_away = 0
+    stats_known = 0
+    if not players.empty:
+        players = players.copy()
+        players["fixture_id"] = fixture_id
+        players["date"] = data.get("date", "")
+        players["group"] = data.get("group", "")
+        players["home"] = data.get("home", "")
+        players["away"] = data.get("away", "")
+        players["fetched_at"] = data.get("fetched_at", "")
+        starters_home = int(players[(players.get("team", "") == data.get("home", "")) & players.get("starter", False)].shape[0])
+        starters_away = int(players[(players.get("team", "") == data.get("away", "")) & players.get("starter", False)].shape[0])
+        stats_known = int(players["stats"].apply(lambda value: isinstance(value, dict) and bool(value)).sum()) if "stats" in players.columns else 0
+        write_deduped_csv(
+            WALK_FORWARD_PLAYERS_FILE,
+            players.applymap(json_safe),
+            subset=["fixture_id", "team", "name"],
+        )
+    if not features.empty:
+        features = features.copy()
+        features["fixture_id"] = fixture_id
+        features["fetched_at"] = data.get("fetched_at", "")
+        write_deduped_csv(
+            WALK_FORWARD_TEAM_FEATURES_FILE,
+            features.applymap(json_safe),
+            subset=["fixture_id", "Equipo"],
+        )
+    status = "ready_for_retrain" if prediction_safe and stats_known >= 22 else "pending_result"
+    match_row = pd.DataFrame([{
+        "fixture_id": fixture_id,
+        "date": data.get("date", ""),
+        "group": data.get("group", ""),
+        "home": data.get("home", ""),
+        "away": data.get("away", ""),
+        "source": data.get("source", ""),
+        "match_url": data.get("match_url", ""),
+        "fetched_at": data.get("fetched_at", ""),
+        "prediction_safe": int(prediction_safe),
+        "starters_home": starters_home,
+        "starters_away": starters_away,
+        "stats_known": stats_known,
+        "status": status,
+    }])
+    write_deduped_csv(WALK_FORWARD_MATCHES_FILE, match_row, subset=["fixture_id"])
+    return walk_forward_status()
+
+
+def read_optional_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def write_deduped_csv(path: Path, frame: pd.DataFrame, subset: List[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = read_optional_csv(path)
+    combined = pd.concat([existing, frame], ignore_index=True) if not existing.empty else frame.copy()
+    valid_subset = [column for column in subset if column in combined.columns]
+    if valid_subset:
+        combined = combined.drop_duplicates(subset=valid_subset, keep="last")
+    combined.to_csv(path, index=False)
 
 
 def normalize_column(value: Any) -> str:

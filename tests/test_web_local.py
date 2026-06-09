@@ -67,6 +67,7 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/models/train" in paths
     assert "/api/mundial/models/select" in paths
     assert "/api/mundial/models/{model_id}" in paths
+    assert "/api/mundial/maintenance/clear" in paths
     assert "/api/mundial/predict-match" in paths
     assert "/api/mundial/predict-upcoming" in paths
     assert "/api/mundial/procedure" in paths
@@ -162,8 +163,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
         "Grupos",
         "Calendario",
         "11 Iniciales",
-        "Entrenamiento",
-        "Modelo Híbrido",
+        "Entrenamiento y Modelo",
         "Predicciones Futuras",
         "Datos",
     ]
@@ -172,14 +172,15 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "switchWorldcupView" in app_source
     assert "data-section=\"predicciones\"" in html_source
     assert "Calendario" in html_source
-    assert "Modelo Híbrido" in html_source
+    assert "Modelo híbrido activo" in html_source
     assert "Predicciones Futuras" in html_source
-    assert "Entrenar Modelo Híbrido" in html_source
+    assert "Entrenamiento y Modelo" in html_source
     assert "Algoritmo boosting" in html_source
     assert "mundial-xgb-hibrido" in html_source
     assert "ML híbrido" in html_source
     assert "model-active-select" in html_source
     assert "model-load" in html_source
+    assert "worldcup-clear-cache" in html_source
     assert "worldcup-model-id" in html_source
     assert "upcoming-model-select" in html_source
     assert "sim-history-weight" in html_source
@@ -195,7 +196,6 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "worldcup-tuning-enabled" in html_source
     assert "worldcup-device" in html_source
     assert "worldcup-n-jobs" in html_source
-    assert "match-prob-breakdown" in html_source
     assert "training-model-params" in html_source
     assert "training-model-state" in html_source
     assert "dataset-summary" in html_source
@@ -205,22 +205,24 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Ambos: 1X2 + O/U 2.5" in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-predictions" in html_source
+    assert "hero-countdown" in html_source
+    assert "hero-next-grid" in html_source
+    assert "simulation-summary" in html_source
     assert "upcoming-team" in app_source
     assert "flagHtml(homeAsset)" in app_source
     assert "flagHtml(awayAsset)" in app_source
     assert "market_sources" in app_source
-    assert "Fuente 1X2" in app_source
-    assert "Fuente O/U" in app_source
+    assert "marketBadgeText" in app_source
     assert "source-strip" in app_source
-    assert "predict-match-btn" in html_source
+    assert "predict-match-btn" not in html_source
     assert "lineup-features-table" in html_source
     assert "/api/mundial/simulate" in app_source
     assert "/api/mundial/player-features" in app_source
     assert "/api/mundial/models" in app_source
     assert "/api/mundial/models/train" in app_source
     assert "/api/mundial/models/select" in app_source
+    assert "/api/mundial/maintenance/clear" in app_source
     assert "trainingPayload" in app_source
-    assert "predictionBreakdownTable" in app_source
     assert "paramsTable" in app_source
     assert "evalStrategyLabel" in app_source
     assert "renderConfusionMatrix" in app_source
@@ -231,7 +233,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "market-panel" in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
-    assert "/api/mundial/predict-match" in app_source
+    assert "renderHeroCountdown" in app_source
+    assert "heroNextCardHtml" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
     assert "/api/worldcup/simulate" not in app_source
     assert "player-photo" in app_source
@@ -688,6 +691,97 @@ def test_worldcup_predict_upcoming_returns_future_predictions(tmp_path, monkeypa
     assert len(result["predictions"]) == 3
     assert result["table"]["total"] == 3
     assert set(result["predictions"][0]["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
+
+
+def test_mundial_overview_exposes_highlight_countdown_and_next_grid():
+    from src.web import mundial_services
+
+    result = mundial_services.overview()
+
+    assert result["opener"]["home"]["name"] == "Mexico"
+    assert result["highlight"]["home"]["name"] == "Mexico"
+    assert result["countdown_state"] in {"ready", "pending"}
+    assert isinstance(result["next_matches"], list)
+    assert len(result["next_matches"]) >= 1
+
+
+def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp_path, monkeypatch):
+    from src.web import mundial_services
+    from src.worldcup import training
+
+    cache_root = tmp_path / "cache"
+    models_root = tmp_path / "models"
+    kaggle_root = tmp_path / "kaggle"
+    lineups_root = tmp_path / "lineups"
+    stats_root = tmp_path / "player_stats"
+    sofascore_root = tmp_path / "sofascore"
+    walk_root = tmp_path / "walk_forward"
+    for root in (cache_root, models_root, kaggle_root, lineups_root, stats_root, sofascore_root, walk_root):
+        root.mkdir(parents=True, exist_ok=True)
+    (cache_root / "worldcup_2026.json").write_text("{}", encoding="utf-8")
+    (cache_root / "players_2026.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (kaggle_root / "train.csv").write_text("home_team,away_team,home_goals,away_goals\nMexico,South Africa,2,1\n", encoding="utf-8")
+    (models_root / "dummy.json").write_text("{}", encoding="utf-8")
+    (models_root / "dummy.pkl").write_text("x", encoding="utf-8")
+    (lineups_root / "fixture_1.json").write_text("{}", encoding="utf-8")
+    (stats_root / "fixture_1.json").write_text("{}", encoding="utf-8")
+    (sofascore_root / "events.json").write_text("{}", encoding="utf-8")
+    (walk_root / "matches.csv").write_text("fixture_id\n1\n", encoding="utf-8")
+
+    monkeypatch.setattr(mundial_services, "CACHE_ROOT", cache_root)
+    monkeypatch.setattr(mundial_services, "WORLD_CUP_MODELS_ROOT", models_root)
+    monkeypatch.setattr(mundial_services, "KAGGLE_ROOT", kaggle_root)
+    monkeypatch.setattr(mundial_services, "LINEUPS_ROOT", lineups_root)
+    monkeypatch.setattr(mundial_services, "PLAYER_STATS_ROOT", stats_root)
+    monkeypatch.setattr(mundial_services, "SOFASCORE_ROOT", sofascore_root)
+    monkeypatch.setattr(mundial_services, "WALK_FORWARD_ROOT", walk_root)
+    monkeypatch.setattr(training, "KAGGLE_ROOT", kaggle_root)
+    monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", models_root)
+    monkeypatch.setattr(training, "HYBRID_MODEL_FILE", models_root / "hybrid.pkl")
+    monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", models_root / "hybrid.json")
+    monkeypatch.setattr(training, "WALK_FORWARD_ROOT", walk_root)
+    monkeypatch.setattr(training, "WALK_FORWARD_MATCHES_FILE", walk_root / "matches.csv")
+    monkeypatch.setattr(training, "WALK_FORWARD_PLAYERS_FILE", walk_root / "player_match_stats.csv")
+    monkeypatch.setattr(training, "WALK_FORWARD_TEAM_FEATURES_FILE", walk_root / "team_match_features.csv")
+
+    result = mundial_services.maintenance_clear({"clear_cache": True})
+
+    assert (cache_root / "worldcup_2026.json").exists()
+    assert not (cache_root / "players_2026.csv").exists()
+    assert not (models_root / "dummy.json").exists()
+    assert result["training"]["available"] is True
+    assert result["models"]["models"] == []
+
+
+def test_worldcup_match_feature_row_includes_history_trend_and_h2h_features():
+    from src.worldcup import training
+    from src.worldcup.model import WorldCupModel
+
+    history = pd.DataFrame([
+        {"Date": "2010-06-11", "Team 1": "Mexico", "Team 2": "South Africa", "G1": 1, "G2": 1, "Round": "Group", "Group": "A"},
+        {"Date": "2014-06-17", "Team 1": "Mexico", "Team 2": "Cameroon", "G1": 1, "G2": 0, "Round": "Group", "Group": "A"},
+        {"Date": "2018-06-17", "Team 1": "Mexico", "Team 2": "Germany", "G1": 1, "G2": 0, "Round": "Group", "Group": "F"},
+        {"Date": "2002-06-02", "Team 1": "South Africa", "Team 2": "Paraguay", "G1": 2, "G2": 2, "Round": "Group", "Group": "B"},
+        {"Date": "2010-06-22", "Team 1": "South Africa", "Team 2": "France", "G1": 2, "G2": 1, "Round": "Group", "Group": "A"},
+    ])
+    model = WorldCupModel.from_history(history, teams=["Mexico", "South Africa", "Cameroon", "Germany", "Paraguay", "France"])
+    history_features = training.build_history_feature_table(history)
+    matchup_features = training.build_matchup_feature_table(history)
+
+    row = training.match_feature_row(
+        model,
+        pd.DataFrame(),
+        "Mexico",
+        "South Africa",
+        history_team_features=history_features,
+        matchup_features=matchup_features,
+    )
+
+    assert "poisson_home_win" in row
+    assert "history_last_3_points_ppg_home" in row
+    assert "history_trend_goal_diff_3_vs_10_diff" in row
+    assert "h2h_matches" in row
+    assert row["h2h_matches"] >= 1
 
 
 def test_mundial_lineup_payload_adds_visual_positions_and_photos():

@@ -13,6 +13,7 @@ const state = {
   teamAssets: new Map(),
   defaultsApplied: false,
   trainingControlsApplied: false,
+  countdownTimer: null,
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -28,6 +29,7 @@ function bindEvents() {
   document.getElementById("simulate-btn").addEventListener("click", runSimulation);
   document.getElementById("model-load").addEventListener("click", loadSelectedModel);
   document.getElementById("model-delete").addEventListener("click", deleteSelectedModel);
+  document.getElementById("worldcup-clear-cache").addEventListener("click", clearWorldcupMaintenance);
   document.getElementById("model-active-select").addEventListener("change", syncModelSelects);
   document.getElementById("upcoming-model-select").addEventListener("change", syncModelSelects);
   document.getElementById("fixture-group-filter").addEventListener("change", renderFixtures);
@@ -42,7 +44,6 @@ function bindEvents() {
   document.getElementById("training-refresh").addEventListener("click", loadTrainingStatus);
   document.getElementById("training-download").addEventListener("click", downloadTrainingDataset);
   document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
-  document.getElementById("predict-match-btn").addEventListener("click", runMatchPrediction);
   document.getElementById("upcoming-predict-btn").addEventListener("click", runUpcomingPredictions);
   document.getElementById("worldcup-model-type").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
   document.getElementById("worldcup-target").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
@@ -98,7 +99,6 @@ async function loadAll(refresh) {
     renderModelsCatalog(models);
     renderProcedure(procedure);
     fillLineupSelect();
-    fillPredictSelect();
   } catch (error) {
     showError(error.message);
   }
@@ -121,11 +121,10 @@ function setLoading() {
   document.getElementById("training-tuning-flow").innerHTML = loadingHtml("Tuning pendiente");
   document.getElementById("training-features").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
-  document.getElementById("match-prediction").innerHTML = loadingHtml("Predicción pendiente");
-  document.getElementById("match-prob-breakdown").innerHTML = loadingHtml("Desglose pendiente");
   document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones pendientes");
   document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("models-list").innerHTML = loadingHtml("Modelos pendientes");
+  document.getElementById("simulation-summary").innerHTML = "";
 }
 
 function applyDefaultConfig(config) {
@@ -157,12 +156,19 @@ function renderOverview(overview) {
   document.getElementById("metric-fixtures").textContent = overview.fixtures || 0;
   document.getElementById("metric-players").textContent = overview.players || 0;
   document.getElementById("model-source").textContent = `${overview.model || "Modelo"} - ${overview.fixture_source || ""}`;
-  const opener = overview.opener || {};
-  document.getElementById("hero-meta").textContent = `${opener.date || "2026-06-11"} ${opener.time || ""} - ${opener.venue || "Sede por confirmar"}`;
+  const highlight = overview.highlight || overview.opener || {};
+  document.getElementById("hero-meta").textContent = [
+    highlight.group || highlight.round || "Partido inaugural",
+    `${highlight.date || "2026-06-11"} ${highlight.time || ""}`.trim(),
+    highlight.venue || "Sede por confirmar",
+  ].filter(Boolean).join(" - ");
   document.getElementById("hero-match").innerHTML = `
-    ${matchTeamHtml(opener.home || {}, "home")}
+    ${matchTeamHtml(highlight.home || {}, "home")}
     <span class="versus">VS</span>
-    ${matchTeamHtml(opener.away || {}, "away")}`;
+    ${matchTeamHtml(highlight.away || {}, "away")}`;
+  renderHeroCountdown(overview.countdown_target, overview.countdown_state, highlight);
+  document.getElementById("hero-next-grid").innerHTML = (overview.next_matches || []).map((fixture) => heroNextCardHtml(fixture)).join("")
+    || `<article class="hero-next-card empty"><strong>Sin más partidos cargados</strong><small>El calendario adicional aparecerá aquí.</small></article>`;
 }
 
 function matchTeamHtml(asset, side) {
@@ -229,16 +235,70 @@ function fillLineupSelect() {
   `).join("");
 }
 
-function fillPredictSelect() {
-  const groupFixtures = state.fixtures.filter((fixture) => fixture.group);
-  document.getElementById("predict-fixture").innerHTML = groupFixtures.map((fixture) => `
-    <option value="${escapeAttr(fixture.id)}">${escapeHtml(fixture.id)} - ${escapeHtml(fixture.date)} - ${escapeHtml(fixture.label)}</option>
-  `).join("");
-}
-
 function fillUpcomingGroupFilter() {
   const groups = [...new Set(state.fixtures.map((fixture) => fixture.group).filter(Boolean))];
   document.getElementById("upcoming-group-filter").innerHTML = `<option value="">Todos los grupos</option>${groups.map((group) => `<option value="${escapeAttr(group)}">${escapeHtml(group)}</option>`).join("")}`;
+}
+
+function renderHeroCountdown(targetIso, stateLabel, highlight) {
+  const container = document.getElementById("hero-countdown");
+  if (state.countdownTimer) {
+    window.clearInterval(state.countdownTimer);
+    state.countdownTimer = null;
+  }
+  if (!targetIso) {
+    container.innerHTML = `<div class="countdown-chip"><span>Kickoff</span><strong>Hora pendiente</strong></div>`;
+    return;
+  }
+  const render = () => {
+    const diff = Date.parse(targetIso) - Date.now();
+    if (Number.isNaN(diff)) {
+      container.innerHTML = `<div class="countdown-chip"><span>Kickoff</span><strong>Hora pendiente</strong></div>`;
+      return;
+    }
+    if (diff <= 0) {
+      container.innerHTML = `<div class="countdown-chip live"><span>${escapeHtml(highlight.group || highlight.round || "Partido")}</span><strong>En curso o ya inició</strong></div>`;
+      return;
+    }
+    const remaining = countdownParts(diff);
+    container.innerHTML = [
+      countdownChip("Días", remaining.days),
+      countdownChip("Horas", remaining.hours),
+      countdownChip("Min", remaining.minutes),
+      countdownChip("Seg", remaining.seconds),
+    ].join("");
+  };
+  render();
+  state.countdownTimer = window.setInterval(render, 1000);
+}
+
+function countdownParts(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return { days, hours: pad2(hours), minutes: pad2(minutes), seconds: pad2(seconds) };
+}
+
+function countdownChip(label, value) {
+  return `<div class="countdown-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function heroNextCardHtml(fixture) {
+  return `<article class="hero-next-card">
+    <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || fixture.round || "")}</strong></header>
+    <div class="fixture-teams">
+      <div class="fixture-team">${flagHtml(fixture.home)}<strong>${escapeHtml((fixture.home || {}).name || "")}</strong></div>
+      <span>vs</span>
+      <div class="fixture-team">${flagHtml(fixture.away)}<strong>${escapeHtml((fixture.away || {}).name || "")}</strong></div>
+    </div>
+    <small>${escapeHtml([fixture.time || "", fixture.venue || ""].filter(Boolean).join(" - ") || "Sede pendiente")}</small>
+  </article>`;
 }
 
 async function loadModelsCatalog() {
@@ -322,6 +382,28 @@ async function deleteSelectedModel() {
   try {
     const result = await api(`/api/mundial/models/${encodeURIComponent(modelId)}`, { method: "DELETE" });
     renderModelsCatalog(result);
+    document.getElementById("simulation-summary").textContent = result.models && result.models.length
+      ? `Modelos restantes: ${result.models.length}`
+      : "Sin modelos híbridos cargados.";
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function clearWorldcupMaintenance() {
+  clearAlert();
+  document.getElementById("simulation-summary").textContent = "Limpiando modelos y cache Mundial...";
+  try {
+    const result = await api("/api/mundial/maintenance/clear", jsonOptions({ clear_cache: true }));
+    state.models = (result.models || {}).models || [];
+    state.activeModelId = (result.models || {}).active_model_id || "";
+    state.training = result.training || state.training;
+    renderModelsCatalog(result.models || {});
+    renderTrainingStatus(result.training || state.training || {});
+    document.getElementById("lineup-status").innerHTML = "";
+    document.getElementById("lineup-stage").innerHTML = loadingHtml("11 iniciales limpiados");
+    document.getElementById("lineups-summary").innerHTML = loadingHtml("Cache de alineaciones limpiado");
+    document.getElementById("simulation-summary").textContent = `Limpieza completa: ${((result.removed || []).length)} rutas procesadas.`;
   } catch (error) {
     showError(error.message);
   }
@@ -554,7 +636,7 @@ async function trainWorldCupModel() {
     if (result.models) renderModelsCatalog(result.models);
     else await loadModelsCatalog();
     document.getElementById("sim-use-ml-model").checked = true;
-    await runMatchPrediction();
+    document.getElementById("simulation-summary").textContent = `Modelo listo: ${(result.model || {}).model_name || (result.model || {}).model_id || "híbrido"}`;
   } catch (error) {
     showError(error.message);
   }
@@ -627,12 +709,14 @@ function datasetSummaryHtml(payload) {
   const evalValue = payload.test_rows
     ? `${payload.test_rows} filas test`
     : `${payload.eval_rows || 0} holdout`;
+  const walkForward = payload.walk_forward || {};
   return [
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
     datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
     datasetCard("Evaluacion", evalValue, evalStrategyLabel(payload.eval_strategy)),
     datasetCard("Predicción 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
+    datasetCard("Walk-forward", walkForward.matches || 0, `${walkForward.ready_for_retrain || 0} listos / ${walkForward.pending_results || 0} pendientes`),
     datasetCard("Target", payload.target_column || "-", "label entrenable"),
   ].join("");
 }
@@ -952,93 +1036,6 @@ async function runSimulation() {
   }
 }
 
-async function runMatchPrediction() {
-  const fixtureId = document.getElementById("predict-fixture").value || document.getElementById("lineup-fixture").value;
-  try {
-    const result = await api("/api/mundial/predict-match", jsonOptions({ ...simulationPayload(), fixture_id: fixtureId }));
-    renderMatchPrediction(result);
-  } catch (error) {
-    document.getElementById("match-prediction").innerHTML = loadingHtml("Predicción no disponible");
-    showError(error.message);
-  }
-}
-
-function renderMatchPrediction(result) {
-  const fixture = result.fixture || {};
-  const probs = result.probabilities || {};
-  const sources = result.market_sources || {};
-  document.getElementById("match-prediction").innerHTML = [
-    predictionCard(`1 - ${fixture.home || "Local"}`, `${probs.home || 0}%`),
-    predictionCard("X - Empate", `${probs.draw || 0}%`),
-    predictionCard(`2 - ${fixture.away || "Visitante"}`, `${probs.away || 0}%`),
-    predictionCard("Over 2.5", `${probs.over25 || 0}%`),
-    predictionCard("Under 2.5", `${probs.under25 || 0}%`),
-    predictionCard("Fuente 1X2", marketSourceValue(sources.result, "Poisson")),
-    predictionCard("Fuente O/U", marketSourceValue(sources.over_under_25, "Poisson")),
-  ].join("");
-  renderTable("match-prediction-detail", objectTable({
-    Partido: `${fixture.home || ""} vs ${fixture.away || ""}`,
-    Fecha: fixture.date || "",
-    Predicción: result.prediction || "",
-    Marcador: result.modal_score || "",
-    "xG local": (result.expected_goals || {}).home || "",
-    "xG visita": (result.expected_goals || {}).away || "",
-    "Fuente 1X2": marketSourceValue(sources.result, "Poisson"),
-    "Fuente O/U": marketSourceValue(sources.over_under_25, "Poisson"),
-    Nota: (result.notes || []).join(" - "),
-  }));
-  renderTable("match-prob-breakdown", predictionBreakdownTable(result));
-}
-
-function predictionBreakdownTable(result) {
-  const model = result.model_probs || {};
-  const sources = result.market_sources || {};
-  const poisson = model.poisson || {};
-  const poissonTotals = model.poisson_totals || {};
-  const ml = model.ml || {};
-  const overMl = model.over_under_ml || {};
-  const final = result.probabilities || {};
-  const rows = [
-    {
-      Fuente: "Poisson 1X2",
-      "1": poisson.H ?? "",
-      "X": poisson.D ?? "",
-      "2": poisson.A ?? "",
-      Over: poissonTotals.over25 ?? "",
-      Under: poissonTotals.under25 ?? "",
-      Peso: "base",
-    },
-    {
-      Fuente: "ML 1X2",
-      "1": ml.H ?? "",
-      "X": ml.D ?? "",
-      "2": ml.A ?? "",
-      Over: "",
-      Under: "",
-      Peso: model.result_weight ?? 0,
-    },
-    {
-      Fuente: "ML U/O 2.5",
-      "1": "",
-      "X": "",
-      "2": "",
-      Over: overMl.over25 ?? "",
-      Under: overMl.under25 ?? "",
-      Peso: model.over_under_weight ?? 0,
-    },
-    {
-      Fuente: "Final blend",
-      "1": final.home ?? "",
-      "X": final.draw ?? "",
-      "2": final.away ?? "",
-      Over: final.over25 ?? "",
-      Under: final.under25 ?? "",
-      Peso: `1X2 ${marketSourceValue(sources.result, "Poisson")} / O/U ${marketSourceValue(sources.over_under_25, "Poisson")}`,
-    },
-  ];
-  return { columns: ["Fuente", "1", "X", "2", "Over", "Under", "Peso"], rows, total: rows.length };
-}
-
 function predictionCard(label, value) {
   return `<article class="prediction-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
 }
@@ -1185,10 +1182,6 @@ function renderTable(id, table) {
   document.getElementById(id).innerHTML = tableHtml(table);
 }
 
-function objectTable(row) {
-  return { columns: Object.keys(row), rows: [row], total: 1 };
-}
-
 function tableHtml(table) {
   if (!table || !table.columns) return "<div></div>";
   const head = table.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
@@ -1205,7 +1198,6 @@ function switchWorldcupView(id) {
   document.querySelectorAll(".worldcup-view").forEach((view) => view.classList.toggle("active", view.id === id));
   window.scrollTo({ top: 0, behavior: "smooth" });
   if (id === "alineaciones" && state.fixtures.length) loadSelectedLineup(false);
-  if (id === "modelo" && state.models.length) syncModelSelects();
   if (id === "predicciones" && state.fixtures.length) fillUpcomingGroupFilter();
 }
 

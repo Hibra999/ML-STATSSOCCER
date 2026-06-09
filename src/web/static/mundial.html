@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260609-5">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260609-8">
 </head>
 <body>
   <header class="topbar">
@@ -17,8 +17,7 @@
       <button class="nav-pill" data-section="grupos">Grupos</button>
       <button class="nav-pill" data-section="fixtures">Calendario</button>
       <button class="nav-pill" data-section="alineaciones">11 Iniciales</button>
-      <button class="nav-pill" data-section="entrenamiento">Entrenamiento</button>
-      <button class="nav-pill" data-section="modelo">Modelo Híbrido</button>
+      <button class="nav-pill" data-section="entrenamiento">Entrenamiento y Modelo</button>
       <button class="nav-pill" data-section="predicciones">Predicciones Futuras</button>
       <button class="nav-pill" data-section="datos">Datos</button>
     </nav>
@@ -32,6 +31,7 @@
         <span class="eyebrow">Apartado independiente</span>
         <h1>Mundial 2026</h1>
         <p id="hero-meta">Cargando fixture inaugural...</p>
+        <div id="hero-countdown" class="hero-countdown"></div>
         <div class="hero-match" id="hero-match"></div>
       </div>
       <div class="hero-metrics">
@@ -39,6 +39,7 @@
         <div class="metric"><span>Grupos</span><strong id="metric-groups">0</strong></div>
         <div class="metric"><span>Partidos</span><strong id="metric-fixtures">0</strong></div>
         <div class="metric"><span>Jugadores</span><strong id="metric-players">0</strong></div>
+        <div id="hero-next-grid" class="hero-next-grid"></div>
       </div>
     </section>
 
@@ -93,74 +94,6 @@
       <div id="lineups-summary" class="lineups-summary"></div>
     </section>
 
-    <section id="modelo" class="section-block worldcup-view">
-      <div class="section-heading">
-        <h2>Modelo Híbrido</h2>
-        <small id="simulation-summary"></small>
-      </div>
-      <div class="model-management-grid">
-        <article class="visual-panel compact-panel">
-          <header><h3>Modelo híbrido activo</h3><small>Catálogo local Mundial</small></header>
-          <div class="model-loader">
-            <select id="model-active-select"></select>
-            <button id="model-load" class="primary" type="button">Cargar modelo</button>
-            <button id="model-delete" type="button">Borrar</button>
-          </div>
-          <div id="active-model-state" class="model-state-grid"></div>
-          <div id="models-list" class="models-list"></div>
-        </article>
-        <article class="visual-panel compact-panel">
-          <header><h3>Ajustes Monte Carlo</h3><small id="model-source">Elo + Poisson + ML híbrido</small></header>
-          <div class="control-grid compact-controls">
-            <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
-            <label>Seed<input id="sim-seed" type="number" value="2026"></label>
-            <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
-            <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
-            <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
-            <label>Max goles<input id="sim-max-goals" type="number" min="6" max="14" step="1" value="10"></label>
-            <label>Peso 11<input id="sim-lineup-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
-            <label>Peso features<input id="sim-player-feature-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
-            <label>Peso ML híbrido<input id="sim-ml-weight" type="number" min="0" max="1" step="0.05" value="0.5"></label>
-            <label class="check"><input id="sim-use-lineups" type="checkbox"> Usar 11</label>
-            <label class="check"><input id="sim-use-player-features" type="checkbox"> Features XI</label>
-            <label class="check"><input id="sim-use-ml-model" type="checkbox"> ML híbrido</label>
-          </div>
-          <div class="actions-row">
-            <button id="simulate-btn" class="primary" type="button">Simular</button>
-            <button id="refresh-btn" type="button">Actualizar datos</button>
-          </div>
-        </article>
-      </div>
-      <div class="prediction-dock">
-        <div>
-          <h3>Predicción puntual</h3>
-          <small>1X2, marcador modal y Over/Under 2.5</small>
-        </div>
-        <select id="predict-fixture"></select>
-        <button id="predict-match-btn" class="primary" type="button">Predecir partido</button>
-      </div>
-      <div id="match-prediction" class="prediction-grid"></div>
-      <details class="data-drawer">
-        <summary>Detalle predicción partido</summary>
-        <div id="match-prediction-detail"></div>
-      </details>
-      <details class="data-drawer" open>
-        <summary>Desglose Poisson / ML</summary>
-        <div id="match-prob-breakdown"></div>
-      </details>
-      <div id="champion-strip" class="champion-strip"></div>
-      <div class="results-grid">
-        <div>
-          <h3>Avance por seleccion</h3>
-          <div id="advancement-table"></div>
-        </div>
-        <div>
-          <h3>Probabilidades por partido</h3>
-          <div id="match-probs-table"></div>
-        </div>
-      </div>
-    </section>
-
     <section id="predicciones" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Predicciones Futuras</h2>
@@ -185,8 +118,43 @@
 
     <section id="entrenamiento" class="section-block worldcup-view">
       <div class="section-heading">
-        <h2>Entrenar Modelo Híbrido</h2>
+        <h2>Entrenamiento y Modelo</h2>
         <small id="training-source">Kaggle + Elo/Poisson + boosting seleccionado</small>
+      </div>
+      <div class="model-management-grid">
+        <article class="visual-panel compact-panel">
+          <header><h3>Modelo híbrido activo</h3><small>Catálogo local Mundial</small></header>
+          <div class="model-loader">
+            <select id="model-active-select"></select>
+            <button id="model-load" class="primary" type="button">Cargar modelo</button>
+            <button id="model-delete" type="button">Borrar</button>
+            <button id="worldcup-clear-cache" type="button">Limpiar Mundial</button>
+          </div>
+          <div id="active-model-state" class="model-state-grid"></div>
+          <div id="models-list" class="models-list"></div>
+        </article>
+        <article class="visual-panel compact-panel">
+          <header><h3>Ajustes Monte Carlo</h3><small id="model-source">Elo + Poisson + ML híbrido</small></header>
+          <div class="control-grid compact-controls">
+            <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
+            <label>Seed<input id="sim-seed" type="number" value="2026"></label>
+            <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
+            <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
+            <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
+            <label>Max goles<input id="sim-max-goals" type="number" min="6" max="14" step="1" value="10"></label>
+            <label>Peso 11<input id="sim-lineup-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
+            <label>Peso features<input id="sim-player-feature-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
+            <label>Peso ML híbrido<input id="sim-ml-weight" type="number" min="0" max="1" step="0.05" value="0.5"></label>
+            <label class="check"><input id="sim-use-lineups" type="checkbox"> Usar 11</label>
+            <label class="check"><input id="sim-use-player-features" type="checkbox"> Features XI</label>
+            <label class="check"><input id="sim-use-ml-model" type="checkbox"> ML híbrido</label>
+          </div>
+          <div class="actions-row">
+            <button id="simulate-btn" class="primary" type="button">Simular torneo</button>
+            <button id="refresh-btn" type="button">Actualizar datos</button>
+          </div>
+          <div id="simulation-summary" class="status-strip"></div>
+        </article>
       </div>
       <div class="model-flow">
         <article class="flow-step">
@@ -282,6 +250,17 @@
         <summary>Preview dataset</summary>
         <div id="training-preview"></div>
       </details>
+      <div id="champion-strip" class="champion-strip"></div>
+      <div class="results-grid">
+        <div>
+          <h3>Avance por selección</h3>
+          <div id="advancement-table"></div>
+        </div>
+        <div>
+          <h3>Probabilidades por partido</h3>
+          <div id="match-probs-table"></div>
+        </div>
+      </div>
     </section>
 
     <section id="datos" class="section-block worldcup-view">
@@ -311,6 +290,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260609-6"></script>
+  <script src="/static/mundial.js?v=20260609-8"></script>
 </body>
 </html>

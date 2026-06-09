@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import date, datetime
+import shutil
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -20,8 +21,11 @@ from src.worldcup import (
     teams_dataframe,
     tournament_fixtures_dataframe,
 )
-from src.worldcup.data import group_letter, groups_from_tournament
+from src.worldcup.data import CACHE_ROOT, group_letter, groups_from_tournament
 from src.worldcup.lanus_provider import (
+    LINEUPS_ROOT,
+    PLAYER_STATS_ROOT,
+    SOFASCORE_ROOT,
     auto_refresh_lineups,
     autodetect_fixture_event,
     link_fixture_lineup,
@@ -35,6 +39,11 @@ from src.worldcup.lanus_provider import (
     sofa_player_photo_url,
 )
 from src.worldcup.training import (
+    KAGGLE_ROOT,
+    WALK_FORWARD_ROOT,
+    WORLD_CUP_MODELS_ROOT,
+    capture_walk_forward_snapshot,
+    clear_active_worldcup_model,
     dataset_status,
     delete_worldcup_model,
     download_kaggle_dataset,
@@ -197,7 +206,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
     groups = groups_from_tournament(tournament)
     fixture_df = tournament_fixtures_dataframe(tournament)
     players_df, players_source = load_players(refresh=False)
-    opener = _opener_payload(fixture_df)
+    fixture_summary = fixture_overview_payload(fixture_df)
     return {
         "name": tournament.get("name", "World Cup 2026"),
         "teams": sum(len(teams) for teams in groups.values()),
@@ -207,7 +216,11 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
         "players": int(players_df.shape[0]),
         "fixture_source": fixture_source,
         "players_source": players_source,
-        "opener": opener,
+        "opener": fixture_summary["opener"],
+        "highlight": fixture_summary["highlight"],
+        "next_matches": fixture_summary["next_matches"],
+        "countdown_target": fixture_summary["countdown_target"],
+        "countdown_state": fixture_summary["countdown_state"],
         "default_config": DEFAULT_CONFIG,
         "model": "Elo + Poisson Monte Carlo",
         "assets_policy": "Banderas locales/publicas y fotos publicas de SofaScore con fallback visual.",
@@ -389,10 +402,12 @@ def link_lineup(fixture_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 def fixture_player_stats(fixture_id: str, refresh: bool = False) -> Dict[str, Any]:
     tournament, _ = load_tournament_2026(refresh=False)
     payload = player_stats_payload_for_fixture(tournament=tournament, fixture_id=fixture_id, refresh=bool(refresh))
+    walk_forward = capture_walk_forward_snapshot(payload)
     return {
         "stats": enrich_lineup_payload(payload),
         "features": table_payload(pd.DataFrame(payload.get("features", [])), page=1, page_size=10),
         "players": table_payload(lineups_table(payload), page=1, page_size=40),
+        "walk_forward": walk_forward,
     }
 
 
@@ -440,6 +455,43 @@ def select_model(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
 
 def delete_model(model_id: str) -> Dict[str, Any]:
     return delete_worldcup_model(model_id)
+
+
+def maintenance_clear(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    clear_cache = bool(payload.get("clear_cache", True))
+    removed: List[str] = []
+    recreated: List[str] = []
+    for root in (WORLD_CUP_MODELS_ROOT, LINEUPS_ROOT, PLAYER_STATS_ROOT, SOFASCORE_ROOT, WALK_FORWARD_ROOT):
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+            removed.append(str(root))
+        root.mkdir(parents=True, exist_ok=True)
+        recreated.append(str(root))
+    clear_active_worldcup_model()
+    if clear_cache and CACHE_ROOT.exists():
+        for path in sorted(CACHE_ROOT.iterdir()):
+            if path.resolve() == KAGGLE_ROOT.resolve():
+                continue
+            if path.is_file() and re.fullmatch(r"worldcup_\d{4}\.json", path.name):
+                continue
+            if path.is_dir() and path.resolve() == KAGGLE_ROOT.resolve():
+                continue
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink()
+            removed.append(str(path))
+    return {
+        "removed": removed,
+        "recreated": recreated,
+        "cache_preserved": [
+            str(KAGGLE_ROOT),
+            "storage/worldcup/cache/worldcup_*.json",
+        ],
+        "models": list_worldcup_models(),
+        "training": dataset_status(),
+    }
 
 
 def training_train(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -656,12 +708,16 @@ def procedure() -> Dict[str, Any]:
                 "detail": "Calcula rating promedio, dispersion, min/max y promedios por linea; solo impactan la prediccion si son pre-partido.",
             },
             {
+                "name": "Walk-forward",
+                "detail": "Cuando ya existe XI con stats por partido, guarda snapshot de jugadores y features de equipo para un futuro reentreno incremental sin mezclar datos incompletos.",
+            },
+            {
                 "name": "Monte Carlo",
                 "detail": "Simula fase de grupos, mejores terceros y bracket completo para estimar avance, final y campeon.",
             },
             {
-                "name": "Prediccion de partido",
-                "detail": "Combina Elo/Poisson con el modelo Kaggle si esta entrenado, y reporta 1X2, marcador modal y Over/Under 2.5.",
+                "name": "Predicciones futuras",
+                "detail": "Combina Elo/Poisson con el modelo Kaggle si esta entrenado, y reporta 1X2, marcador modal y Over/Under 2.5 para los proximos N partidos.",
             },
         ],
         "sources": [
@@ -788,27 +844,102 @@ def local_flag_url(team: str) -> str:
     return ""
 
 
+def fixture_overview_payload(fixture_df: pd.DataFrame) -> Dict[str, Any]:
+    playable = fixture_df[
+        fixture_df["Grupo"].astype(str).str.len().gt(0) &
+        fixture_df["Equipo 1"].astype(str).str.len().gt(1) &
+        fixture_df["Equipo 2"].astype(str).str.len().gt(1)
+    ].copy()
+    if playable.empty:
+        fallback = _opener_payload(fixture_df)
+        return {
+            "opener": fallback,
+            "highlight": fallback,
+            "next_matches": [],
+            "countdown_target": "",
+            "countdown_state": "pending",
+        }
+    playable["_date"] = pd.to_datetime(playable["Fecha"], errors="coerce")
+    playable = playable.sort_values(["_date", "No."], kind="stable").reset_index(drop=True)
+    opener = fixture_card_payload(playable.iloc[0])
+    today = pd.Timestamp.today().normalize()
+    upcoming = playable[playable["_date"].notna() & (playable["_date"] >= today)].copy()
+    ordered = upcoming if not upcoming.empty else playable
+    highlight_row = ordered.iloc[0]
+    highlight = fixture_card_payload(highlight_row)
+    next_matches = [
+        fixture_card_payload(row)
+        for _, row in ordered.iloc[1:5].iterrows()
+    ]
+    return {
+        "opener": opener,
+        "highlight": highlight,
+        "next_matches": next_matches,
+        "countdown_target": highlight.get("kickoff_iso", ""),
+        "countdown_state": "ready" if highlight.get("kickoff_iso") else "pending",
+    }
+
+
+def fixture_card_payload(row: pd.Series | Dict[str, Any]) -> Dict[str, Any]:
+    record = row if isinstance(row, dict) else row.to_dict()
+    home = str(record.get("Equipo 1", "Mexico"))
+    away = str(record.get("Equipo 2", "South Africa"))
+    kickoff = fixture_kickoff_iso(record.get("Fecha", ""), record.get("Hora", ""))
+    return {
+        "id": str(record.get("No.", "")),
+        "date": record.get("Fecha", "2026-06-11"),
+        "time": record.get("Hora", ""),
+        "round": record.get("Ronda", ""),
+        "group": record.get("Grupo", ""),
+        "match": f"{home} vs {away}",
+        "home": team_asset(home),
+        "away": team_asset(away),
+        "venue": record.get("Sede", ""),
+        "kickoff_iso": kickoff,
+    }
+
+
 def _opener_payload(fixture_df: pd.DataFrame) -> Dict[str, Any]:
     if not fixture_df.empty:
-        opener = fixture_df.iloc[0].to_dict()
-        home = str(opener.get("Equipo 1", "Mexico"))
-        away = str(opener.get("Equipo 2", "South Africa"))
-        return {
-            "date": opener.get("Fecha", "2026-06-11"),
-            "time": opener.get("Hora", ""),
-            "match": f"{home} vs {away}",
-            "home": team_asset(home),
-            "away": team_asset(away),
-            "venue": opener.get("Sede", ""),
-        }
+        return fixture_card_payload(fixture_df.iloc[0])
     return {
+        "id": "1",
         "date": "2026-06-11",
-        "time": "",
+        "time": "13:00 UTC-6",
+        "round": "Matchday 1",
+        "group": "Group A",
         "match": "Mexico vs South Africa",
         "home": team_asset("Mexico"),
         "away": team_asset("South Africa"),
-        "venue": "",
+        "venue": "Mexico City",
+        "kickoff_iso": fixture_kickoff_iso("2026-06-11", "13:00 UTC-6"),
     }
+
+
+def fixture_kickoff_iso(date_value: Any, time_value: Any) -> str:
+    date_text = str(date_value or "").strip()
+    if not date_text:
+        return ""
+    time_text = str(time_value or "").strip()
+    offset_hours = 0
+    hour = 0
+    minute = 0
+    if time_text:
+        match = re.search(r"(\d{1,2}):(\d{2})(?:\s*UTC([+-]\d{1,2}))?", time_text)
+        if match:
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            if match.group(3):
+                offset_hours = int(match.group(3))
+    try:
+        kickoff = datetime.strptime(date_text, "%Y-%m-%d").replace(
+            hour=hour,
+            minute=minute,
+            tzinfo=timezone(timedelta(hours=offset_hours)),
+        )
+    except ValueError:
+        return ""
+    return kickoff.astimezone(timezone.utc).isoformat()
 
 
 def table_payload(df: pd.DataFrame, page: int = 1, page_size: int = 50) -> Dict[str, Any]:

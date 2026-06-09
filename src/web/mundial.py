@@ -141,6 +141,10 @@ def create_mundial_app() -> FastAPI:
     def models_delete(model_id: str):
         return _wrap(services.delete_model, model_id)
 
+    @app.post("/api/mundial/maintenance/clear")
+    def maintenance_clear(payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.maintenance_clear, payload)
+
     @app.post("/api/mundial/predict-match")
     def predict_match(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.predict_match, payload)
