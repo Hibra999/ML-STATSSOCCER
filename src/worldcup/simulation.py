@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.worldcup.data import group_letter, group_sort_key, group_stage_matches, groups_from_tournament, knockout_matches
 from src.worldcup.model import WorldCupModel
+from src.worldcup.simulation_accelerated import sample_group_scores
 
 
 ADVANCEMENT_COLUMNS = [
@@ -41,17 +42,22 @@ def simulate_worldcup(
     knockouts = sorted(knockout_matches(tournament), key=lambda match: _knockout_sort_key(match))
     teams = [team for group in groups.values() for team in group]
     counters = {team: Counter() for team in teams}
+    group_score_samples, backend = sample_group_scores(group_matches, model, iterations, seed, prefer_cuda=True)
     report_every = max(1, iterations // 100)
-    _emit_progress(progress_callback, "simulation", 0, iterations, "Monte Carlo en ejecucion")
+    _emit_progress(progress_callback, "simulation", 0, iterations, backend.get("label", "Monte Carlo en ejecucion"))
 
     for iteration in range(iterations):
         standings = _initial_standings(groups)
-        for match in group_matches:
+        for match_index, match in enumerate(group_matches):
             team1 = str(match["team1"])
             team2 = str(match["team2"])
             if team1 not in counters or team2 not in counters:
                 continue
-            goals1, goals2 = model.sample_score(team1, team2, rng)
+            if group_score_samples is not None:
+                goals1 = int(group_score_samples[iteration, match_index, 0])
+                goals2 = int(group_score_samples[iteration, match_index, 1])
+            else:
+                goals1, goals2 = model.sample_score(team1, team2, rng)
             _apply_group_result(standings[str(match["group"])], team1, team2, goals1, goals2)
 
         ranked_groups = {group: _rank_group(group, table, groups[group]) for group, table in standings.items()}
@@ -101,12 +107,12 @@ def simulate_worldcup(
                 counters[winner]["champion"] += 1
         current = iteration + 1
         if current == iterations or current % report_every == 0:
-            _emit_progress(progress_callback, "simulation", current, iterations, "Monte Carlo en ejecucion")
+            _emit_progress(progress_callback, "simulation", current, iterations, backend.get("label", "Monte Carlo en ejecucion"))
 
     advancement = _advancement_dataframe(groups, model, counters, iterations)
     match_probs = match_probabilities_dataframe(group_matches, model)
     _emit_progress(progress_callback, "simulation", iterations, iterations, "Monte Carlo completado")
-    return {"advancement": advancement, "matches": match_probs}
+    return {"advancement": advancement, "matches": match_probs, "backend": backend}
 
 
 def _emit_progress(callback, stage: str, current: int, total: int, message: str) -> None:

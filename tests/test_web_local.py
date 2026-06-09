@@ -458,6 +458,8 @@ def test_worldcup_simulation_returns_advancement_probabilities():
     assert result["matches"].shape[0] == 72
     assert "Pasa grupo %" in result["advancement"].columns
     assert "Over 2.5 %" in result["matches"].columns
+    assert result["backend"]["backend"] in {"cuda", "cpu_numba", "numpy", "python"}
+    assert result["backend"]["label"].startswith("Monte Carlo")
     assert result["advancement"]["Campeon %"].sum() == pytest.approx(100, abs=0.01)
 
 
@@ -479,6 +481,45 @@ def test_worldcup_simulation_emits_progress_payloads():
     assert payloads[-1]["total"] == 100
     assert payloads[-1]["percent"] == 100
     assert payloads[-1]["message"] == "Monte Carlo completado"
+
+
+def test_worldcup_training_leakage_audit_rejects_target_features():
+    from src.worldcup import training
+
+    x_train = pd.DataFrame({"rating_diff": [1.0, 2.0], "HG": [0.0, 1.0]})
+    x_eval = pd.DataFrame({"rating_diff": [3.0], "HG": [2.0]})
+
+    with pytest.raises(training.WorldCupTrainingError, match="Data leakage detectado"):
+        training.audit_training_leakage(["rating_diff", "HG"], x_train, x_eval, "holdout_temporal")
+
+
+def test_worldcup_training_split_prefers_temporal_dates():
+    from src.worldcup import training
+
+    x = pd.DataFrame({"rating_diff": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]})
+    y = pd.Series(["H", "D", "A", "H", "D", "A"])
+    dates = pd.Series(pd.date_range("2020-01-01", periods=6, freq="D"))
+    _, x_eval, _, y_eval, strategy, warnings = training.safe_train_eval_split_with_dates(
+        x,
+        y,
+        dates,
+        test_size=0.34,
+        random_state=7,
+    )
+
+    assert strategy == "holdout_temporal"
+    assert warnings == []
+    assert x_eval["rating_diff"].tolist() == [0.5, 0.6]
+    assert y_eval.tolist() == ["D", "A"]
+
+
+def test_worldcup_simulation_summary_exposes_backend():
+    from src.web import mundial_services
+
+    result = mundial_services.simulate({"iterations": 100, "seed": 7, "use_ml_model": False})
+
+    assert result["summary"]["simulation_backend"]["backend"] in {"cuda", "cpu_numba", "numpy", "python"}
+    assert "Monte Carlo" in result["summary"]["simulation_backend"]["label"]
 
 
 def test_worldcup_lanus_lineup_normalization_extracts_starting_elevens():
@@ -873,10 +914,12 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert status["eval_rows"] > 0
     assert status["eval_strategy"] == "holdout_from_train"
     assert result["mode"] == "match_result"
-    assert result["eval_strategy"] == "holdout_from_train"
+    assert result["eval_strategy"] == "holdout_temporal"
     assert result["prediction_rows"] == 2
     assert result["model"]["target_column"] == "Label + OverUnder25"
-    assert result["model"]["eval_strategy"] == "holdout_from_train"
+    assert result["model"]["eval_strategy"] == "holdout_temporal"
+    assert result["anti_leakage"]["result"]["split_temporal"] is True
+    assert result["anti_leakage"]["result"]["history_features"] == "pre_eval_cutoff"
     assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
     assert result["model"]["markets"]["over_under_25"]["confusion_matrix"]["labels"] == ["Under 2.5", "Over 2.5"]
     assert result["model"]["etl_steps"]

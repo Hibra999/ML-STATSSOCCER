@@ -883,6 +883,8 @@ function marketLabel(key) {
 
 function evalStrategyLabel(strategy) {
   if (strategy === "test_file") return "test etiquetado";
+  if (strategy === "holdout_temporal") return "holdout temporal";
+  if (strategy === "holdout_random_no_date") return "holdout sin fecha";
   if (strategy === "holdout_from_train") return "holdout desde train";
   if (strategy === "unavailable") return "sin evaluacion";
   return strategy || "pendiente";
@@ -1406,8 +1408,9 @@ function renderSimulation(result) {
   const featureState = config.use_player_features ? "features XI activas" : "features XI off";
   const mlState = config.use_ml_model ? "ML híbrido activo" : "ML híbrido off";
   const layers = (summary.hybrid_layers || []).join(" + ");
+  const backend = (summary.simulation_backend || {}).label || "Monte Carlo CPU";
   document.getElementById("simulation-summary").textContent =
-    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState} - ${mlState} - ${layers}`;
+    `${summary.model || "Modelo"} - ${backend} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState} - ${mlState} - ${layers}`;
   const rows = (result.advancement && result.advancement.rows) || [];
   const topChampions = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 8);
   document.getElementById("champion-strip").innerHTML = topChampions.map((row) => {

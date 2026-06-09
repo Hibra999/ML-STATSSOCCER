@@ -765,6 +765,7 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
             "lineup_notes": lineup_notes,
             "player_feature_notes": feature_notes,
             "hybrid_layers": hybrid_layers,
+            "simulation_backend": result.get("backend", {}),
             "anti_leakage": [
                 "Historico filtrado antes del 2026-06-11.",
                 "Alineaciones ignoradas si fueron obtenidas despues de la fecha del partido.",
