@@ -1,0 +1,3 @@
+fixture_id,date,group,home,away,source,match_url,fetched_at,prediction_safe,starters_home,starters_away,stats_known,status,included_result_only_at,included_with_players_at
+1,2026-06-11,Group A,Mexico,South Africa,unavailable:lineups,,,1,0,0,0,pending_result,,
+1,2026-06-11,Group A,Mexico,South Africa,unavailable:lineups,,,1,0,0,0,pending_result,nan,nan

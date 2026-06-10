@@ -1,0 +1,5 @@
+Fixture,Fecha,Grupo,Equipo,Rival,Prediction safe,Titulares,Stats conocidos,XI rating prom,XI rating std,XI rating min,XI rating max,POR rating,DEF rating,MED rating,ATA rating,Formacion,Fuente,fixture_id,fetched_at
+1,2026-06-11,Group A,Mexico,South Africa,Si,0,0,,,,,,,,,,unavailable:lineups,1,
+1,2026-06-11,Group A,South Africa,Mexico,Si,0,0,,,,,,,,,,unavailable:lineups,1,
+1,2026-06-11,Group A,Mexico,South Africa,Si,0,0,,,,,,,,,,unavailable:lineups,1,
+1,2026-06-11,Group A,South Africa,Mexico,Si,0,0,,,,,,,,,,unavailable:lineups,1,
