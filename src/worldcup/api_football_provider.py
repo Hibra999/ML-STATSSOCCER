@@ -540,10 +540,10 @@ def api_football_feature_table(
     if "Team" not in working.columns or "Date" not in working.columns:
         return pd.DataFrame(columns=["Team"])
     working["Team"] = working["Team"].map(clean_team_name)
-    working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
-    reference_ts = pd.to_datetime(reference_date, errors="coerce")
+    working["Date"] = naive_utc_series(working["Date"])
+    reference_ts = naive_utc_timestamp(reference_date)
     if pd.notna(reference_ts):
-        working = working[working["Date"].notna() & (working["Date"] < pd.Timestamp(reference_ts))].copy()
+        working = working[working["Date"].notna() & (working["Date"] < reference_ts)].copy()
     else:
         working = working[working["Date"].notna()].copy()
     team_filter = {normalize_team_key(team) for team in teams or [] if str(team).strip()}
@@ -556,15 +556,15 @@ def api_football_feature_table(
     for team, frame in working.groupby("Team", sort=True):
         frame = frame.sort_values("Date", kind="stable").reset_index(drop=True)
         last_date = frame["Date"].max()
-        days_since = float(max((pd.Timestamp(reference_ts) - last_date).days, 0)) if pd.notna(reference_ts) and pd.notna(last_date) else 0.0
+        days_since = float(max((reference_ts - last_date).days, 0)) if pd.notna(reference_ts) and pd.notna(last_date) else 0.0
         rest_days = frame["Date"].diff().dt.days.dropna()
         record: Dict[str, Any] = {
             "Team": team,
             "matches": float(frame.shape[0]),
             "days_since_last_match": days_since,
-            "recent_match_volume_90d": float(frame[frame["Date"] >= (pd.Timestamp(reference_ts) - pd.Timedelta(days=90))].shape[0]) if pd.notna(reference_ts) else 0.0,
-            "recent_match_volume_180d": float(frame[frame["Date"] >= (pd.Timestamp(reference_ts) - pd.Timedelta(days=180))].shape[0]) if pd.notna(reference_ts) else 0.0,
-            "recent_match_volume_365d": float(frame[frame["Date"] >= (pd.Timestamp(reference_ts) - pd.Timedelta(days=365))].shape[0]) if pd.notna(reference_ts) else 0.0,
+            "recent_match_volume_90d": float(frame[frame["Date"] >= (reference_ts - pd.Timedelta(days=90))].shape[0]) if pd.notna(reference_ts) else 0.0,
+            "recent_match_volume_180d": float(frame[frame["Date"] >= (reference_ts - pd.Timedelta(days=180))].shape[0]) if pd.notna(reference_ts) else 0.0,
+            "recent_match_volume_365d": float(frame[frame["Date"] >= (reference_ts - pd.Timedelta(days=365))].shape[0]) if pd.notna(reference_ts) else 0.0,
             "rest_days_avg": float(rest_days.mean()) if not rest_days.empty else 0.0,
             "rest_days_std": float(rest_days.std(ddof=0)) if not rest_days.empty else 0.0,
             "rest_days_last": float(rest_days.iloc[-1]) if not rest_days.empty else 0.0,
@@ -633,6 +633,17 @@ def numeric_stat_columns(frame: pd.DataFrame) -> List[str]:
     ]
 
 
+def naive_utc_timestamp(value: Any) -> pd.Timestamp:
+    ts = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(ts):
+        return pd.NaT
+    return pd.Timestamp(ts).tz_convert(None)
+
+
+def naive_utc_series(values: Any) -> pd.Series:
+    return pd.to_datetime(values, errors="coerce", utc=True).dt.tz_convert(None)
+
+
 def merge_context_counts(output: pd.DataFrame, rows: Optional[pd.DataFrame], reference_date: str, prefix: str) -> None:
     output[f"{prefix}_context_available"] = 0.0
     output[f"{prefix}_rows"] = 0.0
@@ -640,15 +651,15 @@ def merge_context_counts(output: pd.DataFrame, rows: Optional[pd.DataFrame], ref
         return
     working = rows.copy()
     working["Team"] = working["Team"].map(clean_team_name)
-    reference_ts = pd.to_datetime(reference_date, errors="coerce")
+    reference_ts = naive_utc_timestamp(reference_date)
     if "fetched_at" in working.columns and pd.notna(reference_ts):
-        fetched = pd.to_datetime(working["fetched_at"], errors="coerce", utc=True).dt.tz_convert(None)
-        working = working[fetched.notna() & (fetched <= pd.Timestamp(reference_ts))].copy()
+        fetched = naive_utc_series(working["fetched_at"])
+        working = working[fetched.notna() & (fetched <= reference_ts)].copy()
     else:
         working = working.iloc[0:0].copy()
     if "Date" in working.columns and pd.notna(reference_ts):
-        dates = pd.to_datetime(working["Date"], errors="coerce")
-        working = working[dates.isna() | (dates >= pd.Timestamp(reference_ts))].copy()
+        dates = naive_utc_series(working["Date"])
+        working = working[dates.isna() | (dates >= reference_ts)].copy()
     if working.empty:
         return
     counts = working.groupby(working["Team"].map(normalize_team_key)).size().to_dict()

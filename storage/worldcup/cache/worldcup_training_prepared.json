@@ -1,10 +1,10 @@
 {
-  "prepared_at": "2026-06-10T07:42:42.336731+00:00",
+  "prepared_at": "2026-06-10T16:39:19.315467+00:00",
   "training_mode": "match_result",
   "source_mode": "team_strength",
   "source_files": [
-    "storage\\worldcup\\kaggle\\test.csv",
-    "storage\\worldcup\\kaggle\\train.csv"
+    "storage/worldcup/kaggle/test.csv",
+    "storage/worldcup/kaggle/train.csv"
   ],
   "label_source": "historical_worldcup",
   "warnings": [
@@ -23,12 +23,25 @@
     "status": "missing",
     "has_1x2": false,
     "has_ou25": false,
-    "sources": [],
-    "loaded_at": "2026-06-10T07:42:42.297731+00:00"
+    "sources": [
+      "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
+    ],
+    "loaded_at": "2026-06-10T16:39:19.171762+00:00"
   },
   "market_warnings": [
-    "Football-Data XLSX no disponible en cache: storage\\worldcup\\market\\WorldCup2026.xlsx."
+    "Football-Data XLSX no disponible en cache: storage/worldcup/market/WorldCup2026.xlsx."
   ],
+  "api_football_status": {
+    "status": "ok",
+    "sources": [
+      "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
+    ],
+    "loaded_at": "2026-06-10T16:39:19.212077+00:00"
+  },
+  "api_football_warnings": [],
+  "api_football_fixture_rows": 64,
+  "api_football_stat_rows": 128,
+  "api_football_market_rows": 0,
   "dc_rho": -0.06,
   "over_under_ready": true,
   "result_ready": true,
@@ -56,7 +69,7 @@
         "HG": 4.0,
         "AG": 1.0,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "Source": "cache:storage/worldcup/cache/worldcup_1930.json, cache:storage/worldcup/cache/worldcup_1934.json, cache:storage/worldcup/cache/worldcup_1938.json, cache:storage/worldcup/cache/worldcup_1950.json, cache:storage/worldcup/cache/worldcup_1954.json, cache:storage/worldcup/cache/worldcup_1958.json, cache:storage/worldcup/cache/worldcup_1962.json, cache:storage/worldcup/cache/worldcup_1966.json, cache:storage/worldcup/cache/worldcup_1970.json, cache:storage/worldcup/cache/worldcup_1974.json, cache:storage/worldcup/cache/worldcup_1978.json, cache:storage/worldcup/cache/worldcup_1982.json, cache:storage/worldcup/cache/worldcup_1986.json, cache:storage/worldcup/cache/worldcup_1990.json, cache:storage/worldcup/cache/worldcup_1994.json, cache:storage/worldcup/cache/worldcup_1998.json, cache:storage/worldcup/cache/worldcup_2002.json, cache:storage/worldcup/cache/worldcup_2006.json, cache:storage/worldcup/cache/worldcup_2010.json, cache:storage/worldcup/cache/worldcup_2014.json, cache:storage/worldcup/cache/worldcup_2018.json, cache:storage/worldcup/cache/worldcup_2022.json"
       },
       {
         "FixtureId": "1",
@@ -68,7 +81,7 @@
         "HG": 3.0,
         "AG": 0.0,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "Source": "cache:storage/worldcup/cache/worldcup_1930.json, cache:storage/worldcup/cache/worldcup_1934.json, cache:storage/worldcup/cache/worldcup_1938.json, cache:storage/worldcup/cache/worldcup_1950.json, cache:storage/worldcup/cache/worldcup_1954.json, cache:storage/worldcup/cache/worldcup_1958.json, cache:storage/worldcup/cache/worldcup_1962.json, cache:storage/worldcup/cache/worldcup_1966.json, cache:storage/worldcup/cache/worldcup_1970.json, cache:storage/worldcup/cache/worldcup_1974.json, cache:storage/worldcup/cache/worldcup_1978.json, cache:storage/worldcup/cache/worldcup_1982.json, cache:storage/worldcup/cache/worldcup_1986.json, cache:storage/worldcup/cache/worldcup_1990.json, cache:storage/worldcup/cache/worldcup_1994.json, cache:storage/worldcup/cache/worldcup_1998.json, cache:storage/worldcup/cache/worldcup_2002.json, cache:storage/worldcup/cache/worldcup_2006.json, cache:storage/worldcup/cache/worldcup_2010.json, cache:storage/worldcup/cache/worldcup_2014.json, cache:storage/worldcup/cache/worldcup_2018.json, cache:storage/worldcup/cache/worldcup_2022.json"
       },
       {
         "FixtureId": "2",
@@ -80,7 +93,7 @@
         "HG": 2.0,
         "AG": 1.0,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "Source": "cache:storage/worldcup/cache/worldcup_1930.json, cache:storage/worldcup/cache/worldcup_1934.json, cache:storage/worldcup/cache/worldcup_1938.json, cache:storage/worldcup/cache/worldcup_1950.json, cache:storage/worldcup/cache/worldcup_1954.json, cache:storage/worldcup/cache/worldcup_1958.json, cache:storage/worldcup/cache/worldcup_1962.json, cache:storage/worldcup/cache/worldcup_1966.json, cache:storage/worldcup/cache/worldcup_1970.json, cache:storage/worldcup/cache/worldcup_1974.json, cache:storage/worldcup/cache/worldcup_1978.json, cache:storage/worldcup/cache/worldcup_1982.json, cache:storage/worldcup/cache/worldcup_1986.json, cache:storage/worldcup/cache/worldcup_1990.json, cache:storage/worldcup/cache/worldcup_1994.json, cache:storage/worldcup/cache/worldcup_1998.json, cache:storage/worldcup/cache/worldcup_2002.json, cache:storage/worldcup/cache/worldcup_2006.json, cache:storage/worldcup/cache/worldcup_2010.json, cache:storage/worldcup/cache/worldcup_2014.json, cache:storage/worldcup/cache/worldcup_2018.json, cache:storage/worldcup/cache/worldcup_2022.json"
       },
       {
         "FixtureId": "3",
@@ -92,7 +105,7 @@
         "HG": 3.0,
         "AG": 1.0,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "Source": "cache:storage/worldcup/cache/worldcup_1930.json, cache:storage/worldcup/cache/worldcup_1934.json, cache:storage/worldcup/cache/worldcup_1938.json, cache:storage/worldcup/cache/worldcup_1950.json, cache:storage/worldcup/cache/worldcup_1954.json, cache:storage/worldcup/cache/worldcup_1958.json, cache:storage/worldcup/cache/worldcup_1962.json, cache:storage/worldcup/cache/worldcup_1966.json, cache:storage/worldcup/cache/worldcup_1970.json, cache:storage/worldcup/cache/worldcup_1974.json, cache:storage/worldcup/cache/worldcup_1978.json, cache:storage/worldcup/cache/worldcup_1982.json, cache:storage/worldcup/cache/worldcup_1986.json, cache:storage/worldcup/cache/worldcup_1990.json, cache:storage/worldcup/cache/worldcup_1994.json, cache:storage/worldcup/cache/worldcup_1998.json, cache:storage/worldcup/cache/worldcup_2002.json, cache:storage/worldcup/cache/worldcup_2006.json, cache:storage/worldcup/cache/worldcup_2010.json, cache:storage/worldcup/cache/worldcup_2014.json, cache:storage/worldcup/cache/worldcup_2018.json, cache:storage/worldcup/cache/worldcup_2022.json"
       },
       {
         "FixtureId": "4",
@@ -104,7 +117,7 @@
         "HG": 1.0,
         "AG": 0.0,
         "OverUnder25": 0,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "Source": "cache:storage/worldcup/cache/worldcup_1930.json, cache:storage/worldcup/cache/worldcup_1934.json, cache:storage/worldcup/cache/worldcup_1938.json, cache:storage/worldcup/cache/worldcup_1950.json, cache:storage/worldcup/cache/worldcup_1954.json, cache:storage/worldcup/cache/worldcup_1958.json, cache:storage/worldcup/cache/worldcup_1962.json, cache:storage/worldcup/cache/worldcup_1966.json, cache:storage/worldcup/cache/worldcup_1970.json, cache:storage/worldcup/cache/worldcup_1974.json, cache:storage/worldcup/cache/worldcup_1978.json, cache:storage/worldcup/cache/worldcup_1982.json, cache:storage/worldcup/cache/worldcup_1986.json, cache:storage/worldcup/cache/worldcup_1990.json, cache:storage/worldcup/cache/worldcup_1994.json, cache:storage/worldcup/cache/worldcup_1998.json, cache:storage/worldcup/cache/worldcup_2002.json, cache:storage/worldcup/cache/worldcup_2006.json, cache:storage/worldcup/cache/worldcup_2010.json, cache:storage/worldcup/cache/worldcup_2014.json, cache:storage/worldcup/cache/worldcup_2018.json, cache:storage/worldcup/cache/worldcup_2022.json"
       },
       {
         "FixtureId": "5",
@@ -116,7 +129,7 @@
         "HG": 3.0,
         "AG": 0.0,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "Source": "cache:storage/worldcup/cache/worldcup_1930.json, cache:storage/worldcup/cache/worldcup_1934.json, cache:storage/worldcup/cache/worldcup_1938.json, cache:storage/worldcup/cache/worldcup_1950.json, cache:storage/worldcup/cache/worldcup_1954.json, cache:storage/worldcup/cache/worldcup_1958.json, cache:storage/worldcup/cache/worldcup_1962.json, cache:storage/worldcup/cache/worldcup_1966.json, cache:storage/worldcup/cache/worldcup_1970.json, cache:storage/worldcup/cache/worldcup_1974.json, cache:storage/worldcup/cache/worldcup_1978.json, cache:storage/worldcup/cache/worldcup_1982.json, cache:storage/worldcup/cache/worldcup_1986.json, cache:storage/worldcup/cache/worldcup_1990.json, cache:storage/worldcup/cache/worldcup_1994.json, cache:storage/worldcup/cache/worldcup_1998.json, cache:storage/worldcup/cache/worldcup_2002.json, cache:storage/worldcup/cache/worldcup_2006.json, cache:storage/worldcup/cache/worldcup_2010.json, cache:storage/worldcup/cache/worldcup_2014.json, cache:storage/worldcup/cache/worldcup_2018.json, cache:storage/worldcup/cache/worldcup_2022.json"
       },
       {
         "FixtureId": "6",
@@ -128,7 +141,7 @@
         "HG": 4.0,
         "AG": 0.0,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "Source": "cache:storage/worldcup/cache/worldcup_1930.json, cache:storage/worldcup/cache/worldcup_1934.json, cache:storage/worldcup/cache/worldcup_1938.json, cache:storage/worldcup/cache/worldcup_1950.json, cache:storage/worldcup/cache/worldcup_1954.json, cache:storage/worldcup/cache/worldcup_1958.json, cache:storage/worldcup/cache/worldcup_1962.json, cache:storage/worldcup/cache/worldcup_1966.json, cache:storage/worldcup/cache/worldcup_1970.json, cache:storage/worldcup/cache/worldcup_1974.json, cache:storage/worldcup/cache/worldcup_1978.json, cache:storage/worldcup/cache/worldcup_1982.json, cache:storage/worldcup/cache/worldcup_1986.json, cache:storage/worldcup/cache/worldcup_1990.json, cache:storage/worldcup/cache/worldcup_1994.json, cache:storage/worldcup/cache/worldcup_1998.json, cache:storage/worldcup/cache/worldcup_2002.json, cache:storage/worldcup/cache/worldcup_2006.json, cache:storage/worldcup/cache/worldcup_2010.json, cache:storage/worldcup/cache/worldcup_2014.json, cache:storage/worldcup/cache/worldcup_2018.json, cache:storage/worldcup/cache/worldcup_2022.json"
       },
       {
         "FixtureId": "7",
@@ -140,12 +153,12 @@
         "HG": 3.0,
         "AG": 0.0,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "Source": "cache:storage/worldcup/cache/worldcup_1930.json, cache:storage/worldcup/cache/worldcup_1934.json, cache:storage/worldcup/cache/worldcup_1938.json, cache:storage/worldcup/cache/worldcup_1950.json, cache:storage/worldcup/cache/worldcup_1954.json, cache:storage/worldcup/cache/worldcup_1958.json, cache:storage/worldcup/cache/worldcup_1962.json, cache:storage/worldcup/cache/worldcup_1966.json, cache:storage/worldcup/cache/worldcup_1970.json, cache:storage/worldcup/cache/worldcup_1974.json, cache:storage/worldcup/cache/worldcup_1978.json, cache:storage/worldcup/cache/worldcup_1982.json, cache:storage/worldcup/cache/worldcup_1986.json, cache:storage/worldcup/cache/worldcup_1990.json, cache:storage/worldcup/cache/worldcup_1994.json, cache:storage/worldcup/cache/worldcup_1998.json, cache:storage/worldcup/cache/worldcup_2002.json, cache:storage/worldcup/cache/worldcup_2006.json, cache:storage/worldcup/cache/worldcup_2010.json, cache:storage/worldcup/cache/worldcup_2014.json, cache:storage/worldcup/cache/worldcup_2018.json, cache:storage/worldcup/cache/worldcup_2022.json"
       }
     ],
     "total": 900
   },
-  "history_source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json",
+  "history_source": "cache:storage/worldcup/cache/worldcup_1930.json, cache:storage/worldcup/cache/worldcup_1934.json, cache:storage/worldcup/cache/worldcup_1938.json, cache:storage/worldcup/cache/worldcup_1950.json, cache:storage/worldcup/cache/worldcup_1954.json, cache:storage/worldcup/cache/worldcup_1958.json, cache:storage/worldcup/cache/worldcup_1962.json, cache:storage/worldcup/cache/worldcup_1966.json, cache:storage/worldcup/cache/worldcup_1970.json, cache:storage/worldcup/cache/worldcup_1974.json, cache:storage/worldcup/cache/worldcup_1978.json, cache:storage/worldcup/cache/worldcup_1982.json, cache:storage/worldcup/cache/worldcup_1986.json, cache:storage/worldcup/cache/worldcup_1990.json, cache:storage/worldcup/cache/worldcup_1994.json, cache:storage/worldcup/cache/worldcup_1998.json, cache:storage/worldcup/cache/worldcup_2002.json, cache:storage/worldcup/cache/worldcup_2006.json, cache:storage/worldcup/cache/worldcup_2010.json, cache:storage/worldcup/cache/worldcup_2014.json, cache:storage/worldcup/cache/worldcup_2018.json, cache:storage/worldcup/cache/worldcup_2022.json",
   "final_test_year": "2022",
   "split_policy": "latest_worldcup_final_test"
 }

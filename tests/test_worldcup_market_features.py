@@ -241,6 +241,18 @@ def test_api_football_features_exclude_future_matches_from_match_row():
     assert x.iloc[0]["api_football_total_shots_for_avg_diff"] == pytest.approx(7.0)
 
 
+def test_api_football_features_accept_timezone_aware_dates():
+    team_stats = pd.DataFrame([
+        {"Date": "2026-06-09T22:00:00+00:00", "Team": "Mexico", "Opponent": "Canada", "GF": 2, "GA": 0, "GoalDiff": 2, "Points": 3, "Win": 1, "Draw": 0, "Loss": 0, "Over25": 0, "Under25": 1, "BTTS": 0, "CleanSheet": 1},
+        {"Date": "2026-06-11T00:00:00+00:00", "Team": "Mexico", "Opponent": "Canada", "GF": 8, "GA": 0, "GoalDiff": 8, "Points": 3, "Win": 1, "Draw": 0, "Loss": 0, "Over25": 1, "Under25": 0, "BTTS": 0, "CleanSheet": 1},
+    ])
+
+    features = api_football_feature_table(team_stats, reference_date="2026-06-10", teams=["Mexico"])
+
+    assert features.iloc[0]["matches"] == pytest.approx(1.0)
+    assert features.iloc[0]["all_goals_for_avg"] == pytest.approx(2.0)
+
+
 def test_api_football_context_requires_prefetched_rows():
     team_stats = pd.DataFrame([
         {"Date": "2026-06-09", "Team": "Mexico", "Opponent": "Canada", "GF": 2, "GA": 0, "GoalDiff": 2, "Points": 3, "Win": 1, "Draw": 0, "Loss": 0, "Over25": 0, "Under25": 1, "BTTS": 0, "CleanSheet": 1},

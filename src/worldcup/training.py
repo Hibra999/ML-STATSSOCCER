@@ -1403,22 +1403,24 @@ def build_training_matrix(
     api_football = api_football or {}
     records = []
     static_model = base_model
+    working_teams = list(teams or teams_from_rows(working))
+    frozen_years = frozen_years or set()
     if static_model is None and history_df is None:
-        static_model = WorldCupModel.from_history(pd.DataFrame(), teams=teams or teams_from_rows(working))
+        static_model = WorldCupModel.from_history(pd.DataFrame(), teams=working_teams)
     snapshot_cache: Dict[Tuple[str, str], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     for _, row in working.iterrows():
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
         reference_date = reference_date_for_row(row_date, row_year)
         if history_df is not None:
-            frozen = row_year in (frozen_years or set())
+            frozen = row_year in frozen_years
             cache_key = ("date", reference_date)
             if cache_key not in snapshot_cache:
                 history_cutoff = history_before_row(history_df, row_date=row_date, row_year=row_year, freeze_year=frozen)
                 snapshot_cache[cache_key] = (
                     WorldCupModel.from_history(
                         history_cutoff,
-                        teams=teams or teams_from_rows(working),
+                        teams=working_teams,
                         history_weight=history_weight,
                         recency_weight=recency_weight,
                         host_advantage=host_advantage,
@@ -1426,11 +1428,11 @@ def build_training_matrix(
                     ),
                     build_history_feature_table(history_cutoff, reference_date=reference_date),
                     build_matchup_feature_table(history_cutoff, reference_date=reference_date),
-                    qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=teams or teams_from_rows(working)),
+                    qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=working_teams),
                     api_football_feature_table(
                         api_football.get("team_stats", pd.DataFrame()),
                         reference_date=reference_date,
-                        teams=teams or teams_from_rows(working),
+                        teams=working_teams,
                         lineups=api_football.get("lineups", pd.DataFrame()),
                         injuries=api_football.get("injuries", pd.DataFrame()),
                     ),
@@ -1440,11 +1442,11 @@ def build_training_matrix(
             row_model = static_model
             row_history_features = history_team_features
             row_matchup_features = matchup_features
-            row_qualifier_features = qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=teams or teams_from_rows(working))
+            row_qualifier_features = qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=working_teams)
             row_api_football_features = api_football_feature_table(
                 api_football.get("team_stats", pd.DataFrame()),
                 reference_date=reference_date,
-                teams=teams or teams_from_rows(working),
+                teams=working_teams,
                 lineups=api_football.get("lineups", pd.DataFrame()),
                 injuries=api_football.get("injuries", pd.DataFrame()),
             )
