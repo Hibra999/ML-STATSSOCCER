@@ -1070,11 +1070,18 @@ h3 { font-size: 16px; }
 .confusion-wrap {
   overflow: auto;
 }
+.confusion-panel {
+  background: #fff;
+}
 .confusion-grid {
   display: grid;
   gap: 6px;
   min-width: 360px;
   align-items: stretch;
+}
+.confusion-axis {
+  color: var(--muted);
+  font-weight: 700;
 }
 .confusion-grid > strong,
 .confusion-grid > div {
@@ -1094,6 +1101,28 @@ h3 { font-size: 16px; }
 }
 .confusion-cell.correct {
   background: rgba(15, 122, 95, calc(0.18 + (var(--intensity) * 0.62)));
+}
+.confusion-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+.confusion-summary article {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+}
+.confusion-summary span,
+.confusion-summary small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.confusion-summary strong {
+  color: var(--ink);
+  font-size: 18px;
 }
 .tuning-head {
   padding: 12px;

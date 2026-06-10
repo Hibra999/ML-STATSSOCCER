@@ -248,6 +248,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "ultimo Mundial test" in app_source
     assert "holdout temporal" in app_source
     assert "renderConfusionMatrix" in app_source
+    assert "confusionSummaryHtml" in app_source
+    assert "FP/FN por clase" in app_source
     assert "renderEtlFlow" in app_source
     assert "renderTuningFlow" in app_source
     assert "dual_markets" in app_source

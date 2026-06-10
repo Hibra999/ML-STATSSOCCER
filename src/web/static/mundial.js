@@ -1021,8 +1021,11 @@ function renderMetricCards(markets) {
 function renderConfusionMatrix(payload) {
   if (Array.isArray(payload)) {
     document.getElementById("training-confusion-matrix").innerHTML = payload.map((market) => `
-      <section class="market-panel">
-        <header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml(confusionTargetLabel(market.effective_target || market.key || ""))}</small></header>
+      <section class="market-panel confusion-panel">
+        <header>
+          <strong>${escapeHtml(market.label || "Mercado")}</strong>
+          <small>${escapeHtml(confusionTargetLabel(market.effective_target || market.key || ""))} - FP/FN por clase</small>
+        </header>
         ${confusionMatrixHtml(market.confusion_matrix || {})}
       </section>`).join("");
     return;
@@ -1037,7 +1040,7 @@ function confusionMatrixHtml(payload) {
     return loadingHtml("Matriz pendiente");
   }
   const maxValue = Math.max(...matrix.flat().map((value) => Number(value) || 0), 1);
-  const header = `<div></div>${labels.map((label) => `<strong>${escapeHtml(label)}</strong>`).join("")}`;
+  const header = `<div class="confusion-axis">Actual \\ Predicho</div>${labels.map((label) => `<strong>${escapeHtml(label)}</strong>`).join("")}`;
   const rows = matrix.map((row, rowIndex) => `
     <strong>${escapeHtml(labels[rowIndex])}</strong>
     ${row.map((value, colIndex) => {
@@ -1046,7 +1049,27 @@ function confusionMatrixHtml(payload) {
       return `<span class="confusion-cell${correct}" style="--intensity:${escapeAttr(intensity)}"><b>${escapeHtml(value)}</b></span>`;
     }).join("")}
   `).join("");
-  return `<div class="confusion-grid" style="grid-template-columns: 120px repeat(${labels.length}, minmax(82px, 1fr))">${header}${rows}</div>`;
+  return `
+    <div class="confusion-grid" style="grid-template-columns: 130px repeat(${labels.length}, minmax(82px, 1fr))">${header}${rows}</div>
+    ${confusionSummaryHtml(labels, matrix)}`;
+}
+
+function confusionSummaryHtml(labels, matrix) {
+  const totals = labels.map((_, index) => ({
+    label: labels[index],
+    tp: Number((matrix[index] || [])[index] || 0),
+    fp: matrix.reduce((sum, row, rowIndex) => sum + (rowIndex === index ? 0 : Number(row[index] || 0)), 0),
+    fn: (matrix[index] || []).reduce((sum, value, colIndex) => sum + (colIndex === index ? 0 : Number(value || 0)), 0),
+  }));
+  return `
+    <div class="confusion-summary">
+      ${totals.map((item) => `
+        <article>
+          <span>${escapeHtml(item.label)}</span>
+          <strong>FP ${escapeHtml(item.fp)}</strong>
+          <small>FN ${escapeHtml(item.fn)} / TP ${escapeHtml(item.tp)}</small>
+        </article>`).join("")}
+    </div>`;
 }
 
 function renderTuningFlow(trace) {
