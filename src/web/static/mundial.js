@@ -865,7 +865,9 @@ function marketLabel(key) {
 }
 
 function evalStrategyLabel(strategy) {
+  if (strategy === "final_worldcup_test") return "ultimo Mundial test";
   if (strategy === "test_file") return "test etiquetado";
+  if (strategy === "holdout_temporal") return "holdout temporal";
   if (strategy === "holdout_from_train") return "holdout desde train";
   if (strategy === "unavailable") return "sin evaluacion";
   return strategy || "pendiente";

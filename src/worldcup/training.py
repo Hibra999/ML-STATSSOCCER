@@ -13,7 +13,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
-from sklearn.model_selection import train_test_split as sklearn_train_test_split
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
 from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
@@ -44,6 +43,7 @@ BASE_FEATURE_COLUMNS = [
     "home_is_host",
     "away_is_host",
 ]
+MATCH_ROW_COLUMNS = ["FixtureId", "Date", "Year", "Home", "Away", "Label", "HG", "AG", "OverUnder25", "Source"]
 TARGET_LABELS = ["H", "D", "A"]
 TEAM_TARGET_COLUMNS = ["quarter_finalist", "semi_finalist", "finalist", "winner"]
 MODEL_PARAM_KEYS = [
@@ -225,6 +225,8 @@ def dataset_status() -> Dict[str, Any]:
         "prepared_at": prepared.get("prepared_at", ""),
         "prepared_mode": prepared.get("mode", ""),
         "prepared_label_source": prepared.get("label_source", ""),
+        "final_test_year": prepared.get("final_test_year", ""),
+        "split_policy": prepared.get("split_policy", ""),
         "prepared_over_under_ready": bool(prepared.get("over_under_ready", False)),
         "prepared_warnings": prepared.get("warnings", []),
         "train_rows": train_rows,
@@ -302,51 +304,76 @@ def train_single_hybrid_model(
         train_rows = pd.concat([train_rows, supplemental_rows], ignore_index=True)
 
     group_teams = teams_from_tournament(tournament)
+    model_teams = sorted(set(group_teams) | set(teams_from_rows(train_rows)) | set(teams_from_rows(test_rows)))
     history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
-    base_model = WorldCupModel.from_history(
-        history_df,
-        teams=group_teams,
-        history_weight=float(payload.get("history_weight", 1.0) or 1.0),
-        recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
-        host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
-        max_goals=int(payload.get("max_goals", 10) or 10),
-    )
     feature_store = normalized["team_features"]
-    history_team_features = build_history_feature_table(history_df)
-    matchup_features = build_matchup_feature_table(history_df)
     fixture_feature_rows = read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
     target_warning = ""
     eval_strategy = "unavailable"
     effective_target = train_config["training_target"]
     if effective_target == "over_under_25" and not has_over_under_target(train_rows):
         raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar O/U 2.5.")
-    x_train, y_train, feature_columns = build_training_matrix(
-        train_rows,
-        base_model,
-        feature_store,
-        history_team_features=history_team_features,
-        matchup_features=matchup_features,
-        fixture_feature_rows=fixture_feature_rows,
-        target=effective_target,
-    )
+    eval_size = float(payload.get("eval_size", 0.25) or 0.25)
+    train_rows = sort_match_rows(train_rows)
     if test_rows.empty:
-        eval_strategy = "holdout_from_train"
-        x_train, x_eval, y_train, y_eval = safe_train_eval_split(
-            x_train,
-            y_train,
-            test_size=float(payload.get("eval_size", 0.25) or 0.25),
-            random_state=train_config["seed"],
+        eval_strategy = "holdout_temporal"
+        split_train_rows, split_eval_rows = safe_temporal_row_split(
+            train_rows,
+            test_size=eval_size,
         )
-    else:
-        eval_strategy = "test_file"
+        x_train, y_train, feature_columns = build_training_matrix(
+            split_train_rows,
+            history_df=history_df,
+            teams=model_teams,
+            team_features=feature_store,
+            fixture_feature_rows=fixture_feature_rows,
+            history_weight=float(payload.get("history_weight", 1.0) or 1.0),
+            recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
+            host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
+            max_goals=int(payload.get("max_goals", 10) or 10),
+            target=effective_target,
+        )
         x_eval, y_eval, _ = build_training_matrix(
-            test_rows,
-            base_model,
-            feature_store,
-            history_team_features=history_team_features,
-            matchup_features=matchup_features,
+            split_eval_rows,
+            history_df=history_df,
+            teams=model_teams,
+            team_features=feature_store,
             fixture_feature_rows=fixture_feature_rows,
             feature_columns=feature_columns,
+            frozen_years=years_from_rows(split_eval_rows),
+            history_weight=float(payload.get("history_weight", 1.0) or 1.0),
+            recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
+            host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
+            max_goals=int(payload.get("max_goals", 10) or 10),
+            target=effective_target,
+        )
+    else:
+        eval_strategy = "final_worldcup_test"
+        test_rows = sort_match_rows(test_rows)
+        x_train, y_train, feature_columns = build_training_matrix(
+            train_rows,
+            history_df=history_df,
+            teams=model_teams,
+            team_features=feature_store,
+            fixture_feature_rows=fixture_feature_rows,
+            history_weight=float(payload.get("history_weight", 1.0) or 1.0),
+            recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
+            host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
+            max_goals=int(payload.get("max_goals", 10) or 10),
+            target=effective_target,
+        )
+        x_eval, y_eval, _ = build_training_matrix(
+            test_rows,
+            history_df=history_df,
+            teams=model_teams,
+            team_features=feature_store,
+            fixture_feature_rows=fixture_feature_rows,
+            feature_columns=feature_columns,
+            frozen_years=years_from_rows(test_rows),
+            history_weight=float(payload.get("history_weight", 1.0) or 1.0),
+            recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
+            host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
+            max_goals=int(payload.get("max_goals", 10) or 10),
             target=effective_target,
         )
 
@@ -392,8 +419,8 @@ def train_single_hybrid_model(
         "classifier": clf,
         "feature_columns": feature_columns,
         "team_features": feature_store.to_dict(orient="records"),
-        "history_team_features": history_team_features.to_dict(orient="records"),
-        "matchup_features": matchup_features.to_dict(orient="records"),
+        "history_team_features": build_history_feature_table(history_df).to_dict(orient="records"),
+        "matchup_features": build_matchup_feature_table(history_df).to_dict(orient="records"),
         "kaggle_files": [str(path) for path in files],
         "history_source": normalized.get("history_source", history_source),
         "metrics": metrics,
@@ -420,6 +447,8 @@ def train_single_hybrid_model(
         "top_features": top_feature_importances(clf, feature_columns),
         "walk_forward_mode": walk_forward_mode,
         "walk_forward_summary": walk_forward_summary,
+        "final_test_year": normalized.get("final_test_year", ""),
+        "split_policy": normalized.get("split_policy", ""),
     }
     if walk_forward_summary["warnings"]:
         record["warnings"] = unique_strings([*record["warnings"], *walk_forward_summary["warnings"]])
@@ -447,6 +476,8 @@ def train_single_hybrid_model(
         "etl_steps": etl,
         "warnings": record["warnings"],
         "walk_forward": walk_forward_summary,
+        "final_test_year": normalized.get("final_test_year", ""),
+        "split_policy": normalized.get("split_policy", ""),
     }
 
 
@@ -562,6 +593,8 @@ def train_dual_market_model(
         "trained_at": trained_at,
         "walk_forward_mode": result_record.get("walk_forward_mode", "none"),
         "walk_forward_summary": result_record.get("walk_forward_summary", {}),
+        "final_test_year": normalized.get("final_test_year", ""),
+        "split_policy": normalized.get("split_policy", ""),
     }
     emit_training_progress(progress_callback, "saving", 5, 6, "Guardando bundle dual", model_id=bundle_id)
     save_hybrid_model(bundle_record, model_id=bundle_id)
@@ -590,6 +623,8 @@ def train_dual_market_model(
         "markets": market_results,
         "market_models": market_models,
         "walk_forward": bundle_record["walk_forward_summary"],
+        "final_test_year": bundle_record["final_test_year"],
+        "split_policy": bundle_record["split_policy"],
     }
 
 
@@ -747,27 +782,35 @@ def build_prepared_dataset(
     if raw_train.empty:
         if history_rows.empty:
             raise WorldCupTrainingError("El ETL no encontro partidos con goles reales para construir el dataset de entrenamiento.")
-        train_df = history_rows
-        test_df = pd.DataFrame(columns=history_rows.columns)
+        labeled_rows = history_rows
         label_source = "historical_worldcup"
         warnings.append("El Kaggle actual no trae filas de partido entrenables; el ETL usa resultados historicos abiertos del Mundial para 1X2 y O/U 2.5.")
     elif has_over_under_target(raw_train):
-        train_df = raw_train
-        test_df = raw_test if has_over_under_target(raw_test) else pd.DataFrame(columns=raw_train.columns)
+        labeled_parts = [raw_train]
+        if has_over_under_target(raw_test):
+            labeled_parts.append(raw_test)
+        labeled_rows = pd.concat(labeled_parts, ignore_index=True)
+        label_source = "kaggle_match_result"
         if raw_test.empty or not has_over_under_target(raw_test):
-            warnings.append("La evaluacion dual usara holdout desde train porque el test Kaggle no trae goles suficientes para O/U 2.5.")
+            warnings.append("El test Kaggle no trae goles suficientes para O/U 2.5; el ETL separara el ultimo Mundial etiquetado como test final si hay fechas.")
     else:
         if history_rows.empty:
             raise WorldCupTrainingError("El Kaggle actual no trae goles suficientes para O/U 2.5 y no se encontraron partidos historicos con goles reales.")
-        train_df = pd.concat([raw_train, history_rows], ignore_index=True)
-        test_df = raw_test if has_over_under_target(raw_test) else pd.DataFrame(columns=history_rows.columns)
+        labeled_parts = [raw_train, history_rows]
+        if has_over_under_target(raw_test):
+            labeled_parts.append(raw_test)
+        labeled_rows = pd.concat(labeled_parts, ignore_index=True)
         label_source = "kaggle_match_result + historical_worldcup"
         warnings.append("El Kaggle actual no alcanza para O/U 2.5; el ETL complemento las etiquetas de partido con el historico abierto del Mundial.")
         if raw_test.empty or not has_over_under_target(raw_test):
-            warnings.append("La evaluacion O/U usara holdout desde train porque el test Kaggle no trae goles suficientes.")
+            warnings.append("El test Kaggle no trae goles suficientes; el ultimo Mundial etiquetado se usara como test final si hay fechas.")
 
-    train_df = sanitize_match_rows(train_df)
-    test_df = sanitize_match_rows(test_df)
+    labeled_rows = sanitize_match_rows(labeled_rows)
+    train_df, test_df, final_test_year, split_warning = split_latest_worldcup_test(labeled_rows)
+    if split_warning:
+        warnings.append(split_warning)
+    if final_test_year:
+        warnings.append(f"Test final bloqueado al Mundial {final_test_year}; entrenamiento/validacion usan solo años anteriores.")
     over_under_ready = has_over_under_target(train_df)
     if not over_under_ready:
         raise WorldCupTrainingError("El ETL no pudo construir un target real de O/U 2.5 con goles observados.")
@@ -792,25 +835,49 @@ def build_prepared_dataset(
         "warnings": unique_strings(warnings),
         "label_source": label_source,
         "history_source": history_source,
+        "final_test_year": final_test_year,
+        "split_policy": "latest_worldcup_final_test" if final_test_year else "temporal_holdout_from_train",
         "over_under_ready": over_under_ready,
         "result_ready": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
     }
 
 
+def split_latest_worldcup_test(rows: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, str, str]:
+    if rows.empty:
+        return rows.copy(), pd.DataFrame(columns=MATCH_ROW_COLUMNS), "", ""
+    working = sort_match_rows(rows)
+    years = pd.to_numeric(working.get("Year"), errors="coerce")
+    valid_years = sorted({int(year) for year in years.dropna().tolist()})
+    if len(valid_years) < 2:
+        return working.reset_index(drop=True), pd.DataFrame(columns=working.columns), "", "No hay al menos dos Mundiales fechados; se usara holdout temporal interno desde train."
+    final_year = int(valid_years[-1])
+    train = working[years < final_year].copy()
+    test = working[years == final_year].copy()
+    if train.empty or test.empty:
+        return working.reset_index(drop=True), pd.DataFrame(columns=working.columns), "", "No se pudo aislar el ultimo Mundial como test final; se usara holdout temporal interno desde train."
+    return train.reset_index(drop=True), test.reset_index(drop=True), str(final_year), ""
+
+
 def sanitize_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
     if rows.empty:
-        return pd.DataFrame(columns=["Home", "Away", "Label", "HG", "AG", "OverUnder25", "Source"])
+        return pd.DataFrame(columns=MATCH_ROW_COLUMNS)
     working = rows.copy()
     required = ["Home", "Away", "Label", "Source"]
     for column in required:
         if column not in working.columns:
             working[column] = ""
+    if "FixtureId" not in working.columns:
+        working["FixtureId"] = ""
     if "HG" not in working.columns:
         working["HG"] = np.nan
     if "AG" not in working.columns:
         working["AG"] = np.nan
     if "OverUnder25" not in working.columns:
         working["OverUnder25"] = np.nan
+    if "Date" not in working.columns:
+        working["Date"] = pd.NaT
+    if "Year" not in working.columns:
+        working["Year"] = np.nan
     working["Home"] = working["Home"].map(clean_team_name)
     working["Away"] = working["Away"].map(clean_team_name)
     working["Label"] = working["Label"].astype(str)
@@ -819,23 +886,38 @@ def sanitize_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
     needs_over = working["OverUnder25"].isna() & working["HG"].notna() & working["AG"].notna()
     if needs_over.any():
         working.loc[needs_over, "OverUnder25"] = ((working.loc[needs_over, "HG"] + working.loc[needs_over, "AG"]) >= 3.0).astype(int)
-    if "Date" in working.columns:
-        working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
+    working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
+    inferred_year = working["Date"].dt.year
+    working["Year"] = pd.to_numeric(working["Year"], errors="coerce").fillna(inferred_year)
+    working["FixtureId"] = working["FixtureId"].astype(str)
     working = working[
         working["Home"].astype(str).str.len().gt(1) &
         working["Away"].astype(str).str.len().gt(1) &
         working["Label"].isin(TARGET_LABELS)
     ].copy()
-    return working.reset_index(drop=True)
+    for column in MATCH_ROW_COLUMNS:
+        if column not in working.columns:
+            working[column] = np.nan
+    return sort_match_rows(working[MATCH_ROW_COLUMNS + [column for column in working.columns if column not in MATCH_ROW_COLUMNS]]).reset_index(drop=True)
+
+
+def sort_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return rows.copy()
+    working = rows.copy()
+    working["_date_sort"] = pd.to_datetime(working.get("Date"), errors="coerce")
+    working["_year_sort"] = pd.to_numeric(working.get("Year"), errors="coerce")
+    working["_row_sort"] = np.arange(len(working))
+    return working.sort_values(["_year_sort", "_date_sort", "_row_sort"], kind="stable", na_position="last").drop(columns=["_date_sort", "_year_sort", "_row_sort"])
 
 
 def history_match_rows(history_df: pd.DataFrame, source: str) -> pd.DataFrame:
     if history_df.empty:
-        return pd.DataFrame(columns=["Home", "Away", "Label", "HG", "AG", "OverUnder25", "Source", "Date"])
+        return pd.DataFrame(columns=MATCH_ROW_COLUMNS)
     working = history_df.copy()
     working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
     rows: List[Dict[str, Any]] = []
-    for _, row in working.iterrows():
+    for index, row in working.iterrows():
         home = clean_team_name(row.get("Team 1"))
         away = clean_team_name(row.get("Team 2"))
         if not home or not away:
@@ -846,6 +928,9 @@ def history_match_rows(history_df: pd.DataFrame, source: str) -> pd.DataFrame:
         except (TypeError, ValueError):
             continue
         rows.append({
+            "FixtureId": str(row.get("FixtureId", row.get("No.", index))),
+            "Date": row.get("Date"),
+            "Year": row.get("Year", pd.Timestamp(row.get("Date")).year if pd.notna(row.get("Date")) else np.nan),
             "Home": home,
             "Away": away,
             "Label": label_from_goals(goals_home, goals_away),
@@ -893,6 +978,8 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
             "prepared_at": "",
             "mode": "",
             "label_source": "",
+            "final_test_year": "",
+            "split_policy": "",
             "over_under_ready": False,
             "warnings": [],
         }
@@ -909,6 +996,8 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "prepared_at": str(dataset.get("prepared_at") or ""),
         "mode": str(dataset.get("training_mode") or ""),
         "label_source": str(dataset.get("label_source") or ""),
+        "final_test_year": str(dataset.get("final_test_year") or ""),
+        "split_policy": str(dataset.get("split_policy") or ""),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
         "warnings": dataset.get("warnings", []),
     }
@@ -932,6 +1021,8 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "result_ready": bool(dataset.get("result_ready", False)),
         "preview": dataset.get("preview", {"columns": [], "rows": [], "total": 0}),
         "history_source": dataset.get("history_source", ""),
+        "final_test_year": dataset.get("final_test_year", ""),
+        "split_policy": dataset.get("split_policy", ""),
     }
 
 
@@ -945,10 +1036,13 @@ def standardize_match_rows(df: pd.DataFrame, source: str = "") -> pd.DataFrame:
     target_col = first_existing(clean.columns, ["result", "outcome", "target", "label", "winner", "winning_team", "match_result"])
     goals_home = first_existing(clean.columns, ["home_goals", "goals_home", "team1_goals", "g1", "score1"])
     goals_away = first_existing(clean.columns, ["away_goals", "goals_away", "team2_goals", "g2", "score2"])
+    date_col = first_existing(clean.columns, ["date", "match_date", "fecha", "kickoff", "datetime", "match_datetime"])
+    year_col = first_existing(clean.columns, ["year", "version", "worldcup_year", "tournament_year", "season"])
+    fixture_col = first_existing(clean.columns, ["fixture_id", "fixture", "match_id", "id", "no", "no_"])
     if not home_col or not away_col:
         return pd.DataFrame()
     rows = []
-    for _, row in clean.iterrows():
+    for index, row in clean.iterrows():
         home = clean_team_name(row.get(home_col))
         away = clean_team_name(row.get(away_col))
         if not home or not away:
@@ -958,7 +1052,15 @@ def standardize_match_rows(df: pd.DataFrame, source: str = "") -> pd.DataFrame:
             label = label_from_target(row.get(target_col), home, away)
         if label not in TARGET_LABELS:
             continue
-        record = {"Home": home, "Away": away, "Label": label, "Source": source}
+        record = {
+            "FixtureId": str(row.get(fixture_col, index)) if fixture_col else str(index),
+            "Date": row.get(date_col, pd.NaT) if date_col else pd.NaT,
+            "Year": row.get(year_col, np.nan) if year_col else np.nan,
+            "Home": home,
+            "Away": away,
+            "Label": label,
+            "Source": source,
+        }
         if goals_home and goals_away:
             try:
                 record["HG"] = float(row.get(goals_home))
@@ -970,7 +1072,7 @@ def standardize_match_rows(df: pd.DataFrame, source: str = "") -> pd.DataFrame:
     output = pd.DataFrame(rows)
     output.attrs["target_column"] = target_col or f"{goals_home}/{goals_away}"
     output.attrs["team_columns"] = [home_col, away_col]
-    return output
+    return sanitize_match_rows(output)
 
 
 def extract_team_features(df: pd.DataFrame, source: str = "") -> pd.DataFrame:
@@ -1052,32 +1154,138 @@ def build_team_training_matrix(
     return x[feature_columns].astype(float), rows["Label"].astype(int), feature_columns
 
 
+def match_date_from_row(row: pd.Series) -> Optional[pd.Timestamp]:
+    value = row.get("Date", pd.NaT)
+    timestamp = pd.to_datetime(value, errors="coerce")
+    return pd.Timestamp(timestamp) if pd.notna(timestamp) else None
+
+
+def match_year_from_row(row: pd.Series) -> Optional[int]:
+    value = pd.to_numeric(pd.Series([row.get("Year", np.nan)]), errors="coerce").iloc[0]
+    if pd.notna(value):
+        return int(value)
+    timestamp = match_date_from_row(row)
+    return int(timestamp.year) if timestamp is not None else None
+
+
+def reference_date_for_row(row_date: Optional[pd.Timestamp], row_year: Optional[int]) -> str:
+    if row_date is not None:
+        return str(row_date.date())
+    if row_year:
+        return f"{int(row_year)}-06-01"
+    return HISTORY_REFERENCE_DATE
+
+
+def history_before_row(history_df: pd.DataFrame, row_date: Optional[pd.Timestamp], row_year: Optional[int], freeze_year: bool = False) -> pd.DataFrame:
+    if history_df is None or history_df.empty:
+        return pd.DataFrame()
+    working = history_df.copy()
+    working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
+    working = working[working["Date"].notna()].copy()
+    if row_year:
+        return working[working["Date"].dt.year < int(row_year)].copy()
+    if row_date is not None:
+        return working[working["Date"] < row_date].copy()
+    return pd.DataFrame(columns=working.columns)
+
+
+def years_from_rows(rows: pd.DataFrame) -> set[int]:
+    if rows.empty or "Year" not in rows.columns:
+        return set()
+    return {int(year) for year in pd.to_numeric(rows["Year"], errors="coerce").dropna().tolist()}
+
+
+def teams_from_rows(rows: pd.DataFrame) -> List[str]:
+    teams = []
+    if rows.empty:
+        return teams
+    for column in ("Home", "Away"):
+        if column in rows.columns:
+            teams.extend(rows[column].dropna().astype(str).map(clean_team_name).tolist())
+    return sorted({team for team in teams if team})
+
+
+def team_features_asof(features: pd.DataFrame, row_year: Optional[int]) -> pd.DataFrame:
+    if features is None or features.empty or "Team" not in features.columns:
+        return pd.DataFrame()
+    working = features.copy()
+    year_col = first_existing(working.columns, ["version", "Year", "year", "WorldCupYear", "worldcup_year"])
+    if not year_col or row_year is None:
+        return pd.DataFrame(columns=working.columns)
+    years = pd.to_numeric(working[year_col], errors="coerce")
+    scoped = working[years <= int(row_year)].copy()
+    if scoped.empty:
+        return pd.DataFrame(columns=working.columns)
+    scoped[year_col] = pd.to_numeric(scoped[year_col], errors="coerce")
+    latest = scoped.sort_values(["Team", year_col], kind="stable").groupby("Team", as_index=False).tail(1)
+    return latest.reset_index(drop=True)
+
+
 def build_training_matrix(
         rows: pd.DataFrame,
-        base_model: WorldCupModel,
-        team_features: pd.DataFrame,
+        base_model: Optional[WorldCupModel] = None,
+        team_features: Optional[pd.DataFrame] = None,
         history_team_features: Optional[pd.DataFrame] = None,
         matchup_features: Optional[pd.DataFrame] = None,
         fixture_feature_rows: Optional[pd.DataFrame] = None,
         feature_columns: Optional[List[str]] = None,
         target: str = "result",
+        history_df: Optional[pd.DataFrame] = None,
+        teams: Optional[Iterable[str]] = None,
+        frozen_years: Optional[set[int]] = None,
+        history_weight: float = 1.0,
+        recency_weight: float = 0.35,
+        host_advantage: float = 45.0,
+        max_goals: int = 10,
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
-    working = rows.copy()
+    working = sort_match_rows(rows)
     if target == "over_under_25":
         working = working[working["OverUnder25"].notna()] if "OverUnder25" in working.columns else working.iloc[0:0]
-    records = [
-        match_feature_row(
-            base_model,
-            team_features,
-            row["Home"],
-            row["Away"],
-            history_team_features=history_team_features,
-            matchup_features=matchup_features,
-            fixture_feature_rows=fixture_feature_rows,
-            fixture_id=row.get("FixtureId"),
+    if team_features is None:
+        team_features = pd.DataFrame()
+    records = []
+    static_model = base_model
+    if static_model is None and history_df is None:
+        static_model = WorldCupModel.from_history(pd.DataFrame(), teams=teams or teams_from_rows(working))
+    snapshot_cache: Dict[Tuple[str, str], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame]] = {}
+    for _, row in working.iterrows():
+        row_year = match_year_from_row(row)
+        row_date = match_date_from_row(row)
+        if history_df is not None:
+            frozen = row_year in (frozen_years or set())
+            cache_key = ("year", str(row_year or reference_date_for_row(row_date, row_year)))
+            if cache_key not in snapshot_cache:
+                history_cutoff = history_before_row(history_df, row_date=row_date, row_year=row_year, freeze_year=frozen)
+                reference_date = reference_date_for_row(row_date, row_year)
+                snapshot_cache[cache_key] = (
+                    WorldCupModel.from_history(
+                        history_cutoff,
+                        teams=teams or teams_from_rows(working),
+                        history_weight=history_weight,
+                        recency_weight=recency_weight,
+                        host_advantage=host_advantage,
+                        max_goals=max_goals,
+                    ),
+                    build_history_feature_table(history_cutoff, reference_date=reference_date),
+                    build_matchup_feature_table(history_cutoff, reference_date=reference_date),
+                )
+            row_model, row_history_features, row_matchup_features = snapshot_cache[cache_key]
+        else:
+            row_model = static_model
+            row_history_features = history_team_features
+            row_matchup_features = matchup_features
+        records.append(
+            match_feature_row(
+                row_model,
+                team_features_asof(team_features, row_year),
+                row["Home"],
+                row["Away"],
+                history_team_features=row_history_features,
+                matchup_features=row_matchup_features,
+                fixture_feature_rows=fixture_feature_rows,
+                fixture_id=row.get("FixtureId"),
+            )
         )
-        for _, row in working.iterrows()
-    ]
     x = pd.DataFrame(records).fillna(0.0)
     if feature_columns is None:
         feature_columns = list(x.columns)
@@ -1375,7 +1583,7 @@ def window_summary_features(team_df: pd.DataFrame, window: int, prefix: str) -> 
     }
 
 
-def build_matchup_feature_table(history_df: pd.DataFrame) -> pd.DataFrame:
+def build_matchup_feature_table(history_df: pd.DataFrame, reference_date: str = HISTORY_REFERENCE_DATE) -> pd.DataFrame:
     if history_df.empty:
         return pd.DataFrame(columns=["HomeKey", "AwayKey"])
     working = history_df.copy()
@@ -1395,7 +1603,7 @@ def build_matchup_feature_table(history_df: pd.DataFrame) -> pd.DataFrame:
             match_date = pd.Timestamp(row["Date"])
             grouped.setdefault((normalize_team_key(home), normalize_team_key(away)), []).append((match_date, g1, g2))
             grouped.setdefault((normalize_team_key(away), normalize_team_key(home)), []).append((match_date, g2, g1))
-    reference_ts = pd.Timestamp(HISTORY_REFERENCE_DATE)
+    reference_ts = pd.Timestamp(reference_date)
     for (home_key, away_key), matches in grouped.items():
         ordered_matches = sorted(matches, key=lambda item: item[0])
         recent_matches = ordered_matches[-3:]
@@ -1437,9 +1645,11 @@ def labeled_test_row_count(normalized: Dict[str, Any]) -> int:
 
 def evaluation_strategy(normalized: Dict[str, Any]) -> str:
     if labeled_test_row_count(normalized) > 0:
+        if normalized.get("final_test_year"):
+            return "final_worldcup_test"
         return "test_file"
     if labeled_train_row_count(normalized) > 0:
-        return "holdout_from_train"
+        return "holdout_temporal"
     return "unavailable"
 
 
@@ -1771,26 +1981,33 @@ def mark_walk_forward_ingested(fixture_ids: List[str], mode: str) -> None:
     rows.to_csv(WALK_FORWARD_MATCHES_FILE, index=False)
 
 
+def safe_temporal_row_split(rows: pd.DataFrame, test_size: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    working = sort_match_rows(rows).reset_index(drop=True)
+    if working.shape[0] < 4:
+        return working.copy(), working.copy()
+    test_count = max(1, int(round(working.shape[0] * float(test_size))))
+    split_at = max(1, min(working.shape[0] - test_count, working.shape[0] - 1))
+    train_rows = working.iloc[:split_at].copy()
+    eval_rows = working.iloc[split_at:].copy()
+    if train_rows.empty or eval_rows.empty:
+        return working.copy(), working.copy()
+    return train_rows.reset_index(drop=True), eval_rows.reset_index(drop=True)
+
+
 def safe_train_eval_split(x: pd.DataFrame, y: pd.Series, test_size: float, random_state: int):
     y_series = pd.Series(y).reset_index(drop=True)
     if len(y_series) < 4 or y_series.nunique(dropna=True) < 2:
         return x.copy(), x.copy(), y_series.copy(), y_series.copy()
     test_count = max(1, int(round(len(y_series) * float(test_size))))
-    n_classes = int(y_series.nunique(dropna=True))
-    counts = y_series.value_counts()
-    stratify = None
-    if counts.min() >= 2 and test_count >= n_classes and (len(y_series) - test_count) >= n_classes:
-        stratify = y_series
-    try:
-        return sklearn_train_test_split(
-            x,
-            y_series,
-            test_size=float(test_size),
-            random_state=random_state,
-            stratify=stratify,
-        )
-    except ValueError:
+    split_at = max(1, min(len(y_series) - test_count, len(y_series) - 1))
+    x_ordered = x.reset_index(drop=True)
+    x_train = x_ordered.iloc[:split_at].copy()
+    x_eval = x_ordered.iloc[split_at:].copy()
+    y_train = y_series.iloc[:split_at].copy()
+    y_eval = y_series.iloc[split_at:].copy()
+    if x_train.empty or x_eval.empty or y_train.nunique(dropna=True) < 2:
         return x.copy(), x.copy(), y_series.copy(), y_series.copy()
+    return x_train, x_eval, y_train, y_eval
 
 
 def encode_labels(y: pd.Series) -> Tuple[pd.Series, List[Any]]:
@@ -2437,6 +2654,8 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "warnings": record.get("warnings", []),
         "hardware": record.get("hardware", result.get("hardware", {})),
         "feature_count": len(record.get("feature_columns", result.get("features", [])) or []),
+        "final_test_year": record.get("final_test_year", result.get("final_test_year", "")),
+        "split_policy": record.get("split_policy", result.get("split_policy", "")),
     }
 
 
@@ -2589,7 +2808,7 @@ def etl_steps(
             "name": "Split evaluacion",
             "status": "ok" if eval_strategy != "unavailable" else "pending",
             "count": test_rows if test_rows else planned_holdout_rows(train_rows),
-            "detail": "Test etiquetado" if eval_strategy == "test_file" else "Holdout desde train" if eval_strategy == "holdout_from_train" else "Sin evaluacion.",
+            "detail": "Ultimo Mundial como test final" if eval_strategy == "final_worldcup_test" else "Test etiquetado" if eval_strategy == "test_file" else "Holdout temporal desde train" if eval_strategy == "holdout_temporal" else "Sin evaluacion.",
         },
         {
             "name": "Features seleccion",
@@ -2721,6 +2940,8 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "top_features": record.get("top_features", []),
         "kaggle_files": record.get("kaggle_files", []),
         "history_source": record.get("history_source", ""),
+        "final_test_year": record.get("final_test_year", ""),
+        "split_policy": record.get("split_policy", ""),
         "hidden_from_catalog": bool(record.get("hidden_from_catalog", False)),
         "markets": record.get("markets", {}),
         "market_models": record.get("market_models", {}),
@@ -2778,6 +2999,8 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "market_models": {},
         "walk_forward_mode": "none",
         "walk_forward_summary": {},
+        "final_test_year": "",
+        "split_policy": "",
     }
 
 

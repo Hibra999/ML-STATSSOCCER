@@ -241,6 +241,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "trainingPayload" in app_source
     assert "paramsTable" in app_source
     assert "evalStrategyLabel" in app_source
+    assert "ultimo Mundial test" in app_source
+    assert "holdout temporal" in app_source
     assert "renderConfusionMatrix" in app_source
     assert "renderEtlFlow" in app_source
     assert "renderTuningFlow" in app_source
@@ -597,14 +599,14 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
-        {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
-        {"home_team": "South Africa", "away_team": "Mexico", "home_goals": 1, "away_goals": 1},
-        {"home_team": "Mexico", "away_team": "Canada", "home_goals": 1, "away_goals": 2},
-        {"home_team": "Canada", "away_team": "South Africa", "home_goals": 0, "away_goals": 1},
+        {"date": "2018-06-11", "home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
+        {"date": "2018-06-12", "home_team": "South Africa", "away_team": "Mexico", "home_goals": 1, "away_goals": 1},
+        {"date": "2018-06-13", "home_team": "Mexico", "away_team": "Canada", "home_goals": 1, "away_goals": 2},
+        {"date": "2018-06-14", "home_team": "Canada", "away_team": "South Africa", "home_goals": 0, "away_goals": 1},
     ]).to_csv(training.KAGGLE_ROOT / "train.csv", index=False)
     pd.DataFrame([
-        {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 3, "away_goals": 1},
-        {"home_team": "Canada", "away_team": "Mexico", "home_goals": 0, "away_goals": 0},
+        {"date": "2022-06-11", "home_team": "Mexico", "away_team": "South Africa", "home_goals": 3, "away_goals": 1},
+        {"date": "2022-06-12", "home_team": "Canada", "away_team": "Mexico", "home_goals": 0, "away_goals": 0},
     ]).to_csv(training.KAGGLE_ROOT / "test.csv", index=False)
     pd.DataFrame([
         {"Team": "Mexico", "Rank": 14, "Goals": 10},
@@ -625,11 +627,13 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert status["etl_ready"] is True
     assert status["test_rows"] == 2
     assert status["prediction_rows"] == 0
-    assert status["eval_strategy"] == "test_file"
+    assert status["eval_strategy"] == "final_worldcup_test"
+    assert status["final_test_year"] == "2022"
     assert result["model"]["trained"] is True
     assert result["model"]["model_id"] == "mex-test"
     assert result["model"]["model_type"] == "xgboost"
-    assert result["model"]["eval_strategy"] == "test_file"
+    assert result["model"]["eval_strategy"] == "final_worldcup_test"
+    assert result["model"]["final_test_year"] == "2022"
     assert result["model"]["confusion_matrix"]["matrix"]
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["enabled"] is False
@@ -681,10 +685,10 @@ def test_worldcup_training_rejects_single_market_requests(tmp_path, monkeypatch)
     monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
-        {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
-        {"home_team": "South Africa", "away_team": "Mexico", "home_goals": 1, "away_goals": 1},
-        {"home_team": "Mexico", "away_team": "Canada", "home_goals": 1, "away_goals": 2},
-        {"home_team": "Canada", "away_team": "South Africa", "home_goals": 0, "away_goals": 1},
+        {"date": "2018-06-11", "home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
+        {"date": "2018-06-12", "home_team": "South Africa", "away_team": "Mexico", "home_goals": 1, "away_goals": 1},
+        {"date": "2018-06-13", "home_team": "Mexico", "away_team": "Canada", "home_goals": 1, "away_goals": 2},
+        {"date": "2022-06-11", "home_team": "Canada", "away_team": "South Africa", "home_goals": 0, "away_goals": 1},
     ]).to_csv(training.KAGGLE_ROOT / "train.csv", index=False)
     training.prepare_training_dataset(force=True)
 
@@ -732,15 +736,16 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert status["training_mode"] == "match_result"
     assert status["prepared_label_source"] == "historical_worldcup"
     assert status["target_column"] == "Label + OverUnder25"
-    assert status["test_rows"] == 0
+    assert status["test_rows"] > 0
     assert status["prediction_rows"] == 2
     assert status["eval_rows"] > 0
-    assert status["eval_strategy"] == "holdout_from_train"
+    assert status["eval_strategy"] == "final_worldcup_test"
+    assert status["final_test_year"]
     assert result["mode"] == "match_result"
-    assert result["eval_strategy"] == "holdout_from_train"
+    assert result["eval_strategy"] == "final_worldcup_test"
     assert result["prediction_rows"] == 2
     assert result["model"]["target_column"] == "Label + OverUnder25"
-    assert result["model"]["eval_strategy"] == "holdout_from_train"
+    assert result["model"]["eval_strategy"] == "final_worldcup_test"
     assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
     assert result["model"]["markets"]["over_under_25"]["confusion_matrix"]["labels"] == ["Under 2.5", "Over 2.5"]
     assert result["model"]["etl_steps"]
@@ -827,6 +832,48 @@ def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp
     assert not (models_root / "dummy.json").exists()
     assert result["training"]["available"] is True
     assert result["models"]["models"] == []
+
+
+def test_worldcup_latest_year_is_final_test_and_never_train():
+    from src.worldcup import training
+
+    rows = training.sanitize_match_rows(pd.DataFrame([
+        {"Date": "2014-06-11", "Home": "Mexico", "Away": "Cameroon", "Label": "H", "HG": 1, "AG": 0, "OverUnder25": 0, "Source": "fixture"},
+        {"Date": "2018-06-11", "Home": "Mexico", "Away": "Germany", "Label": "H", "HG": 1, "AG": 0, "OverUnder25": 0, "Source": "fixture"},
+        {"Date": "2018-06-12", "Home": "South Africa", "Away": "Mexico", "Label": "A", "HG": 0, "AG": 2, "OverUnder25": 0, "Source": "fixture"},
+        {"Date": "2022-06-11", "Home": "Mexico", "Away": "Poland", "Label": "D", "HG": 1, "AG": 1, "OverUnder25": 0, "Source": "fixture"},
+        {"Date": "2022-06-12", "Home": "Argentina", "Away": "Mexico", "Label": "H", "HG": 2, "AG": 0, "OverUnder25": 0, "Source": "fixture"},
+    ]))
+
+    train, test, final_year, warning = training.split_latest_worldcup_test(rows)
+
+    assert warning == ""
+    assert final_year == "2022"
+    assert set(train["Year"].astype(int)) == {2014, 2018}
+    assert set(test["Year"].astype(int)) == {2022}
+
+
+def test_worldcup_temporal_features_exclude_current_and_future_matches():
+    from src.worldcup import training
+
+    rows = training.sanitize_match_rows(pd.DataFrame([
+        {"Date": "2010-06-11", "Home": "Mexico", "Away": "South Africa", "Label": "D", "HG": 1, "AG": 1, "OverUnder25": 0, "Source": "fixture"},
+    ]))
+    history = pd.DataFrame([
+        {"Date": "2010-06-11", "Team 1": "Mexico", "Team 2": "South Africa", "G1": 1, "G2": 1, "Round": "Group", "Group": "A"},
+        {"Date": "2014-06-17", "Team 1": "Mexico", "Team 2": "South Africa", "G1": 2, "G2": 0, "Round": "Friendly", "Group": ""},
+    ])
+
+    x, _, _ = training.build_training_matrix(
+        rows,
+        history_df=history,
+        teams=["Mexico", "South Africa"],
+        team_features=pd.DataFrame(),
+        target="result",
+    )
+
+    assert x.iloc[0].get("h2h_matches", 0.0) == 0.0
+    assert x.iloc[0].get("history_matches_total_home", 0.0) == 0.0
 
 
 def test_worldcup_match_feature_row_includes_history_trend_and_h2h_features():
