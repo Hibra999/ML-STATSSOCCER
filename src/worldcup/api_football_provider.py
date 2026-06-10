@@ -119,8 +119,10 @@ def read_dotenv_file(path: Optional[Path] = None) -> Dict[str, str]:
         raw = line.strip()
         if not raw or raw.startswith("#") or "=" not in raw:
             continue
+        if raw.startswith("export "):
+            raw = raw[len("export "):].strip()
         key, value = raw.split("=", 1)
-        key = key.strip()
+        key = key.lstrip("\ufeff").strip()
         value = value.strip().strip('"').strip("'")
         if key:
             values[key] = value

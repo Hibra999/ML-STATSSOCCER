@@ -145,7 +145,7 @@ def test_api_football_provider_without_key_does_not_call_network(tmp_path, monke
 
 def test_api_football_key_reads_dotenv_when_environment_is_empty(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
-    env_file.write_text("API_FOOTBALL_KEY=from-dotenv\n", encoding="utf-8")
+    env_file.write_text("export API_FOOTBALL_KEY=from-dotenv\n", encoding="utf-8")
     monkeypatch.setattr(api_football_provider, "DOTENV_FILE", env_file)
     for env_name in api_football_provider.API_FOOTBALL_ENV_KEYS:
         monkeypatch.delenv(env_name, raising=False)
