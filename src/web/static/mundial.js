@@ -135,6 +135,7 @@ function setLoading() {
   document.getElementById("training-tuning-flow").innerHTML = loadingHtml("Tuning pendiente");
   document.getElementById("training-features").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
+  renderWorldcupJobProgress("training");
   document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones pendientes");
   document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("models-list").innerHTML = loadingHtml("Modelos pendientes");
@@ -1291,7 +1292,7 @@ function trackWorldcupJob(job, kind) {
   job.handled = false;
   state.jobs.set(job.job_id, job);
   setWorldcupJobBusy(kind, true);
-  if (kind === "simulation") renderWorldcupJobProgress(kind);
+  renderWorldcupJobProgress(kind);
   startWorldcupJobPolling();
 }
 
@@ -1318,14 +1319,14 @@ async function pollWorldcupJobs() {
         state.jobs.set(jobId, job);
       }
       if (!isTerminalJob(job)) hasActive = true;
-      if (job.kind === "simulation") renderWorldcupJobProgress(job.kind);
+      renderWorldcupJobProgress(job.kind);
     } catch (error) {
       previous.status = "failed";
       previous.error = error.message;
       previous.handled = true;
       state.jobs.set(jobId, previous);
       await handleWorldcupJobComplete(previous);
-      if (previous.kind === "simulation") renderWorldcupJobProgress(previous.kind);
+      renderWorldcupJobProgress(previous.kind);
     }
   }
   if (!hasActive && state.jobTimer) {
@@ -1336,6 +1337,7 @@ async function pollWorldcupJobs() {
 
 async function handleWorldcupJobComplete(job) {
   setWorldcupJobBusy(job.kind, false);
+  renderWorldcupJobProgress(job.kind);
   if (job.status === "failed") {
     showError(job.error || "Proceso fallido");
     if (job.kind === "training" && state.training) renderTrainingStatus(state.training);
@@ -1369,8 +1371,9 @@ async function handleWorldcupJobComplete(job) {
 }
 
 function renderWorldcupJobProgress(kind) {
-  if (kind !== "simulation") return;
-  const target = document.getElementById("worldcup-simulation-progress");
+  const targetId = kind === "training" ? "worldcup-training-progress" : kind === "simulation" ? "worldcup-simulation-progress" : "";
+  if (!targetId) return;
+  const target = document.getElementById(targetId);
   if (!target) return;
   const job = latestWorldcupJob(kind);
   if (!job) {

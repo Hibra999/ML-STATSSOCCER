@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -7,6 +8,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Callable, Dict, Optional
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 @dataclass
@@ -61,11 +65,14 @@ class JobManager:
         try:
             result = fn(*args, **kwargs)
         except Exception as exc:
+            traceback_text = traceback.format_exc()
+            logger.error("Job %s failed: %s: %s\n%s", job_id, exc.__class__.__name__, exc, traceback_text)
+            print(f"[job:{job_id}] failed {exc.__class__.__name__}: {exc}\n{traceback_text}", flush=True)
             self._update(
                 job_id,
                 status="failed",
                 error=f"{exc.__class__.__name__}: {exc}",
-                traceback_text=traceback.format_exc(),
+                traceback_text=traceback_text,
             )
             return
         self._update(job_id, status="succeeded", result=result)

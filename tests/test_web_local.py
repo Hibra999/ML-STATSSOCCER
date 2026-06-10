@@ -1,4 +1,5 @@
 import ast
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -197,7 +198,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-use-player-features" in html_source
     assert "sim-use-ml-model" in html_source
     assert "training-train" in html_source
-    assert "worldcup-training-progress" not in html_source
+    assert "worldcup-training-progress" in html_source
     assert "worldcup-simulation-progress" in html_source
     assert "training-retrain-base" in html_source
     assert "training-retrain-players" in html_source
@@ -261,6 +262,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Numba" not in app_source
     assert "trackWorldcupJob" in app_source
     assert "/api/jobs/${jobId}" in app_source
+    assert "worldcup-training-progress" in html_source
+    assert "worldcup-training-progress" in app_source
+    assert 'if (kind !== "simulation") return' not in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
     assert "renderHeroCountdown" in app_source
@@ -268,6 +272,141 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
     assert "/api/worldcup/simulate" not in app_source
     assert "player-photo" in app_source
+
+
+def test_mundial_training_model_endpoint_returns_job_and_progress(monkeypatch):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    from src.web import mundial_services
+    from src.web.mundial import create_mundial_app
+
+    def fake_training_train(payload, progress_callback=None):
+        if progress_callback:
+            progress_callback({
+                "stage": "tuning",
+                "current": 1,
+                "total": 2,
+                "current_trial": 1,
+                "total_trials": 2,
+                "percent": 50,
+                "message": "Fine-tuning 1X2",
+                "market": "1X2",
+                "best_value": 0.75,
+                "last_state": "COMPLETE",
+            })
+        return {"model": {"model_id": "fake-worldcup"}, "models": {"models": []}}
+
+    monkeypatch.setattr(mundial_services, "training_train", fake_training_train)
+    client = TestClient(create_mundial_app())
+
+    response = client.post("/api/mundial/models/train", json={"model_type": "xgboost"})
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    job_id = payload["data"]["job_id"]
+
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "succeeded"
+    assert job["progress"]["stage"] == "tuning"
+    assert job["progress"]["best_value"] == 0.75
+    assert job["result"]["model"]["model_id"] == "fake-worldcup"
+
+
+def test_mundial_training_job_failure_is_pollable(monkeypatch):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    from src.web import mundial_services
+    from src.web.mundial import create_mundial_app
+
+    def fake_training_train(payload, progress_callback=None):
+        raise RuntimeError("boom training")
+
+    monkeypatch.setattr(mundial_services, "training_train", fake_training_train)
+    client = TestClient(create_mundial_app())
+
+    response = client.post("/api/mundial/models/train", json={"model_type": "xgboost"})
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+
+    job = wait_for_job(client, payload["data"]["job_id"])
+    assert job["status"] == "failed"
+    assert "RuntimeError: boom training" in job["error"]
+
+
+def test_job_manager_captures_progress_and_failure():
+    from src.web.jobs import JobManager
+
+    manager = JobManager(max_workers=1)
+
+    def succeeds(progress_callback=None):
+        progress_callback({"stage": "tuning", "current": 1, "total": 1, "percent": 100})
+        return {"ok": True}
+
+    def fails(progress_callback=None):
+        raise RuntimeError("boom job")
+
+    try:
+        success = manager.submit("ok", succeeds, with_progress=True)
+        success_job = wait_for_manager_job(manager, success["job_id"])
+        assert success_job["status"] == "succeeded"
+        assert success_job["progress"]["stage"] == "tuning"
+        assert success_job["result"] == {"ok": True}
+
+        failure = manager.submit("bad", fails, with_progress=True)
+        failure_job = wait_for_manager_job(manager, failure["job_id"])
+        assert failure_job["status"] == "failed"
+        assert "RuntimeError: boom job" in failure_job["error"]
+    finally:
+        manager._executor.shutdown(wait=True)
+
+
+def test_worldcup_training_progress_prints_optuna_details(capsys):
+    from src.worldcup.training import emit_training_progress
+
+    emit_training_progress(
+        None,
+        "tuning",
+        1,
+        3,
+        "Fine-tuning 1X2",
+        market="1X2",
+        model_type="xgboost",
+        best_value=0.8123,
+        best_trial=1,
+        last_state="COMPLETE",
+    )
+
+    output = capsys.readouterr().out
+    assert "[mundial-training] [1X2]" in output
+    assert "tuning 1/3" in output
+    assert "model=xgboost" in output
+    assert "best=0.8123" in output
+    assert "state=COMPLETE" in output
+
+
+def wait_for_job(client, job_id: str, attempts: int = 30):
+    for _ in range(attempts):
+        response = client.get(f"/api/jobs/{job_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        job = payload["data"]
+        if job["status"] in {"succeeded", "failed"}:
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"Job {job_id} did not finish")
+
+
+def wait_for_manager_job(manager, job_id: str, attempts: int = 30):
+    for _ in range(attempts):
+        job = manager.get(job_id)
+        if job and job["status"] in {"succeeded", "failed"}:
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"Job {job_id} did not finish")
 
 
 def test_worldcup_training_options_expose_boosting_models_and_hardware():

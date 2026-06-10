@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import pickle
@@ -32,6 +33,7 @@ from src.worldcup.model import (
 )
 
 
+logger = logging.getLogger("uvicorn.error")
 KAGGLE_DATASET_SLUG = "harrachimustapha/fifa-world-cup-team-dataset"
 KAGGLE_ROOT = Path("storage") / "worldcup" / "kaggle"
 WORLD_CUP_MODELS_ROOT = Path("storage") / "worldcup" / "models"
@@ -97,7 +99,21 @@ def emit_training_progress(callback, stage: str, current: int, total: int, messa
     percent = int(round(current * 100 / total))
     market = extra.get("market")
     market_label = f" [{market}]" if market else ""
-    print(f"[mundial-training]{market_label} {message} - {stage} {current}/{total} ({percent}%)", flush=True)
+    details = []
+    if extra.get("model_type"):
+        details.append(f"model={extra['model_type']}")
+    if extra.get("model_id"):
+        details.append(f"id={extra['model_id']}")
+    if extra.get("best_value") not in {None, ""}:
+        details.append(f"best={extra['best_value']}")
+    if extra.get("best_trial") not in {None, "", 0}:
+        details.append(f"best_trial={extra['best_trial']}")
+    if extra.get("last_state"):
+        details.append(f"state={extra['last_state']}")
+    detail_label = f" - {' '.join(details)}" if details else ""
+    line = f"[mundial-training]{market_label} {message} - {stage} {current}/{total} ({percent}%){detail_label}"
+    print(line, flush=True)
+    logger.info(line)
     if callback is None:
         return
     callback({
