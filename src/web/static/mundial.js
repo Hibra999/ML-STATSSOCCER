@@ -799,12 +799,12 @@ function renderTrainingVisuals(model, payload) {
   renderMetricCards(markets);
   renderConfusionMatrix(markets);
   renderTuningFlow(markets);
-  renderFeatureList(markets);
+  renderFeatureList(markets, model || payload || {});
 }
 
 function trainingMarketSections(model, payload) {
   const markets = (model && model.markets) || (payload && payload.markets) || {};
-  const keys = ["result", "over_under_25"].filter((key) => markets[key]);
+  const keys = ["result", "over_under_25", "goals_distribution"].filter((key) => markets[key]);
   if (keys.length) {
     return keys.map((key) => ({ key, label: markets[key].label || marketLabel(key), ...markets[key] }));
   }
@@ -856,9 +856,10 @@ function renderModelState(model, payload) {
 function modelMarketLabel(model) {
   if (!model) return "-";
   if (model.bundle || model.market_mode === "dual_markets" || model.requested_target === "dual_markets") {
-    return model.market_models && !model.market_models.over_under_25 ? "1X2 + O/U Poisson" : "1X2 + O/U 2.5";
+    return model.market_models && !model.market_models.over_under_25 ? "1X2 + U/O Poisson" : "1X2 + U/O goles";
   }
   const target = model.effective_target || model.requested_target || model.training_target || "";
+  if (target === "goals_distribution") return "Distribución goles";
   if (target === "over_under_25") return "O/U 2.5";
   if (target === "team_strength") return "1X2 team-strength";
   if (target === "result") return "1X2";
@@ -873,6 +874,7 @@ function walkForwardModeLabel(mode) {
 
 function marketLabel(key) {
   if (key === "over_under_25") return "O/U 2.5";
+  if (key === "goals_distribution") return "Distribución goles";
   if (key === "team_strength") return "1X2 team-strength";
   return "1X2";
 }
@@ -1105,16 +1107,17 @@ function tuningFlowHtml(trace) {
   return head + `<div class="tuning-steps">${items}</div>`;
 }
 
-function renderFeatureList(markets) {
+function renderFeatureList(markets, model) {
   if (Array.isArray(markets)) {
-    document.getElementById("training-features").innerHTML = markets.map((market) => `
+    const marketHtml = markets.map((market) => `
       <section class="market-panel">
         <header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml(market.model_id || "")}</small></header>
         ${featureListHtml(market.top_features || [])}
       </section>`).join("");
+    document.getElementById("training-features").innerHTML = marketHtml + featureInventoryHtml((model && model.feature_inventory) || {});
     return;
   }
-  document.getElementById("training-features").innerHTML = featureListHtml(markets || []);
+  document.getElementById("training-features").innerHTML = featureListHtml(markets || []) + featureInventoryHtml((model && model.feature_inventory) || {});
 }
 
 function featureListHtml(features) {
@@ -1129,6 +1132,27 @@ function featureListHtml(features) {
 function featureImportanceTable(features) {
   const rows = (features || []).map((item) => ({ Feature: item.feature, Importancia: item.importance }));
   return { columns: rows.length ? ["Feature", "Importancia"] : [], rows, total: rows.length };
+}
+
+function featureInventoryHtml(inventory) {
+  const features = (inventory && inventory.features) || [];
+  if (!features.length) return "";
+  const families = (inventory.families || []).map((item) => `
+    <span>${escapeHtml(item.family || "")}<b>${escapeHtml(item.count ?? 0)}</b></span>
+  `).join("");
+  const rows = features.map((item) => `
+    <div class="feature-inventory-row">
+      <span>${escapeHtml(item.feature || "")}</span>
+      <small>${escapeHtml(item.family || "")} · nz train ${escapeHtml(item.train_non_zero_rate ?? 0)} · var ${escapeHtml(item.train_variance ?? 0)}</small>
+    </div>
+  `).join("");
+  return `
+    <section class="market-panel feature-inventory-panel">
+      <header><strong>Inventario completo</strong><small>${escapeHtml(inventory.feature_count || features.length)} features</small></header>
+      <div class="feature-family-list">${families}</div>
+      <div class="feature-inventory-list">${rows}</div>
+    </section>
+  `;
 }
 
 function paramsTable(model) {
@@ -1264,8 +1288,14 @@ function renderUpcomingPredictions(result) {
         <span>2 <b>${escapeHtml(probs.away ?? "")}%</b></span>
       </div>
       <div class="prob-strip muted">
+        <span>O1.5 <b>${escapeHtml(probs.over15 ?? "")}%</b></span>
         <span>O2.5 <b>${escapeHtml(probs.over25 ?? "")}%</b></span>
+        <span>O3.5 <b>${escapeHtml(probs.over35 ?? "")}%</b></span>
+      </div>
+      <div class="prob-strip muted">
+        <span>U1.5 <b>${escapeHtml(probs.under15 ?? "")}%</b></span>
         <span>U2.5 <b>${escapeHtml(probs.under25 ?? "")}%</b></span>
+        <span>U3.5 <b>${escapeHtml(probs.under35 ?? "")}%</b></span>
         <span>Score <b>${escapeHtml(prediction.modal_score || "")}</b></span>
       </div>
       <div class="source-strip">

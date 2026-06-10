@@ -142,8 +142,12 @@ def match_probabilities_dataframe(matches: List[Dict[str, Any]], model: WorldCup
             "P E1 %": _pct(probabilities["home"]),
             "P Empate %": _pct(probabilities["draw"]),
             "P E2 %": _pct(probabilities["away"]),
+            "Over 1.5 %": _pct(probabilities.get("over15", 0.0)),
+            "Under 1.5 %": _pct(probabilities.get("under15", 0.0)),
             "Over 2.5 %": _pct(probabilities["over25"]),
             "Under 2.5 %": _pct(probabilities["under25"]),
+            "Over 3.5 %": _pct(probabilities.get("over35", 0.0)),
+            "Under 3.5 %": _pct(probabilities.get("under35", 0.0)),
             "Marcador modal": f"{probabilities['modal_g1']}-{probabilities['modal_g2']}",
             "Sede": match.get("ground", ""),
         })

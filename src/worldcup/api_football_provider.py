@@ -22,6 +22,7 @@ API_FOOTBALL_TIMEOUT = 18
 API_FOOTBALL_ENV_KEYS = ("API_FOOTBALL_KEY", "APIFOOTBALL_KEY", "API_SPORTS_KEY")
 DEFAULT_WORLD_CUP_LEAGUE_ID = 1
 DEFAULT_WORLD_CUP_SEASONS = (2014, 2018, 2022, 2026)
+TOTAL_ODDS_LINES = ("05", "15", "25", "35", "45")
 API_STAT_ALIASES = {
     "shots_on_goal": "shots_on_goal",
     "shots_off_goal": "shots_off_goal",
@@ -331,7 +332,10 @@ def parse_fixture_rows(items: List[Dict[str, Any]], fetched_at: str, source: str
             "HG": hg,
             "AG": ag,
             "Label": label_from_goals(hg, ag),
-            "OverUnder25": int((hg + ag) >= 3.0) if np.isfinite(hg) and np.isfinite(ag) else np.nan,
+            "OverUnder05": int((hg + ag) > 0.5) if np.isfinite(hg) and np.isfinite(ag) else np.nan,
+            "OverUnder15": int((hg + ag) > 1.5) if np.isfinite(hg) and np.isfinite(ag) else np.nan,
+            "OverUnder25": int((hg + ag) > 2.5) if np.isfinite(hg) and np.isfinite(ag) else np.nan,
+            "OverUnder35": int((hg + ag) > 3.5) if np.isfinite(hg) and np.isfinite(ag) else np.nan,
             "Round": str(league.get("round") or ""),
             "Group": group_from_round(league.get("round")),
             "LeagueId": str(league.get("id") or ""),
@@ -672,7 +676,9 @@ def merge_context_counts(output: pd.DataFrame, rows: Optional[pd.DataFrame], ref
 def api_football_market_rows(fixtures: pd.DataFrame, odds: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "Date", "Home", "Away", "market_odds_home", "market_odds_draw", "market_odds_away",
-        "market_odds_over25", "market_odds_under25", "market_source",
+        *[f"market_odds_over{suffix}" for suffix in TOTAL_ODDS_LINES],
+        *[f"market_odds_under{suffix}" for suffix in TOTAL_ODDS_LINES],
+        "market_source",
     ]
     if fixtures.empty or odds.empty:
         return pd.DataFrame(columns=columns)
@@ -689,16 +695,18 @@ def api_football_market_rows(fixtures: pd.DataFrame, odds: pd.DataFrame) -> pd.D
             "market_odds_home": average_selection(scoped, "1x2", "home"),
             "market_odds_draw": average_selection(scoped, "1x2", "draw"),
             "market_odds_away": average_selection(scoped, "1x2", "away"),
-            "market_odds_over25": average_selection(scoped, "ou25", "over25"),
-            "market_odds_under25": average_selection(scoped, "ou25", "under25"),
             "market_source": "api-football:odds",
         }
+        for suffix in TOTAL_ODDS_LINES:
+            record[f"market_odds_over{suffix}"] = average_selection(scoped, "ou", f"over{suffix}")
+            record[f"market_odds_under{suffix}"] = average_selection(scoped, "ou", f"under{suffix}")
         rows.append(record)
     return pd.DataFrame(rows, columns=columns)
 
 
 def average_selection(scoped: pd.DataFrame, market: str, selection: str) -> float:
-    values = scoped[(scoped["Market"] == market) & (scoped["Selection"] == selection)]["Odd"]
+    markets = {"ou", "ou25"} if market == "ou" else {market}
+    values = scoped[scoped["Market"].isin(markets) & (scoped["Selection"] == selection)]["Odd"]
     values = pd.to_numeric(values, errors="coerce")
     values = values[values > 1.0]
     return float(values.mean()) if not values.empty else np.nan
@@ -723,7 +731,7 @@ def odds_market_key(value: Any) -> str:
     if key in {"match_winner", "fulltime_result", "1x2", "winner"}:
         return "1x2"
     if "over_under" in key or "goals_over_under" in key:
-        return "ou25"
+        return "ou"
     return ""
 
 
@@ -736,12 +744,23 @@ def odds_selection_key(market: str, value: Any) -> str:
             return "draw"
         if key in {"away", "2"}:
             return "away"
-    if market == "ou25":
-        if "over" in key and "2_5" in key:
-            return "over25"
-        if "under" in key and "2_5" in key:
-            return "under25"
+    if market in {"ou", "ou25"}:
+        line = odds_line_suffix(key)
+        if not line:
+            return ""
+        if "over" in key:
+            return f"over{line}"
+        if "under" in key:
+            return f"under{line}"
     return ""
+
+
+def odds_line_suffix(key: str) -> str:
+    match = re.search(r"([0-9])_?5", key)
+    if not match:
+        return ""
+    suffix = f"{match.group(1)}5"
+    return suffix if suffix in TOTAL_ODDS_LINES else ""
 
 
 def group_from_round(value: Any) -> str:

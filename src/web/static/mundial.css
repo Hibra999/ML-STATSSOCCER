@@ -1161,6 +1161,58 @@ h3 { font-size: 16px; }
   border-radius: inherit;
   background: var(--green);
 }
+.feature-inventory-panel {
+  background: #fff;
+}
+.feature-family-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.feature-family-list span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  background: #f8fafb;
+}
+.feature-family-list b {
+  color: var(--ink);
+}
+.feature-inventory-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px;
+  max-height: 360px;
+  overflow: auto;
+}
+.feature-inventory-row {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+}
+.feature-inventory-row span,
+.feature-inventory-row small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.feature-inventory-row span {
+  color: var(--ink);
+  font-weight: 700;
+}
+.feature-inventory-row small {
+  color: var(--muted);
+  margin-top: 3px;
+}
 .training-actions {
   justify-content: flex-start;
 }

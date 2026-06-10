@@ -21,6 +21,7 @@ from src.worldcup import (
     teams_dataframe,
     tournament_fixtures_dataframe,
 )
+from src.worldcup.model import TOTAL_GOAL_LINES, total_line_suffix
 from src.worldcup.data import CACHE_ROOT, group_letter, groups_from_tournament
 from src.worldcup.lanus_provider import (
     LINEUPS_ROOT,
@@ -117,11 +118,15 @@ class BlendedWorldCupModel:
             output["away"] /= total
         totals_ml = ml.get("over_under_25", {})
         if totals_ml:
-            output["over25"] = base["over25"] * (1.0 - weight) + totals_ml.get("over25", base["over25"]) * weight
-            output["under25"] = base["under25"] * (1.0 - weight) + totals_ml.get("under25", base["under25"]) * weight
-            total_goals = max(output["over25"] + output["under25"], 1e-9)
-            output["over25"] /= total_goals
-            output["under25"] /= total_goals
+            for line in (0.5, 1.5, 2.5, 3.5):
+                suffix = total_line_suffix(line)
+                over_key = f"over{suffix}"
+                under_key = f"under{suffix}"
+                output[over_key] = base.get(over_key, 0.0) * (1.0 - weight) + totals_ml.get(over_key, base.get(over_key, 0.0)) * weight
+                output[under_key] = base.get(under_key, 0.0) * (1.0 - weight) + totals_ml.get(under_key, base.get(under_key, 0.0)) * weight
+                total_goals = max(output[over_key] + output[under_key], 1e-9)
+                output[over_key] /= total_goals
+                output[under_key] /= total_goals
         output["lambda1"] = adjusted["lambda1"]
         output["lambda2"] = adjusted["lambda2"]
         return output
@@ -185,7 +190,7 @@ def poisson_probabilities_from_lambdas(lambda1: float, lambda2: float, max_goals
     home = 0.0
     draw = 0.0
     away = 0.0
-    over25 = 0.0
+    totals = {line: 0.0 for line in TOTAL_GOAL_LINES}
     modal_score = (0, 0)
     modal_prob = -1.0
     for goals1, prob1 in enumerate(probs1):
@@ -198,23 +203,28 @@ def poisson_probabilities_from_lambdas(lambda1: float, lambda2: float, max_goals
                 draw += prob
             else:
                 away += prob
-            if goals1 + goals2 > 2.5:
-                over25 += prob
+            total_goals = goals1 + goals2
+            for line in totals:
+                if total_goals > line:
+                    totals[line] += prob
             if prob > modal_prob:
                 modal_prob = prob
                 modal_score = (goals1, goals2)
     total = max(total, 1e-9)
-    return {
+    output = {
         "lambda1": float(lambda1),
         "lambda2": float(lambda2),
         "home": home / total,
         "draw": draw / total,
         "away": away / total,
-        "over25": over25 / total,
-        "under25": 1.0 - over25 / total,
         "modal_g1": modal_score[0],
         "modal_g2": modal_score[1],
     }
+    for line, over_prob in totals.items():
+        suffix = total_line_suffix(line)
+        output[f"over{suffix}"] = over_prob / total
+        output[f"under{suffix}"] = 1.0 - output[f"over{suffix}"]
+    return output
 
 
 def _poisson_pmf(goals: int, rate: float) -> float:
@@ -703,6 +713,10 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
         "2 %": probs.get("away", ""),
         "Over 2.5 %": probs.get("over25", ""),
         "Under 2.5 %": probs.get("under25", ""),
+        "Over 1.5 %": probs.get("over15", ""),
+        "Under 1.5 %": probs.get("under15", ""),
+        "Over 3.5 %": probs.get("over35", ""),
+        "Under 3.5 %": probs.get("under35", ""),
         "Marcador": result.get("modal_score", ""),
         "Prediccion": result.get("prediction", ""),
         "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",

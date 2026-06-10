@@ -19,6 +19,7 @@ FOOTBALL_DATA_XLSX = MARKET_ROOT / "WorldCup2026.xlsx"
 MANUAL_ODDS_CSV = MARKET_ROOT / "manual_odds.csv"
 SCRAPED_ODDS_CSV = MARKET_ROOT / "scraped_odds.csv"
 FOOTBALL_DATA_SHEETS = ("WorldCup2014", "WorldCup2018", "WorldCup2022", "WorldCup2026Qualifiers")
+TOTAL_ODDS_LINES = ("05", "15", "25", "35", "45")
 MANUAL_ODDS_COLUMNS = [
     "Date",
     "Home",
@@ -26,8 +27,8 @@ MANUAL_ODDS_COLUMNS = [
     "market_odds_home",
     "market_odds_draw",
     "market_odds_away",
-    "market_odds_over25",
-    "market_odds_under25",
+    *[f"market_odds_over{suffix}" for suffix in TOTAL_ODDS_LINES],
+    *[f"market_odds_under{suffix}" for suffix in TOTAL_ODDS_LINES],
     "market_source",
 ]
 
@@ -203,7 +204,7 @@ def load_manual_odds(path: Path, default_source: str = "manual") -> pd.DataFrame
     working["Away"] = working["Away"].map(clean_team_name)
     working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
     working["Year"] = working["Date"].dt.year
-    for column in ("market_odds_home", "market_odds_draw", "market_odds_away", "market_odds_over25", "market_odds_under25"):
+    for column in ("market_odds_home", "market_odds_draw", "market_odds_away", *[f"market_odds_over{suffix}" for suffix in TOTAL_ODDS_LINES], *[f"market_odds_under{suffix}" for suffix in TOTAL_ODDS_LINES]):
         working[column] = pd.to_numeric(working[column], errors="coerce")
     working["market_source"] = working["market_source"].replace("", np.nan).fillna(default_source)
     working["market_sheet"] = default_source
@@ -251,7 +252,8 @@ def normalize_market_frame(df: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "Date", "Year", "Home", "Away", "HG", "AG", "Round", "Group",
         "market_odds_home", "market_odds_draw", "market_odds_away",
-        "market_odds_over25", "market_odds_under25",
+        *[f"market_odds_over{suffix}" for suffix in TOTAL_ODDS_LINES],
+        *[f"market_odds_under{suffix}" for suffix in TOTAL_ODDS_LINES],
         "market_source", "market_sheet", "is_qualifier", "source",
         "home_xg", "away_xg", "home_shots", "away_shots", "home_shots_on_target", "away_shots_on_target",
     ]
@@ -267,7 +269,7 @@ def normalize_market_frame(df: pd.DataFrame) -> pd.DataFrame:
     working["Year"] = pd.to_numeric(working["Year"], errors="coerce").fillna(working["Date"].dt.year)
     for column in ("HG", "AG", "home_xg", "away_xg", "home_shots", "away_shots", "home_shots_on_target", "away_shots_on_target"):
         working[column] = pd.to_numeric(working[column], errors="coerce")
-    for column in ("market_odds_home", "market_odds_draw", "market_odds_away", "market_odds_over25", "market_odds_under25"):
+    for column in ("market_odds_home", "market_odds_draw", "market_odds_away", *[f"market_odds_over{suffix}" for suffix in TOTAL_ODDS_LINES], *[f"market_odds_under{suffix}" for suffix in TOTAL_ODDS_LINES]):
         working[column] = pd.to_numeric(working[column], errors="coerce")
         working.loc[working[column] <= 1.0, column] = np.nan
     working["market_source"] = working["market_source"].fillna("").astype(str)
@@ -321,8 +323,6 @@ def market_feature_defaults() -> Dict[str, float]:
         "market_odds_home": 0.0,
         "market_odds_draw": 0.0,
         "market_odds_away": 0.0,
-        "market_odds_over25": 0.0,
-        "market_odds_under25": 0.0,
         "market_implied_home": 0.0,
         "market_implied_draw": 0.0,
         "market_implied_away": 0.0,
@@ -344,14 +344,6 @@ def market_feature_defaults() -> Dict[str, float]:
         "market_favorite_home": 0.0,
         "market_favorite_draw": 0.0,
         "market_favorite_away": 0.0,
-        "market_prob_over25": 0.0,
-        "market_prob_under25": 0.0,
-        "market_logit_over25": 0.0,
-        "market_logit_under25": 0.0,
-        "market_vig_ou25": 0.0,
-        "market_entropy_ou25": 0.0,
-        "market_entropy_ou25_norm": 0.0,
-        "market_ou25_gap": 0.0,
         "model_vs_market_home": 0.0,
         "model_vs_market_draw": 0.0,
         "model_vs_market_away": 0.0,
@@ -361,14 +353,28 @@ def market_feature_defaults() -> Dict[str, float]:
         "model_vs_market_kl_1x2": 0.0,
         "market_vs_model_kl_1x2": 0.0,
         "model_market_entropy_delta_1x2": 0.0,
-        "model_vs_market_over25": 0.0,
-        "model_vs_market_under25": 0.0,
-        "model_vs_market_over25_abs": 0.0,
-        "model_vs_market_under25_abs": 0.0,
-        "model_vs_market_kl_ou25": 0.0,
-        "market_vs_model_kl_ou25": 0.0,
-        "model_market_entropy_delta_ou25": 0.0,
     }
+    for suffix in TOTAL_ODDS_LINES:
+        keys.update({
+            f"market_odds_over{suffix}": 0.0,
+            f"market_odds_under{suffix}": 0.0,
+            f"market_has_ou{suffix}": 0.0,
+            f"market_prob_over{suffix}": 0.0,
+            f"market_prob_under{suffix}": 0.0,
+            f"market_logit_over{suffix}": 0.0,
+            f"market_logit_under{suffix}": 0.0,
+            f"market_vig_ou{suffix}": 0.0,
+            f"market_entropy_ou{suffix}": 0.0,
+            f"market_entropy_ou{suffix}_norm": 0.0,
+            f"market_ou{suffix}_gap": 0.0,
+            f"model_vs_market_over{suffix}": 0.0,
+            f"model_vs_market_under{suffix}": 0.0,
+            f"model_vs_market_over{suffix}_abs": 0.0,
+            f"model_vs_market_under{suffix}_abs": 0.0,
+            f"model_vs_market_kl_ou{suffix}": 0.0,
+            f"market_vs_model_kl_ou{suffix}": 0.0,
+            f"model_market_entropy_delta_ou{suffix}": 0.0,
+        })
     return keys
 
 
@@ -382,15 +388,14 @@ def market_feature_row(
     odds_home = as_float(market_row.get("market_odds_home"))
     odds_draw = as_float(market_row.get("market_odds_draw"))
     odds_away = as_float(market_row.get("market_odds_away"))
-    odds_over = as_float(market_row.get("market_odds_over25"))
-    odds_under = as_float(market_row.get("market_odds_under25"))
     features.update({
         "market_odds_home": valid_decimal_odd(odds_home),
         "market_odds_draw": valid_decimal_odd(odds_draw),
         "market_odds_away": valid_decimal_odd(odds_away),
-        "market_odds_over25": valid_decimal_odd(odds_over),
-        "market_odds_under25": valid_decimal_odd(odds_under),
     })
+    for suffix in TOTAL_ODDS_LINES:
+        features[f"market_odds_over{suffix}"] = valid_decimal_odd(as_float(market_row.get(f"market_odds_over{suffix}")))
+        features[f"market_odds_under{suffix}"] = valid_decimal_odd(as_float(market_row.get(f"market_odds_under{suffix}")))
     if all(valid_decimal_odd(value) > 0.0 for value in (odds_home, odds_draw, odds_away)):
         implied, no_vig, vig = no_vig_probabilities({"home": odds_home, "draw": odds_draw, "away": odds_away})
         probs = [no_vig["home"], no_vig["draw"], no_vig["away"]]
@@ -437,33 +442,39 @@ def market_feature_row(
             "market_vs_model_kl_1x2": kl_divergence(market, model),
             "model_market_entropy_delta_1x2": model_entropy - market_entropy,
         })
-    if all(valid_decimal_odd(value) > 0.0 for value in (odds_over, odds_under)):
-        implied, no_vig, vig = no_vig_probabilities({"over25": odds_over, "under25": odds_under})
-        probs = [no_vig["over25"], no_vig["under25"]]
+    for suffix in TOTAL_ODDS_LINES:
+        odds_over = as_float(market_row.get(f"market_odds_over{suffix}"))
+        odds_under = as_float(market_row.get(f"market_odds_under{suffix}"))
+        if not all(valid_decimal_odd(value) > 0.0 for value in (odds_over, odds_under)):
+            continue
+        over_key = f"over{suffix}"
+        under_key = f"under{suffix}"
+        implied, no_vig, vig = no_vig_probabilities({over_key: odds_over, under_key: odds_under})
+        probs = [no_vig[over_key], no_vig[under_key]]
         model = normalize_distribution({
-            "over25": float(model_totals.get("over25", 0.0)),
-            "under25": float(model_totals.get("under25", 0.0)),
+            over_key: float(model_totals.get(over_key, 0.0)),
+            under_key: float(model_totals.get(under_key, 0.0)),
         })
         market = normalize_distribution(no_vig)
         market_entropy = entropy(probs)
-        model_entropy = entropy([model["over25"], model["under25"]])
+        model_entropy = entropy([model[over_key], model[under_key]])
         features.update({
-            "market_has_ou25": 1.0,
-            "market_prob_over25": no_vig["over25"],
-            "market_prob_under25": no_vig["under25"],
-            "market_logit_over25": logit(no_vig["over25"]),
-            "market_logit_under25": logit(no_vig["under25"]),
-            "market_vig_ou25": vig,
-            "market_entropy_ou25": market_entropy,
-            "market_entropy_ou25_norm": normalized_entropy(probs),
-            "market_ou25_gap": no_vig["over25"] - no_vig["under25"],
-            "model_vs_market_over25": model["over25"] - market["over25"],
-            "model_vs_market_under25": model["under25"] - market["under25"],
-            "model_vs_market_over25_abs": abs(model["over25"] - market["over25"]),
-            "model_vs_market_under25_abs": abs(model["under25"] - market["under25"]),
-            "model_vs_market_kl_ou25": kl_divergence(model, market),
-            "market_vs_model_kl_ou25": kl_divergence(market, model),
-            "model_market_entropy_delta_ou25": model_entropy - market_entropy,
+            f"market_has_ou{suffix}": 1.0,
+            f"market_prob_over{suffix}": no_vig[over_key],
+            f"market_prob_under{suffix}": no_vig[under_key],
+            f"market_logit_over{suffix}": logit(no_vig[over_key]),
+            f"market_logit_under{suffix}": logit(no_vig[under_key]),
+            f"market_vig_ou{suffix}": vig,
+            f"market_entropy_ou{suffix}": market_entropy,
+            f"market_entropy_ou{suffix}_norm": normalized_entropy(probs),
+            f"market_ou{suffix}_gap": no_vig[over_key] - no_vig[under_key],
+            f"model_vs_market_over{suffix}": model[over_key] - market[over_key],
+            f"model_vs_market_under{suffix}": model[under_key] - market[under_key],
+            f"model_vs_market_over{suffix}_abs": abs(model[over_key] - market[over_key]),
+            f"model_vs_market_under{suffix}_abs": abs(model[under_key] - market[under_key]),
+            f"model_vs_market_kl_ou{suffix}": kl_divergence(model, market),
+            f"market_vs_model_kl_ou{suffix}": kl_divergence(market, model),
+            f"model_market_entropy_delta_ou{suffix}": model_entropy - market_entropy,
         })
     return features
 

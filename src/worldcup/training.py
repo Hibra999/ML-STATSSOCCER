@@ -28,10 +28,12 @@ from src.worldcup.market_provider import (
 )
 from src.worldcup.model import (
     HOST_TEAMS,
+    TOTAL_GOAL_LINES,
     WorldCupModel,
     dixon_coles_probabilities,
     estimate_dixon_coles_rho,
     score_grid_features,
+    total_line_suffix,
 )
 
 
@@ -60,7 +62,25 @@ BASE_FEATURE_COLUMNS = [
     "home_is_host",
     "away_is_host",
 ]
-MATCH_ROW_COLUMNS = ["FixtureId", "Date", "Year", "Home", "Away", "Label", "HG", "AG", "OverUnder25", "Source"]
+TRAIN_TOTAL_GOAL_LINES = tuple(line for line in TOTAL_GOAL_LINES if line <= 3.5)
+TOTAL_GOAL_LINE_SUFFIXES = tuple(total_line_suffix(line) for line in TRAIN_TOTAL_GOAL_LINES)
+TOTAL_GOALS_CAP = 6
+GOALS_DISTRIBUTION_TARGET = "goals_distribution"
+MATCH_ROW_COLUMNS = [
+    "FixtureId",
+    "Date",
+    "Year",
+    "Home",
+    "Away",
+    "Label",
+    "HG",
+    "AG",
+    "OverUnder05",
+    "OverUnder15",
+    "OverUnder25",
+    "OverUnder35",
+    "Source",
+]
 TARGET_LABELS = ["H", "D", "A"]
 TEAM_TARGET_COLUMNS = ["quarter_finalist", "semi_finalist", "finalist", "winner"]
 MODEL_PARAM_KEYS = [
@@ -131,6 +151,8 @@ def emit_training_progress(callback, stage: str, current: int, total: int, messa
 
 
 def market_label_for_progress(target: str) -> str:
+    if target == GOALS_DISTRIBUTION_TARGET:
+        return "Distribucion goles"
     return "O/U 2.5" if target == "over_under_25" else "1X2"
 
 
@@ -361,6 +383,8 @@ def train_single_hybrid_model(
     effective_target = train_config["training_target"]
     if effective_target == "over_under_25" and not has_over_under_target(train_rows):
         raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar O/U 2.5.")
+    if effective_target == GOALS_DISTRIBUTION_TARGET and not has_goals_distribution_target(train_rows):
+        raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar distribucion de goles.")
     eval_size = float(payload.get("eval_size", 0.25) or 0.25)
     train_rows = sort_match_rows(train_rows)
     if test_rows.empty:
@@ -471,6 +495,12 @@ def train_single_hybrid_model(
     emit_training_progress(progress_callback, "metrics", 5, 5, f"Calculando métricas {label}", market=label, model_id=model_id)
     metrics = classification_metrics_from_predictions(y_train_encoded, y_train_pred, y_eval_encoded, y_eval_pred)
     confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes, target=effective_target)
+    derived_total_markets = derived_total_market_metrics(
+        y_train=y_train,
+        y_train_pred=decode_encoded_predictions(y_train_pred, label_classes),
+        y_eval=y_eval,
+        y_eval_pred=decode_encoded_predictions(y_eval_pred, label_classes),
+    ) if effective_target == GOALS_DISTRIBUTION_TARGET else {}
     etl = etl_steps(files, normalized, eval_strategy, prepared=prepared_dataset_status(files=files, normalized=normalized))
     hardware = detect_hardware()
     hardware.update({
@@ -502,6 +532,7 @@ def train_single_hybrid_model(
         "history_source": normalized.get("history_source", history_source),
         "metrics": metrics,
         "confusion_matrix": confusion,
+        "derived_total_markets": derived_total_markets,
         "classes": label_classes,
         "encoded_classes": list(range(len(label_classes))),
         "mode": normalized["training_mode"],
@@ -522,6 +553,7 @@ def train_single_hybrid_model(
         "hardware": hardware,
         "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *normalized.get("api_football_warnings", []), *fit_result.get("warnings", [])] if warning]),
         "top_features": top_feature_importances(clf, feature_columns),
+        "feature_inventory": feature_inventory_payload(feature_columns, x_train=x_train, x_eval=x_eval),
         "walk_forward_mode": walk_forward_mode,
         "walk_forward_summary": walk_forward_summary,
         "final_test_year": normalized.get("final_test_year", ""),
@@ -537,6 +569,7 @@ def train_single_hybrid_model(
         "metrics": metrics,
         "confusion_matrix": confusion,
         "features": feature_columns,
+        "feature_inventory": record["feature_inventory"],
         "train_rows": int(len(y_train)),
         "eval_rows": int(len(y_eval)),
         "source": KAGGLE_DATASET_SLUG,
@@ -574,7 +607,7 @@ def train_dual_market_model(
         raise WorldCupTrainingError("El ETL preparado no dejo filas entrenables para el bundle dual.")
 
     result_child_id = child_market_model_id(bundle_id, "result")
-    over_child_id = child_market_model_id(bundle_id, "over_under_25")
+    over_child_id = child_market_model_id(bundle_id, GOALS_DISTRIBUTION_TARGET)
     common_payload = dict(payload)
     common_payload["market_mode"] = "result"
 
@@ -598,37 +631,38 @@ def train_dual_market_model(
     market_results = {"result": market_training_summary(result_record, result_result, "1X2")}
     market_models = {"result": result_child_id}
 
-    can_train_over_under = normalized["training_mode"] == "match_result" and has_over_under_target(normalized["train"])
+    can_train_over_under = normalized["training_mode"] == "match_result" and has_goals_distribution_target(normalized["train"])
     over_result: Optional[Dict[str, Any]] = None
     over_record: Dict[str, Any] = {}
     if can_train_over_under:
         over_payload = {
             **common_payload,
-            "training_target": "over_under_25",
+            "training_target": GOALS_DISTRIBUTION_TARGET,
             "model_id": over_child_id,
-            "model_name": f"{bundle_name} - O/U 2.5",
+            "model_name": f"{bundle_name} - Distribucion goles",
             "hidden_from_catalog": True,
         }
         try:
-            emit_training_progress(progress_callback, "market-over-under", 3, 6, "Entrenando mercado O/U 2.5", market="O/U 2.5", model_id=bundle_id)
+            emit_training_progress(progress_callback, "market-over-under", 3, 6, "Entrenando distribucion de goles", market="U/O multi-linea", model_id=bundle_id)
             over_result = train_single_hybrid_model(
                 tournament=tournament,
                 payload=over_payload,
                 progress_callback=progress_callback,
-                market_label="O/U 2.5",
+                market_label="U/O multi-linea",
             )
             over_record = load_hybrid_model(over_child_id) or {}
-            if over_record.get("effective_target") == "over_under_25":
-                market_results["over_under_25"] = market_training_summary(over_record, over_result, "O/U 2.5")
+            if over_record.get("effective_target") == GOALS_DISTRIBUTION_TARGET:
+                market_results["over_under_25"] = goal_line_training_summary(over_record, over_result, line_suffix="25")
+                market_results["goals_distribution"] = market_training_summary(over_record, over_result, "Distribucion goles")
                 market_models["over_under_25"] = over_child_id
             else:
-                warnings.append("No se guardo modelo O/U porque el dataset no produjo target Over/Under 2.5 valido.")
+                warnings.append("No se guardo modelo de goles porque el dataset no produjo targets de goles validos.")
                 delete_model_files(over_child_id)
         except Exception as exc:
             delete_model_files(over_child_id)
-            raise WorldCupTrainingError(f"O/U 2.5 no se pudo entrenar con goles reales ({exc.__class__.__name__}: {exc}).")
+            raise WorldCupTrainingError(f"Distribucion de goles no se pudo entrenar con goles reales ({exc.__class__.__name__}: {exc}).")
     else:
-        raise WorldCupTrainingError("O/U 2.5 no se puede entrenar: el ETL preparado no contiene goles reales suficientes.")
+        raise WorldCupTrainingError("Distribucion de goles no se puede entrenar: el ETL preparado no contiene goles reales suficientes.")
 
     warnings.extend(result_record.get("warnings", []))
     warnings.extend(over_record.get("warnings", []))
@@ -664,7 +698,7 @@ def train_dual_market_model(
         "mode": normalized["training_mode"],
         "eval_strategy": result_record.get("eval_strategy", ""),
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
-        "effective_target": "result+over_under_25",
+        "effective_target": "result+goals_distribution",
         "requested_target": "dual_markets",
         "target_column": bundle_target_column,
         "model_type": train_config["model_type"],
@@ -678,6 +712,8 @@ def train_dual_market_model(
         "hardware": result_record.get("hardware", detect_hardware()),
         "warnings": warnings,
         "top_features": result_record.get("top_features", []),
+        "feature_inventory": result_record.get("feature_inventory", {}),
+        "derived_total_markets": over_record.get("derived_total_markets", {}),
         "markets": market_results,
         "market_models": market_models,
         "trained_at": trained_at,
@@ -695,6 +731,7 @@ def train_dual_market_model(
         "metrics": bundle_record["metrics"],
         "confusion_matrix": bundle_record["confusion_matrix"],
         "features": bundle_record["feature_columns"],
+        "feature_inventory": bundle_record["feature_inventory"],
         "train_rows": int(max(result_result.get("train_rows", 0), (over_result or {}).get("train_rows", 0))),
         "eval_rows": int(max(result_result.get("eval_rows", 0), (over_result or {}).get("eval_rows", 0))),
         "source": KAGGLE_DATASET_SLUG,
@@ -733,8 +770,8 @@ def predict_match_payload(
     away_team = str(fixture.get("Equipo 2", away or ""))
     poisson = base_model.match_probabilities(home_team, away_team)
     base_probs = {"H": poisson["home"], "D": poisson["draw"], "A": poisson["away"]}
-    base_totals = {"over25": poisson["over25"], "under25": poisson["under25"]}
-    ml_outputs = {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
+    base_totals = total_line_probabilities_from_probs(poisson)
+    ml_outputs = {"result": {}, "over_under_25": {}, "goal_distribution": {}, "notes": ["Modelo Kaggle no entrenado."]}
     if use_ml_model:
         ml_outputs = predict_ml_outputs(base_model, home_team, away_team, model_id=model_id, fixture_id=fixture.get("No."))
     result_ml = ml_outputs.get("result", {})
@@ -758,14 +795,14 @@ def predict_match_payload(
             "home": round(blended["H"] * 100.0, 2),
             "draw": round(blended["D"] * 100.0, 2),
             "away": round(blended["A"] * 100.0, 2),
-            "over25": round(blended_totals["over25"] * 100.0, 2),
-            "under25": round(blended_totals["under25"] * 100.0, 2),
+            **{key: round(value * 100.0, 2) for key, value in blended_totals.items()},
         },
         "model_probs": {
             "poisson": {key: round(value * 100.0, 2) for key, value in base_probs.items()},
             "poisson_totals": {key: round(value * 100.0, 2) for key, value in base_totals.items()},
             "ml": {key: round(value * 100.0, 2) for key, value in result_ml.items()},
             "over_under_ml": {key: round(value * 100.0, 2) for key, value in over_under_ml.items()},
+            "goal_distribution_ml": {key: round(value * 100.0, 2) for key, value in (ml_outputs.get("goal_distribution", {}) or {}).items()},
             "ml_weight": round(float(ml_weight if result_ml or over_under_ml else 0.0), 3),
             "result_weight": round(float(result_weight), 3),
             "over_under_weight": round(float(totals_weight), 3),
@@ -1003,8 +1040,10 @@ def sanitize_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
         working["HG"] = np.nan
     if "AG" not in working.columns:
         working["AG"] = np.nan
-    if "OverUnder25" not in working.columns:
-        working["OverUnder25"] = np.nan
+    for suffix in TOTAL_GOAL_LINE_SUFFIXES:
+        column = f"OverUnder{suffix}"
+        if column not in working.columns:
+            working[column] = np.nan
     if "Date" not in working.columns:
         working["Date"] = pd.NaT
     if "Year" not in working.columns:
@@ -1014,9 +1053,13 @@ def sanitize_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
     working["Label"] = working["Label"].astype(str)
     working["HG"] = pd.to_numeric(working["HG"], errors="coerce")
     working["AG"] = pd.to_numeric(working["AG"], errors="coerce")
-    needs_over = working["OverUnder25"].isna() & working["HG"].notna() & working["AG"].notna()
-    if needs_over.any():
-        working.loc[needs_over, "OverUnder25"] = ((working.loc[needs_over, "HG"] + working.loc[needs_over, "AG"]) >= 3.0).astype(int)
+    goals_total = working["HG"] + working["AG"]
+    for line in TRAIN_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        column = f"OverUnder{suffix}"
+        needs_over = working[column].isna() & working["HG"].notna() & working["AG"].notna()
+        if needs_over.any():
+            working.loc[needs_over, column] = (goals_total.loc[needs_over] > line).astype(int)
     working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
     inferred_year = working["Date"].dt.year
     working["Year"] = pd.to_numeric(working["Year"], errors="coerce").fillna(inferred_year)
@@ -1067,7 +1110,7 @@ def history_match_rows(history_df: pd.DataFrame, source: str) -> pd.DataFrame:
             "Label": label_from_goals(goals_home, goals_away),
             "HG": goals_home,
             "AG": goals_away,
-            "OverUnder25": int((goals_home + goals_away) >= 3.0),
+            **over_under_target_values(goals_home, goals_away),
             "Source": source,
             "Date": row.get("Date"),
         })
@@ -1215,7 +1258,7 @@ def standardize_match_rows(df: pd.DataFrame, source: str = "") -> pd.DataFrame:
             try:
                 record["HG"] = float(row.get(goals_home))
                 record["AG"] = float(row.get(goals_away))
-                record["OverUnder25"] = int((record["HG"] + record["AG"]) >= 2.5)
+                record.update(over_under_target_values(record["HG"], record["AG"]))
             except (TypeError, ValueError):
                 pass
         rows.append(record)
@@ -1326,6 +1369,13 @@ def reference_date_for_row(row_date: Optional[pd.Timestamp], row_year: Optional[
     return HISTORY_REFERENCE_DATE
 
 
+def total_goals_bucket_from_row(row: pd.Series, cap: int = TOTAL_GOALS_CAP) -> int:
+    total_goals = pd.to_numeric(pd.Series([row.get("HG", np.nan)]), errors="coerce").iloc[0] + pd.to_numeric(pd.Series([row.get("AG", np.nan)]), errors="coerce").iloc[0]
+    if pd.isna(total_goals):
+        return 0
+    return int(min(max(int(total_goals), 0), int(cap)))
+
+
 def history_before_row(history_df: pd.DataFrame, row_date: Optional[pd.Timestamp], row_year: Optional[int], freeze_year: bool = False) -> pd.DataFrame:
     if history_df is None or history_df.empty:
         return pd.DataFrame()
@@ -1395,6 +1445,8 @@ def build_training_matrix(
     working = sort_match_rows(rows)
     if target == "over_under_25":
         working = working[working["OverUnder25"].notna()] if "OverUnder25" in working.columns else working.iloc[0:0]
+    elif target == GOALS_DISTRIBUTION_TARGET:
+        working = working[working["HG"].notna() & working["AG"].notna()]
     if team_features is None:
         team_features = pd.DataFrame()
     if market_rows is None:
@@ -1408,14 +1460,14 @@ def build_training_matrix(
     frozen_years = frozen_years or set()
     if static_model is None and history_df is None:
         static_model = WorldCupModel.from_history(pd.DataFrame(), teams=working_teams)
-    snapshot_cache: Dict[Tuple[str, str], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
+    snapshot_cache: Dict[Tuple[str, ...], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     for _, row in working.iterrows():
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
         reference_date = reference_date_for_row(row_date, row_year)
         if history_df is not None:
             frozen = row_year in frozen_years
-            cache_key = ("date", reference_date)
+            cache_key = ("year", str(int(row_year))) if row_year else ("date", reference_date)
             if cache_key not in snapshot_cache:
                 history_cutoff = history_before_row(history_df, row_date=row_date, row_year=row_year, freeze_year=frozen)
                 snapshot_cache[cache_key] = (
@@ -1479,6 +1531,8 @@ def build_training_matrix(
     x = x[feature_columns].astype(float)
     if target == "over_under_25":
         return x, working["OverUnder25"].astype(int), feature_columns
+    if target == GOALS_DISTRIBUTION_TARGET:
+        return x, working.apply(total_goals_bucket_from_row, axis=1).astype(int), feature_columns
     return x, working["Label"].astype(str), feature_columns
 
 
@@ -1550,7 +1604,7 @@ def match_feature_row(
     row.update(build_market_feature_row(
         market_match,
         model_probs={"H": poisson.get("home", 0.0), "D": poisson.get("draw", 0.0), "A": poisson.get("away", 0.0)},
-        model_totals={"over25": poisson.get("over25", 0.0), "under25": poisson.get("under25", 0.0)},
+        model_totals=total_line_probabilities_from_probs(poisson),
     ))
     merge_qualifier_feature_block(row, qualifier_features if qualifier_features is not None else pd.DataFrame(), home, away)
     merge_team_feature_block(row, api_football_features if api_football_features is not None else pd.DataFrame(), home, away, prefix="api_football")
@@ -2169,7 +2223,7 @@ def default_model_id(model_key: str, target: str) -> str:
         "catboost": "cat",
         "ngboost": "ngb",
     }.get(model_key, model_key)
-    short_target = "hibrido" if target == "dual_markets" else "uo25" if target == "over_under_25" else "result"
+    short_target = "hibrido" if target == "dual_markets" else "goals" if target == GOALS_DISTRIBUTION_TARGET else "uo25" if target == "over_under_25" else "result"
     return f"mundial-{short_model}-{short_target}"
 
 
@@ -2185,6 +2239,8 @@ def normalize_worldcup_model_id(value: Any) -> str:
 
 def normalize_training_target(value: Any) -> str:
     key = str(value or "result").strip().lower().replace("-", "_")
+    if key in {"goals", "goals_distribution", "goal_distribution", "total_goals", "distribucion_goles"}:
+        return GOALS_DISTRIBUTION_TARGET
     if key in {"over_under", "over_under_25", "uo25", "u_o_25", "overunder25"}:
         return "over_under_25"
     return "result"
@@ -2194,6 +2250,8 @@ def normalize_market_mode(value: Any, target: str = "result") -> str:
     key = str(value or target or "result").strip().lower().replace("-", "_")
     if key in {"dual", "dual_markets", "both", "ambos", "all", "result_over_under_25", "result_uo25"}:
         return "dual_markets"
+    if key in {"goals", "goals_distribution", "goal_distribution", "total_goals", "distribucion_goles"}:
+        return GOALS_DISTRIBUTION_TARGET
     if key in {"over_under", "over_under_25", "uo25", "u_o_25", "overunder25"}:
         return "over_under_25"
     return "result"
@@ -2239,6 +2297,14 @@ def has_over_under_target(rows: pd.DataFrame) -> bool:
         return False
     values = pd.to_numeric(rows["OverUnder25"], errors="coerce").dropna()
     return values.shape[0] > 1 and values.astype(int).nunique() >= 2
+
+
+def has_goals_distribution_target(rows: pd.DataFrame) -> bool:
+    if not {"HG", "AG"}.issubset(rows.columns):
+        return False
+    totals = pd.to_numeric(rows["HG"], errors="coerce") + pd.to_numeric(rows["AG"], errors="coerce")
+    totals = totals.dropna().astype(int).clip(lower=0, upper=TOTAL_GOALS_CAP)
+    return totals.shape[0] > 1 and totals.nunique() >= 2
 
 
 def api_football_records(bundle: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
@@ -2296,7 +2362,7 @@ def worldcup_played_fixture_rows(tournament: Dict[str, Any]) -> pd.DataFrame:
 def completed_worldcup_training_rows(tournament: Dict[str, Any]) -> pd.DataFrame:
     fixture_df = tournament_fixtures_dataframe(tournament)
     if fixture_df.empty or "Goles 1" not in fixture_df.columns or "Goles 2" not in fixture_df.columns:
-        return pd.DataFrame(columns=["FixtureId", "Home", "Away", "HG", "AG", "Label", "OverUnder25", "Source"])
+        return pd.DataFrame(columns=["FixtureId", "Home", "Away", "HG", "AG", "Label", "OverUnder05", "OverUnder15", "OverUnder25", "OverUnder35", "Source"])
     working = fixture_df.copy()
     working["HG"] = pd.to_numeric(working["Goles 1"], errors="coerce")
     working["AG"] = pd.to_numeric(working["Goles 2"], errors="coerce")
@@ -2309,9 +2375,11 @@ def completed_worldcup_training_rows(tournament: Dict[str, Any]) -> pd.DataFrame
         ~working["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
     ].copy()
     if working.empty:
-        return pd.DataFrame(columns=["FixtureId", "Home", "Away", "HG", "AG", "Label", "OverUnder25", "Source"])
+        return pd.DataFrame(columns=["FixtureId", "Home", "Away", "HG", "AG", "Label", "OverUnder05", "OverUnder15", "OverUnder25", "OverUnder35", "Source"])
     working["Label"] = working.apply(lambda row: label_from_goals(row["HG"], row["AG"]), axis=1)
-    working["OverUnder25"] = ((working["HG"] + working["AG"]) >= 3.0).astype(int)
+    for line in TRAIN_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        working[f"OverUnder{suffix}"] = ((working["HG"] + working["AG"]) > line).astype(int)
     return pd.DataFrame({
         "FixtureId": working["No."].astype(str),
         "Home": working["Equipo 1"].map(clean_team_name),
@@ -2319,7 +2387,10 @@ def completed_worldcup_training_rows(tournament: Dict[str, Any]) -> pd.DataFrame
         "HG": working["HG"].astype(float),
         "AG": working["AG"].astype(float),
         "Label": working["Label"].astype(str),
+        "OverUnder05": working["OverUnder05"].astype(int),
+        "OverUnder15": working["OverUnder15"].astype(int),
         "OverUnder25": working["OverUnder25"].astype(int),
+        "OverUnder35": working["OverUnder35"].astype(int),
         "Source": "worldcup_2026_walk_forward",
     })
 
@@ -2612,6 +2683,7 @@ def build_worldcup_classifier(
             "random_state": seed,
             "n_jobs": n_jobs,
             "eval_metric": "mlogloss" if num_classes > 2 else "logloss",
+            "tree_method": "hist",
         }
         if num_classes > 2:
             kwargs.update({"objective": "multi:softprob", "num_class": num_classes})
@@ -2865,6 +2937,63 @@ def top_feature_importances(clf, feature_columns: List[str], limit: int = 12) ->
     return sorted(pairs, key=lambda item: item["importance"], reverse=True)[:limit]
 
 
+def feature_inventory_payload(
+        feature_columns: List[str],
+        x_train: Optional[pd.DataFrame] = None,
+        x_eval: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    rows = []
+    families: Dict[str, int] = {}
+    for column in feature_columns:
+        train_series = pd.to_numeric(x_train[column], errors="coerce") if x_train is not None and column in x_train.columns else pd.Series(dtype=float)
+        eval_series = pd.to_numeric(x_eval[column], errors="coerce") if x_eval is not None and column in x_eval.columns else pd.Series(dtype=float)
+        family = feature_family(column)
+        families[family] = families.get(family, 0) + 1
+        rows.append({
+            "feature": column,
+            "family": family,
+            "train_non_zero_rate": round(float((train_series.fillna(0.0) != 0.0).mean()) if not train_series.empty else 0.0, 4),
+            "eval_non_zero_rate": round(float((eval_series.fillna(0.0) != 0.0).mean()) if not eval_series.empty else 0.0, 4),
+            "train_null_rate": round(float(train_series.isna().mean()) if not train_series.empty else 0.0, 4),
+            "eval_null_rate": round(float(eval_series.isna().mean()) if not eval_series.empty else 0.0, 4),
+            "train_variance": round(float(train_series.fillna(0.0).var(ddof=0)) if not train_series.empty else 0.0, 8),
+        })
+    return {
+        "feature_count": len(feature_columns),
+        "families": [{"family": key, "count": value} for key, value in sorted(families.items())],
+        "features": rows,
+    }
+
+
+def feature_family(column: str) -> str:
+    for prefix in (
+        "api_football_",
+        "history_",
+        "market_",
+        "model_vs_market_",
+        "market_vs_model_",
+        "model_market_",
+        "poisson_",
+        "prob_",
+        "model_",
+        "kaggle_",
+        "h2h_",
+        "fixture_",
+        "stage_",
+        "venue_",
+        "rating_",
+        "attack_",
+        "defense_",
+        "shrinkage_",
+        "dc_",
+        "total_",
+        "goal_",
+    ):
+        if column.startswith(prefix):
+            return prefix.rstrip("_")
+    return str(column).split("_", 1)[0]
+
+
 def feature_importance_vector(values: Any, feature_count: int) -> np.ndarray:
     if feature_count <= 0:
         return np.asarray([], dtype=float)
@@ -2904,7 +3033,7 @@ def predict_ml_probs(base_model: WorldCupModel, home: str, away: str, model_id: 
 def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str, model_id: Optional[str] = None, fixture_id: Optional[Any] = None) -> Dict[str, Any]:
     record = load_hybrid_model(model_id=model_id)
     if not record:
-        return {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
+        return {"result": {}, "over_under_25": {}, "goal_distribution": {}, "notes": ["Modelo Kaggle no entrenado."]}
     if record.get("bundle") and record.get("market_models"):
         return predict_bundle_ml_outputs(base_model, home, away, record, fixture_id=fixture_id)
     return predict_single_record_ml_outputs(base_model, home, away, record, fixture_id=fixture_id)
@@ -2915,7 +3044,7 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
     bundle_name = str(record.get("model_name") or bundle_id or "Bundle Mundial")
     market_models = record.get("market_models") or {}
     result_output = {"result": {}, "notes": []}
-    over_output = {"over_under_25": {}, "notes": []}
+    over_output = {"over_under_25": {}, "goal_distribution": {}, "notes": []}
     market_model_names: Dict[str, str] = {}
 
     result_id = market_models.get("result")
@@ -2926,7 +3055,7 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
             if result_output.get("result"):
                 market_model_names["result"] = result_output.get("model_name", "")
 
-    over_id = market_models.get("over_under_25")
+    over_id = market_models.get(GOALS_DISTRIBUTION_TARGET) or market_models.get("over_under_25")
     if over_id:
         over_record = load_hybrid_model(over_id)
         if over_record:
@@ -2945,6 +3074,7 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
     return {
         "result": result_output.get("result", {}),
         "over_under_25": over_output.get("over_under_25", {}),
+        "goal_distribution": over_output.get("goal_distribution", {}),
         "model_id": bundle_id,
         "model_name": bundle_name,
         "market_model_ids": {key: value for key, value in market_models.items() if value},
@@ -3020,6 +3150,17 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
     probabilities = np.asarray(classifier_predict_proba(record["classifier"], x)[0], dtype=float)
     labels = [str(label) for label in record.get("classes", [])]
     target = record.get("effective_target", "result")
+    if target == GOALS_DISTRIBUTION_TARGET:
+        distribution = goal_distribution_from_probabilities(labels, probabilities)
+        over_under = total_line_probabilities_from_distribution(distribution)
+        return {
+            "result": {},
+            "over_under_25": over_under,
+            "goal_distribution": {key: value for key, value in distribution.items()},
+            "model_id": active_id,
+            "model_name": model_name,
+            "notes": [f"Modelo {model_name} aplicado a distribucion de goles y U/O multi-linea."],
+        }
     if target == "over_under_25":
         output = {"under25": 0.0, "over25": 0.0}
         for label, probability in zip(labels, probabilities):
@@ -3103,10 +3244,63 @@ def classifier_predict_proba(classifier, x: pd.DataFrame) -> np.ndarray:
 def blend_total_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, float], ml_weight: float) -> Dict[str, float]:
     weight = min(max(float(ml_weight or 0.0), 0.0), 1.0)
     output = {}
-    for label in ["over25", "under25"]:
+    labels = sorted(set(base_probs) | set(ml_probs))
+    for label in labels:
         output[label] = base_probs.get(label, 0.0) * (1.0 - weight) + ml_probs.get(label, base_probs.get(label, 0.0)) * weight
+    for line in TRAIN_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        over_key = f"over{suffix}"
+        under_key = f"under{suffix}"
+        total = max(output.get(over_key, 0.0) + output.get(under_key, 0.0), 1e-9)
+        output[over_key] = output.get(over_key, 0.0) / total
+        output[under_key] = output.get(under_key, 0.0) / total
+    return output
+
+
+def total_line_probabilities_from_probs(probabilities: Dict[str, float]) -> Dict[str, float]:
+    output: Dict[str, float] = {}
+    for line in TRAIN_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        over_key = f"over{suffix}"
+        under_key = f"under{suffix}"
+        over_value = float(probabilities.get(over_key, 0.0) or 0.0)
+        under_value = float(probabilities.get(under_key, 1.0 - over_value) or 0.0)
+        total = max(over_value + under_value, 1e-9)
+        output[over_key] = over_value / total
+        output[under_key] = under_value / total
+    return output
+
+
+def goal_distribution_from_probabilities(labels: List[str], probabilities: np.ndarray) -> Dict[str, float]:
+    output = {str(goal): 0.0 for goal in range(TOTAL_GOALS_CAP)}
+    output[f"{TOTAL_GOALS_CAP}+"] = 0.0
+    for label, probability in zip(labels, probabilities):
+        try:
+            goals = int(float(label))
+        except (TypeError, ValueError):
+            continue
+        key = f"{TOTAL_GOALS_CAP}+" if goals >= TOTAL_GOALS_CAP else str(max(goals, 0))
+        output[key] = output.get(key, 0.0) + float(probability)
     total = max(sum(output.values()), 1e-9)
-    return {label: value / total for label, value in output.items()}
+    return {key: value / total for key, value in output.items()}
+
+
+def total_line_probabilities_from_distribution(distribution: Dict[str, float]) -> Dict[str, float]:
+    output: Dict[str, float] = {}
+    for line in TRAIN_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        over = 0.0
+        under = 0.0
+        for key, probability in distribution.items():
+            goals = TOTAL_GOALS_CAP if str(key).endswith("+") else int(float(key))
+            if goals > line:
+                over += float(probability)
+            else:
+                under += float(probability)
+        total = max(over + under, 1e-9)
+        output[f"over{suffix}"] = over / total
+        output[f"under{suffix}"] = under / total
+    return output
 
 
 def market_sources_payload(result_ml: Dict[str, float], over_under_ml: Dict[str, float], ml_outputs: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -3125,17 +3319,17 @@ def market_sources_payload(result_ml: Dict[str, float], over_under_ml: Dict[str,
             "detail": f"1X2 mezcla el modelo {result_model_name} con Elo/Poisson." if result_uses_ml else "1X2 calculado solo con Elo/Poisson.",
         },
         "over_under_25": {
-            "label": "O/U 2.5",
+            "label": "U/O multi-linea",
             "source": "ML + Poisson" if over_under_uses_ml else "Poisson",
             "uses_ml": over_under_uses_ml,
             "model_name": over_under_model_name if over_under_uses_ml else "",
-            "detail": f"O/U 2.5 mezcla el modelo {over_under_model_name} con Poisson." if over_under_uses_ml else "O/U 2.5 calculado con Poisson; no hay modelo O/U activo para este target.",
+            "detail": f"U/O 0.5-3.5 mezcla el modelo {over_under_model_name} con Poisson." if over_under_uses_ml else "U/O calculado con Poisson; no hay modelo de totales activo.",
         },
     }
 
 
 def child_market_model_id(bundle_id: str, market: str) -> str:
-    suffix = "__uo25" if market == "over_under_25" else "__result"
+    suffix = "__goals" if market == GOALS_DISTRIBUTION_TARGET else "__uo25" if market == "over_under_25" else "__result"
     return normalize_worldcup_model_id(f"{str(bundle_id)[:80 - len(suffix)]}{suffix}")
 
 
@@ -3163,6 +3357,19 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "final_test_year": record.get("final_test_year", result.get("final_test_year", "")),
         "split_policy": record.get("split_policy", result.get("split_policy", "")),
     }
+
+
+def goal_line_training_summary(record: Dict[str, Any], result: Dict[str, Any], line_suffix: str = "25") -> Dict[str, Any]:
+    derived_key = f"over_under_{line_suffix}"
+    derived = (record.get("derived_total_markets") or {}).get(derived_key, {})
+    summary = market_training_summary(record, result, derived.get("label") or "O/U 2.5")
+    if derived:
+        summary["metrics"] = derived.get("metrics", {})
+        summary["confusion_matrix"] = derived.get("confusion_matrix", {})
+    summary["effective_target"] = GOALS_DISTRIBUTION_TARGET
+    summary["derived_from"] = GOALS_DISTRIBUTION_TARGET
+    summary["available_lines"] = sorted((record.get("derived_total_markets") or {}).keys())
+    return summary
 
 
 def bundle_tuning_trace(markets: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -3196,8 +3403,8 @@ def bundle_etl_steps(base_steps: List[Dict[str, Any]], market_models: Dict[str, 
     steps = list(base_steps or [])
     steps.append({
         "name": "Bundle de mercados",
-        "status": "ok" if "over_under_25" in market_models else "info",
-        "detail": "Entrena 1X2 y O/U como clasificadores independientes bajo un solo modelo seleccionable.",
+        "status": "ok" if "over_under_25" in market_models or GOALS_DISTRIBUTION_TARGET in market_models else "info",
+        "detail": "Entrena 1X2 y una distribucion de goles para derivar U/O multi-linea bajo un solo modelo seleccionable.",
         "count": len(market_models),
     })
     return steps
@@ -3235,10 +3442,74 @@ def metric_row(y_true, y_pred) -> Dict[str, float]:
     }
 
 
+def decode_encoded_predictions(encoded: Iterable[Any], classes: List[Any]) -> pd.Series:
+    values = pd.Series(encoded).reset_index(drop=True)
+    decoded = []
+    for value in values:
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            decoded.append(value)
+            continue
+        decoded.append(classes[index] if 0 <= index < len(classes) else value)
+    return pd.Series(decoded)
+
+
+def derived_total_market_metrics(y_train, y_train_pred, y_eval, y_eval_pred) -> Dict[str, Dict[str, Any]]:
+    output: Dict[str, Dict[str, Any]] = {}
+    for line in TRAIN_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        target = f"over_under_{suffix}"
+        train_actual = total_binary_for_line(y_train, line)
+        train_pred = total_binary_for_line(y_train_pred, line)
+        eval_actual = total_binary_for_line(y_eval, line)
+        eval_pred = total_binary_for_line(y_eval_pred, line)
+        output[target] = {
+            "line": line,
+            "label": f"O/U {line:.1f}",
+            "metrics": classification_metrics_from_predictions(train_actual, train_pred, eval_actual, eval_pred),
+            "confusion_matrix": binary_over_under_confusion(eval_actual, eval_pred, line),
+        }
+    return output
+
+
+def total_binary_for_line(values, line: float) -> pd.Series:
+    numeric = pd.to_numeric(pd.Series(values), errors="coerce").fillna(0).astype(int)
+    return (numeric > line).astype(int)
+
+
+def binary_over_under_confusion(y_true, y_pred, line: float) -> Dict[str, Any]:
+    matrix = confusion_matrix(y_true, y_pred, labels=[0, 1]).astype(int)
+    labels = [f"Under {line:.1f}", f"Over {line:.1f}"]
+    rows = []
+    for row_index, actual in enumerate(labels):
+        row_total = int(matrix[row_index].sum())
+        for column_index, predicted in enumerate(labels):
+            count = int(matrix[row_index, column_index])
+            rows.append({
+                "Actual": actual,
+                "Predicho": predicted,
+                "Conteo": count,
+                "Porcentaje": round(count * 100.0 / max(row_total, 1), 2),
+            })
+    return {"labels": labels, "matrix": matrix.tolist(), "rows": rows, "total": int(matrix.sum())}
+
+
 def confusion_matrix_payload(y_true, y_pred, classes: List[Any], target: str = "result") -> Dict[str, Any]:
     encoded_labels = list(range(len(classes)))
     labels = [display_class_label(label, target=target) for label in classes]
-    matrix = confusion_matrix(y_true, y_pred, labels=encoded_labels).astype(int)
+    true_values = pd.Series(y_true).reset_index(drop=True)
+    pred_values = pd.Series(y_pred).reset_index(drop=True)
+    known_actual_mask = true_values.isin(encoded_labels)
+    unknown_actual_total = int((~known_actual_mask).sum())
+    if known_actual_mask.any():
+        matrix = confusion_matrix(
+            true_values[known_actual_mask],
+            pred_values[known_actual_mask],
+            labels=encoded_labels,
+        ).astype(int)
+    else:
+        matrix = np.zeros((len(encoded_labels), len(encoded_labels)), dtype=int)
     total = int(matrix.sum())
     rows = []
     for row_index, actual in enumerate(labels):
@@ -3256,11 +3527,18 @@ def confusion_matrix_payload(y_true, y_pred, classes: List[Any], target: str = "
         "matrix": matrix.tolist(),
         "rows": rows,
         "total": total,
+        "unknown_actual_total": unknown_actual_total,
     }
 
 
 def display_class_label(label: Any, target: str = "result") -> str:
     text = str(label)
+    if target == GOALS_DISTRIBUTION_TARGET:
+        try:
+            goals = int(float(text))
+            return f"{goals}+" if goals >= TOTAL_GOALS_CAP else f"{goals} goles"
+        except (TypeError, ValueError):
+            return text
     if text == "H":
         return "1 Local"
     if text == "D":
@@ -3330,10 +3608,10 @@ def etl_steps(
             "detail": "Features numericas por seleccion listas para el modelo.",
         },
         {
-            "name": "Mercado O/U 2.5",
-            "status": "ok" if has_over_under_target(normalized["train"]) else "pending",
-            "count": int(pd.to_numeric(normalized["train"].get("OverUnder25"), errors="coerce").dropna().shape[0]) if "OverUnder25" in normalized["train"].columns else 0,
-            "detail": "Solo usa goles reales observados; no se generan etiquetas artificiales.",
+            "name": "Distribucion goles / U/O",
+            "status": "ok" if has_goals_distribution_target(normalized["train"]) else "pending",
+            "count": int((pd.to_numeric(normalized["train"].get("HG"), errors="coerce") + pd.to_numeric(normalized["train"].get("AG"), errors="coerce")).dropna().shape[0]) if {"HG", "AG"}.issubset(normalized["train"].columns) else 0,
+            "detail": "Deriva U/O 0.5, 1.5, 2.5 y 3.5 desde goles reales observados.",
         },
         {
             "name": "Mercado 1X2 externo",
@@ -3469,6 +3747,8 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "hardware": record.get("hardware", {}),
         "warnings": record.get("warnings", []),
         "top_features": record.get("top_features", []),
+        "feature_inventory": record.get("feature_inventory", {}),
+        "derived_total_markets": record.get("derived_total_markets", {}),
         "kaggle_files": record.get("kaggle_files", []),
         "history_source": record.get("history_source", ""),
         "market_rows": int(record.get("market_rows", 0)),
@@ -3746,6 +4026,19 @@ def label_from_goals(home_goals: Any, away_goals: Any) -> str:
     if g_away > g_home:
         return "A"
     return "D"
+
+
+def over_under_target_values(home_goals: Any, away_goals: Any) -> Dict[str, int]:
+    try:
+        total_goals = float(home_goals) + float(away_goals)
+    except (TypeError, ValueError):
+        return {}
+    if not np.isfinite(total_goals):
+        return {}
+    return {
+        f"OverUnder{total_line_suffix(line)}": int(total_goals > line)
+        for line in TRAIN_TOTAL_GOAL_LINES
+    }
 
 
 def label_from_target(value: Any, home: str, away: str) -> str:

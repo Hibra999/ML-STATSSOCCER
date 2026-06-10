@@ -61,6 +61,7 @@ TEAM_RATING_PRIORS = {
 }
 
 HOST_TEAMS = {"Mexico", "USA", "Canada"}
+TOTAL_GOAL_LINES = (0.5, 1.5, 2.5, 3.5, 4.5)
 
 
 @dataclass(frozen=True)
@@ -197,7 +198,7 @@ class WorldCupModel:
         home = 0.0
         draw = 0.0
         away = 0.0
-        over25 = 0.0
+        totals = {line: 0.0 for line in TOTAL_GOAL_LINES}
         modal_score = (0, 0)
         modal_prob = -1.0
         for goals1, prob1 in enumerate(probs1):
@@ -210,23 +211,28 @@ class WorldCupModel:
                     draw += prob
                 else:
                     away += prob
-                if goals1 + goals2 > 2.5:
-                    over25 += prob
+                total_goals = goals1 + goals2
+                for line in totals:
+                    if total_goals > line:
+                        totals[line] += prob
                 if prob > modal_prob:
                     modal_prob = prob
                     modal_score = (goals1, goals2)
         total = max(total, 1e-9)
-        return {
+        output = {
             "lambda1": lambda1,
             "lambda2": lambda2,
             "home": home / total,
             "draw": draw / total,
             "away": away / total,
-            "over25": over25 / total,
-            "under25": 1.0 - over25 / total,
             "modal_g1": modal_score[0],
             "modal_g2": modal_score[1],
         }
+        for line, over_prob in totals.items():
+            suffix = total_line_suffix(line)
+            output[f"over{suffix}"] = over_prob / total
+            output[f"under{suffix}"] = 1.0 - output[f"over{suffix}"]
+        return output
 
     def sample_score(self, team1: str, team2: str, rng: np.random.Generator) -> Tuple[int, int]:
         lambda1, lambda2 = self.expected_goals(team1, team2)
@@ -296,12 +302,6 @@ def score_grid_features(lambda1: float, lambda2: float, max_goals: int = 10, sco
         "prob_margin_draw": float(draw),
         "prob_margin_away_1": float(away_win_by_1),
         "prob_margin_away_2plus": float(away_win_by_2plus),
-        "prob_over15": float(sum(prob for goals, prob in total_distribution.items() if goals >= 2)),
-        "prob_under15": float(sum(prob for goals, prob in total_distribution.items() if goals <= 1)),
-        "prob_over35": float(sum(prob for goals, prob in total_distribution.items() if goals >= 4)),
-        "prob_under35": float(sum(prob for goals, prob in total_distribution.items() if goals <= 3)),
-        "prob_over45": float(sum(prob for goals, prob in total_distribution.items() if goals >= 5)),
-        "prob_under45": float(sum(prob for goals, prob in total_distribution.items() if goals <= 4)),
         "prob_btts": float(btts),
         "prob_no_btts": float(1.0 - btts),
         "total_goals_mean": float(total_mean),
@@ -318,6 +318,11 @@ def score_grid_features(lambda1: float, lambda2: float, max_goals: int = 10, sco
         "goal_mean_balance": float(home_mean - away_mean),
         "goal_variance_balance": float(home_var - away_var),
     })
+    for line in TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        over_prob = float(sum(prob for goals, prob in total_distribution.items() if goals > line))
+        features[f"prob_over{suffix}"] = over_prob
+        features[f"prob_under{suffix}"] = float(1.0 - over_prob)
     return features
 
 
@@ -419,6 +424,10 @@ def distribution_moments(distribution: Dict[int, float]) -> Tuple[float, float, 
     skew = sum(((float(value) - mean) ** 3) * float(prob) for value, prob in distribution.items()) / total / (std ** 3)
     kurtosis = sum(((float(value) - mean) ** 4) * float(prob) for value, prob in distribution.items()) / total / (variance ** 2)
     return float(mean), float(variance), float(skew), float(kurtosis)
+
+
+def total_line_suffix(line: float) -> str:
+    return str(line).replace(".", "")
 
 
 def _update_elo(ratings: Dict[str, float], team1: str, team2: str, g1: int, g2: int, k_factor: float = 28.0) -> None:
