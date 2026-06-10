@@ -79,17 +79,21 @@ class WorldCupTrainingError(RuntimeError):
 
 
 def emit_training_progress(callback, stage: str, current: int, total: int, message: str, **extra) -> None:
-    if callback is None:
-        return
     total = max(int(total or 1), 1)
     current = min(max(int(current or 0), 0), total)
+    percent = int(round(current * 100 / total))
+    market = extra.get("market")
+    market_label = f" [{market}]" if market else ""
+    print(f"[mundial-training]{market_label} {message} - {stage} {current}/{total} ({percent}%)", flush=True)
+    if callback is None:
+        return
     callback({
         "stage": stage,
         "current": current,
         "total": total,
         "current_trial": current if stage == "tuning" else "",
         "total_trials": total if stage == "tuning" else "",
-        "percent": int(round(current * 100 / total)),
+        "percent": percent,
         "message": message,
         **extra,
     })

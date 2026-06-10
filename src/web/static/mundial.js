@@ -139,7 +139,6 @@ function setLoading() {
   document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("models-list").innerHTML = loadingHtml("Modelos pendientes");
   document.getElementById("simulation-summary").innerHTML = "";
-  renderWorldcupJobProgress("training");
   renderWorldcupJobProgress("simulation");
 }
 
@@ -1235,7 +1234,7 @@ function trackWorldcupJob(job, kind) {
   job.handled = false;
   state.jobs.set(job.job_id, job);
   setWorldcupJobBusy(kind, true);
-  renderWorldcupJobProgress(kind);
+  if (kind === "simulation") renderWorldcupJobProgress(kind);
   startWorldcupJobPolling();
 }
 
@@ -1262,14 +1261,14 @@ async function pollWorldcupJobs() {
         state.jobs.set(jobId, job);
       }
       if (!isTerminalJob(job)) hasActive = true;
-      renderWorldcupJobProgress(job.kind);
+      if (job.kind === "simulation") renderWorldcupJobProgress(job.kind);
     } catch (error) {
       previous.status = "failed";
       previous.error = error.message;
       previous.handled = true;
       state.jobs.set(jobId, previous);
       await handleWorldcupJobComplete(previous);
-      renderWorldcupJobProgress(previous.kind);
+      if (previous.kind === "simulation") renderWorldcupJobProgress(previous.kind);
     }
   }
   if (!hasActive && state.jobTimer) {
@@ -1301,7 +1300,8 @@ async function handleWorldcupJobComplete(job) {
 }
 
 function renderWorldcupJobProgress(kind) {
-  const target = document.getElementById(kind === "simulation" ? "worldcup-simulation-progress" : "worldcup-training-progress");
+  if (kind !== "simulation") return;
+  const target = document.getElementById("worldcup-simulation-progress");
   if (!target) return;
   const job = latestWorldcupJob(kind);
   if (!job) {

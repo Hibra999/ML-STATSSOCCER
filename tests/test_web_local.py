@@ -197,7 +197,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-use-player-features" in html_source
     assert "sim-use-ml-model" in html_source
     assert "training-train" in html_source
-    assert "worldcup-training-progress" in html_source
+    assert "worldcup-training-progress" not in html_source
     assert "worldcup-simulation-progress" in html_source
     assert "training-retrain-base" in html_source
     assert "training-retrain-players" in html_source
