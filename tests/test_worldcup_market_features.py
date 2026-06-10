@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+from src.worldcup import training
+from src.worldcup.market_provider import (
+    load_football_data_workbook,
+    market_feature_row,
+    no_vig_probabilities,
+    normalize_market_frame,
+    qualifier_feature_table,
+)
+from src.worldcup.model import WorldCupModel
+
+
+def test_football_data_parser_normalizes_worldcup_workbook(tmp_path):
+    workbook = tmp_path / "WorldCup2026.xlsx"
+    with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+        pd.DataFrame([
+            {
+                "Date": "2014-06-13",
+                "Home": "Mexico",
+                "Away": "Cameroon",
+                "HG": 1,
+                "AG": 0,
+                "H-Avg": 2.10,
+                "D-Avg": 3.20,
+                "A-Avg": 4.10,
+            },
+        ]).to_excel(writer, sheet_name="WorldCup2014", index=False)
+        pd.DataFrame([
+            {
+                "Date": "2025-06-07",
+                "Home": "Mexico",
+                "Away": "Canada",
+                "HG": 2,
+                "AG": 1,
+                "H_Avg": 1.80,
+                "D_Avg": 3.40,
+                "A_Avg": 4.50,
+                "HXG": 1.7,
+                "AXG": 0.9,
+                "HS": 13,
+                "AS": 8,
+                "HST": 5,
+                "AST": 3,
+            },
+        ]).to_excel(writer, sheet_name="WorldCup2026Qualifiers", index=False)
+
+    rows = load_football_data_workbook(workbook)
+
+    assert set(rows["market_sheet"]) == {"WorldCup2014", "WorldCup2026Qualifiers"}
+    mexico = rows[rows["market_sheet"] == "WorldCup2014"].iloc[0]
+    qualifier = rows[rows["market_sheet"] == "WorldCup2026Qualifiers"].iloc[0]
+    assert mexico["market_odds_home"] == pytest.approx(2.10)
+    assert mexico["market_odds_draw"] == pytest.approx(3.20)
+    assert mexico["market_odds_away"] == pytest.approx(4.10)
+    assert bool(qualifier["is_qualifier"]) is True
+    assert qualifier["home_xg"] == pytest.approx(1.7)
+    assert qualifier["away_shots_on_target"] == pytest.approx(3)
+
+
+def test_market_probability_features_remove_vig_and_compare_model():
+    implied, no_vig, vig = no_vig_probabilities({"home": 2.0, "draw": 3.5, "away": 4.0})
+    features = market_feature_row(
+        {
+            "market_odds_home": 2.0,
+            "market_odds_draw": 3.5,
+            "market_odds_away": 4.0,
+            "market_odds_over25": 1.9,
+            "market_odds_under25": 1.95,
+        },
+        model_probs={"H": 0.55, "D": 0.25, "A": 0.20},
+        model_totals={"over25": 0.52, "under25": 0.48},
+    )
+
+    assert implied["home"] == pytest.approx(0.5)
+    assert vig == pytest.approx((1 / 2.0) + (1 / 3.5) + (1 / 4.0) - 1.0)
+    assert sum(no_vig.values()) == pytest.approx(1.0)
+    assert features["market_has_1x2"] == 1.0
+    assert features["market_has_ou25"] == 1.0
+    assert features["market_prob_home"] > features["market_prob_away"]
+    assert features["market_logit_home"] != 0.0
+    assert features["model_vs_market_kl_1x2"] >= 0.0
+    assert features["model_vs_market_over25_abs"] == pytest.approx(abs(0.52 - features["market_prob_over25"]))
+
+
+def test_qualifier_features_exclude_future_matches_from_match_row():
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "Canada"])
+    rows = training.sanitize_match_rows(pd.DataFrame([
+        {
+            "Date": "2026-06-10",
+            "Home": "Mexico",
+            "Away": "Canada",
+            "Label": "H",
+            "HG": 1,
+            "AG": 0,
+            "OverUnder25": 0,
+            "Source": "fixture",
+        },
+    ]))
+    future_qualifiers = normalize_market_frame(pd.DataFrame([
+        {
+            "Date": "2026-06-11",
+            "Year": 2026,
+            "Home": "Mexico",
+            "Away": "Canada",
+            "HG": 4,
+            "AG": 0,
+            "is_qualifier": True,
+            "market_source": "football-data:qualifier",
+        },
+    ]))
+
+    x, _, _ = training.build_training_matrix(
+        rows,
+        base_model=model,
+        qualifier_rows=future_qualifiers,
+        team_features=pd.DataFrame(),
+        target="result",
+    )
+
+    assert x.iloc[0]["qualifier_context_available"] == 0.0
+    assert x.iloc[0].get("qualifier_matches_home", 0.0) == 0.0
+
+
+def test_match_feature_row_includes_market_dc_score_grid_shrinkage_history_h2h_and_context():
+    history = pd.DataFrame([
+        {"Date": "2010-06-11", "Team 1": "Mexico", "Team 2": "South Africa", "G1": 1, "G2": 1, "Round": "Group", "Group": "A"},
+        {"Date": "2014-06-13", "Team 1": "Mexico", "Team 2": "Cameroon", "G1": 1, "G2": 0, "Round": "Group", "Group": "A"},
+        {"Date": "2018-06-17", "Team 1": "Mexico", "Team 2": "Germany", "G1": 1, "G2": 0, "Round": "Group", "Group": "F"},
+        {"Date": "2022-11-22", "Team 1": "Mexico", "Team 2": "Poland", "G1": 0, "G2": 0, "Round": "Group", "Group": "C"},
+        {"Date": "2010-06-22", "Team 1": "South Africa", "Team 2": "France", "G1": 2, "G2": 1, "Round": "Group", "Group": "A"},
+        {"Date": "2010-06-11", "Team 1": "Mexico", "Team 2": "South Africa", "G1": 1, "G2": 1, "Round": "Group", "Group": "A"},
+    ])
+    model = WorldCupModel.from_history(history, teams=["Mexico", "South Africa", "Cameroon", "Germany", "Poland", "France"])
+    market_rows = normalize_market_frame(pd.DataFrame([
+        {
+            "Date": "2026-06-11",
+            "Year": 2026,
+            "Home": "Mexico",
+            "Away": "South Africa",
+            "market_odds_home": 1.85,
+            "market_odds_draw": 3.40,
+            "market_odds_away": 4.60,
+            "market_source": "manual",
+        },
+    ]))
+    qualifier_rows = normalize_market_frame(pd.DataFrame([
+        {
+            "Date": "2026-03-20",
+            "Year": 2026,
+            "Home": "Mexico",
+            "Away": "Canada",
+            "HG": 2,
+            "AG": 1,
+            "home_xg": 1.8,
+            "away_xg": 0.7,
+            "is_qualifier": True,
+            "market_source": "football-data:qualifier",
+        },
+    ]))
+    row = training.match_feature_row(
+        model,
+        pd.DataFrame(),
+        "Mexico",
+        "South Africa",
+        history_team_features=training.build_history_feature_table(history),
+        matchup_features=training.build_matchup_feature_table(history),
+        market_rows=market_rows,
+        qualifier_features=qualifier_feature_table(qualifier_rows, reference_date="2026-06-11", teams=["Mexico", "South Africa"]),
+        match_date="2026-06-11",
+        match_year=2026,
+        fixture_context={"Round": "Final", "Group": "", "FixtureId": 103, "Date": "2026-06-11", "Venue": "Mexico City"},
+        dc_rho=0.05,
+    )
+
+    assert row["market_has_1x2"] == 1.0
+    assert "prob_score_4_4" in row
+    assert "dc_prob_draw" in row
+    assert "rating_home_shrunk" in row
+    assert "model_entropy_1x2" in row
+    assert "history_all_goals_for_skew_home" in row
+    assert "history_all_trend_points_slope_home" in row
+    assert "h2h_recency_weighted_points" in row
+    assert row["stage_final"] == 1.0
+    assert row["qualifier_context_available"] == 1.0
+    assert row["qualifier_matches_home"] == pytest.approx(1.0)
+
+
+def test_match_feature_row_fallback_without_market_or_qualifiers_keeps_zero_flags():
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "Canada"])
+    row = training.match_feature_row(model, pd.DataFrame(), "Mexico", "Canada")
+
+    assert row["market_has_1x2"] == 0.0
+    assert row["market_has_ou25"] == 0.0
+    assert row["qualifier_context_available"] == 0.0
+    assert "prob_score_0_0" in row
+    assert "dc_prob_home_win" in row

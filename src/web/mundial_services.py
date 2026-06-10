@@ -840,6 +840,8 @@ def procedure() -> Dict[str, Any]:
         ],
         "sources": [
             "openfootball/worldcup.json",
+            "Football-Data WorldCup2026.xlsx para odds 1X2 historicas y clasificatorios",
+            "storage/worldcup/market/manual_odds.csv opcional para odds actuales/O-U 2.5",
             "Kaggle: harrachimustapha/fifa-world-cup-team-dataset",
             "FotMob JSON publico para autodeteccion/lineups cuando existan",
             "storage/worldcup/cache/*.json",

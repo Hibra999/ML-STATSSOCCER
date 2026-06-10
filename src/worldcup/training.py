@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import pickle
 import re
@@ -15,8 +16,20 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
-from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
-from src.worldcup.model import HOST_TEAMS, WorldCupModel
+from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, group_letter, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
+from src.worldcup.market_provider import (
+    load_market_data,
+    market_feature_row as build_market_feature_row,
+    market_for_match,
+    qualifier_feature_table,
+)
+from src.worldcup.model import (
+    HOST_TEAMS,
+    WorldCupModel,
+    dixon_coles_probabilities,
+    estimate_dixon_coles_rho,
+    score_grid_features,
+)
 
 
 KAGGLE_DATASET_SLUG = "harrachimustapha/fifa-world-cup-team-dataset"
@@ -233,6 +246,10 @@ def dataset_status() -> Dict[str, Any]:
         "split_policy": prepared.get("split_policy", ""),
         "prepared_over_under_ready": bool(prepared.get("over_under_ready", False)),
         "prepared_warnings": prepared.get("warnings", []),
+        "market_rows": int(prepared.get("market_rows", 0)),
+        "qualifier_feature_rows": int(prepared.get("qualifier_feature_rows", 0)),
+        "market_status": prepared.get("market_status", {}),
+        "market_warnings": prepared.get("market_warnings", []),
         "train_rows": train_rows,
         "test_rows": test_rows,
         "eval_rows": test_rows if test_rows else planned_holdout_rows(train_rows),
@@ -311,6 +328,9 @@ def train_single_hybrid_model(
     model_teams = sorted(set(group_teams) | set(teams_from_rows(train_rows)) | set(teams_from_rows(test_rows)))
     history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
     feature_store = normalized["team_features"]
+    market_rows = normalized.get("market_data", pd.DataFrame())
+    qualifier_rows = normalized.get("qualifier_matches", pd.DataFrame())
+    dc_rho = float(normalized.get("dc_rho", 0.0) or 0.0)
     fixture_feature_rows = read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
     target_warning = ""
     eval_strategy = "unavailable"
@@ -330,7 +350,10 @@ def train_single_hybrid_model(
             history_df=history_df,
             teams=model_teams,
             team_features=feature_store,
+            market_rows=market_rows,
+            qualifier_rows=qualifier_rows,
             fixture_feature_rows=fixture_feature_rows,
+            dc_rho=dc_rho,
             history_weight=float(payload.get("history_weight", 1.0) or 1.0),
             recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
@@ -342,7 +365,10 @@ def train_single_hybrid_model(
             history_df=history_df,
             teams=model_teams,
             team_features=feature_store,
+            market_rows=market_rows,
+            qualifier_rows=qualifier_rows,
             fixture_feature_rows=fixture_feature_rows,
+            dc_rho=dc_rho,
             feature_columns=feature_columns,
             frozen_years=years_from_rows(split_eval_rows),
             history_weight=float(payload.get("history_weight", 1.0) or 1.0),
@@ -359,7 +385,10 @@ def train_single_hybrid_model(
             history_df=history_df,
             teams=model_teams,
             team_features=feature_store,
+            market_rows=market_rows,
+            qualifier_rows=qualifier_rows,
             fixture_feature_rows=fixture_feature_rows,
+            dc_rho=dc_rho,
             history_weight=float(payload.get("history_weight", 1.0) or 1.0),
             recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
@@ -371,7 +400,10 @@ def train_single_hybrid_model(
             history_df=history_df,
             teams=model_teams,
             team_features=feature_store,
+            market_rows=market_rows,
+            qualifier_rows=qualifier_rows,
             fixture_feature_rows=fixture_feature_rows,
+            dc_rho=dc_rho,
             feature_columns=feature_columns,
             frozen_years=years_from_rows(test_rows),
             history_weight=float(payload.get("history_weight", 1.0) or 1.0),
@@ -425,6 +457,13 @@ def train_single_hybrid_model(
         "team_features": feature_store.to_dict(orient="records"),
         "history_team_features": build_history_feature_table(history_df).to_dict(orient="records"),
         "matchup_features": build_matchup_feature_table(history_df).to_dict(orient="records"),
+        "market_data": market_rows.to_dict(orient="records") if isinstance(market_rows, pd.DataFrame) else [],
+        "qualifier_matches": qualifier_rows.to_dict(orient="records") if isinstance(qualifier_rows, pd.DataFrame) else [],
+        "market_rows": int(normalized.get("market_rows", 0)),
+        "qualifier_feature_rows": int(normalized.get("qualifier_feature_rows", 0)),
+        "market_status": normalized.get("market_status", {}),
+        "market_warnings": normalized.get("market_warnings", []),
+        "dc_rho": dc_rho,
         "kaggle_files": [str(path) for path in files],
         "history_source": normalized.get("history_source", history_source),
         "metrics": metrics,
@@ -447,7 +486,7 @@ def train_single_hybrid_model(
         "tuning_trace": tuning_trace(tuned),
         "etl_steps": etl,
         "hardware": hardware,
-        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *fit_result.get("warnings", [])] if warning]),
+        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *fit_result.get("warnings", [])] if warning]),
         "top_features": top_feature_importances(clf, feature_columns),
         "walk_forward_mode": walk_forward_mode,
         "walk_forward_summary": walk_forward_summary,
@@ -570,6 +609,13 @@ def train_dual_market_model(
         "team_features": result_record.get("team_features", []),
         "history_team_features": result_record.get("history_team_features", []),
         "matchup_features": result_record.get("matchup_features", []),
+        "market_data": result_record.get("market_data", []),
+        "qualifier_matches": result_record.get("qualifier_matches", []),
+        "market_rows": int(result_record.get("market_rows", 0)),
+        "qualifier_feature_rows": int(result_record.get("qualifier_feature_rows", 0)),
+        "market_status": result_record.get("market_status", {}),
+        "market_warnings": result_record.get("market_warnings", []),
+        "dc_rho": float(result_record.get("dc_rho", 0.0) or 0.0),
         "kaggle_files": [str(path) for path in files],
         "history_source": result_record.get("history_source", over_record.get("history_source", "")),
         "metrics": result_record.get("metrics", {}),
@@ -775,6 +821,9 @@ def build_prepared_dataset(
         refresh_history: bool = False,
 ) -> Dict[str, Any]:
     history_df, history_source = load_historical_matches(refresh=bool(refresh_history))
+    market_bundle = load_market_data(force_download=bool(refresh_history), allow_download=bool(refresh_history), use_scraper=False)
+    market_data = market_bundle.get("matches", pd.DataFrame()).copy()
+    qualifier_matches = market_bundle.get("qualifiers", pd.DataFrame()).copy()
     history_rows = history_match_rows(history_df, source=history_source)
     warnings: List[str] = []
     label_source = "kaggle_match_result"
@@ -821,6 +870,7 @@ def build_prepared_dataset(
 
     prepared_at = datetime.now(timezone.utc).isoformat()
     preview_source = train_df if not train_df.empty else test_df if not test_df.empty else team_features
+    dc_rho = estimate_dixon_coles_rho(history_df)
     return {
         "prepared_at": prepared_at,
         "source_files": [str(path) for path in files],
@@ -832,6 +882,19 @@ def build_prepared_dataset(
         "team_test": pd.DataFrame(),
         "team_prediction": normalized["team_prediction"].copy(),
         "team_features": team_features,
+        "market_data": market_data,
+        "qualifier_matches": qualifier_matches,
+        "market_rows": int(market_bundle.get("market_rows", 0)),
+        "qualifier_feature_rows": int(market_bundle.get("qualifier_rows", 0)),
+        "market_status": {
+            "status": market_bundle.get("status", "missing"),
+            "has_1x2": bool(market_bundle.get("has_1x2", False)),
+            "has_ou25": bool(market_bundle.get("has_ou25", False)),
+            "sources": market_bundle.get("sources", []),
+            "loaded_at": market_bundle.get("loaded_at", ""),
+        },
+        "market_warnings": market_bundle.get("warnings", []),
+        "dc_rho": float(dc_rho),
         "target_column": "Label + OverUnder25",
         "team_columns": normalized["team_columns"],
         "trainable": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
@@ -1003,6 +1066,10 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "final_test_year": str(dataset.get("final_test_year") or ""),
         "split_policy": str(dataset.get("split_policy") or ""),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
+        "market_rows": int(dataset.get("market_rows", 0)),
+        "qualifier_feature_rows": int(dataset.get("qualifier_feature_rows", 0)),
+        "market_status": dataset.get("market_status", {}),
+        "market_warnings": dataset.get("market_warnings", []),
         "warnings": dataset.get("warnings", []),
     }
 
@@ -1021,6 +1088,11 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "test_rows": labeled_test_row_count(dataset),
         "prediction_rows": int(dataset.get("team_prediction", pd.DataFrame()).shape[0]),
         "team_feature_rows": int(dataset.get("team_features", pd.DataFrame()).shape[0]),
+        "market_rows": int(dataset.get("market_rows", 0)),
+        "qualifier_feature_rows": int(dataset.get("qualifier_feature_rows", 0)),
+        "market_status": dataset.get("market_status", {}),
+        "market_warnings": dataset.get("market_warnings", []),
+        "dc_rho": float(dataset.get("dc_rho", 0.0) or 0.0),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
         "result_ready": bool(dataset.get("result_ready", False)),
         "preview": dataset.get("preview", {"columns": [], "rows": [], "total": 0}),
@@ -1231,12 +1303,15 @@ def build_training_matrix(
         team_features: Optional[pd.DataFrame] = None,
         history_team_features: Optional[pd.DataFrame] = None,
         matchup_features: Optional[pd.DataFrame] = None,
+        market_rows: Optional[pd.DataFrame] = None,
+        qualifier_rows: Optional[pd.DataFrame] = None,
         fixture_feature_rows: Optional[pd.DataFrame] = None,
         feature_columns: Optional[List[str]] = None,
         target: str = "result",
         history_df: Optional[pd.DataFrame] = None,
         teams: Optional[Iterable[str]] = None,
         frozen_years: Optional[set[int]] = None,
+        dc_rho: float = 0.0,
         history_weight: float = 1.0,
         recency_weight: float = 0.35,
         host_advantage: float = 45.0,
@@ -1247,20 +1322,24 @@ def build_training_matrix(
         working = working[working["OverUnder25"].notna()] if "OverUnder25" in working.columns else working.iloc[0:0]
     if team_features is None:
         team_features = pd.DataFrame()
+    if market_rows is None:
+        market_rows = pd.DataFrame()
+    if qualifier_rows is None:
+        qualifier_rows = pd.DataFrame()
     records = []
     static_model = base_model
     if static_model is None and history_df is None:
         static_model = WorldCupModel.from_history(pd.DataFrame(), teams=teams or teams_from_rows(working))
-    snapshot_cache: Dict[Tuple[str, str], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame]] = {}
+    snapshot_cache: Dict[Tuple[str, str], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     for _, row in working.iterrows():
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
+        reference_date = reference_date_for_row(row_date, row_year)
         if history_df is not None:
             frozen = row_year in (frozen_years or set())
-            cache_key = ("year", str(row_year or reference_date_for_row(row_date, row_year)))
+            cache_key = ("date", reference_date)
             if cache_key not in snapshot_cache:
                 history_cutoff = history_before_row(history_df, row_date=row_date, row_year=row_year, freeze_year=frozen)
-                reference_date = reference_date_for_row(row_date, row_year)
                 snapshot_cache[cache_key] = (
                     WorldCupModel.from_history(
                         history_cutoff,
@@ -1272,12 +1351,14 @@ def build_training_matrix(
                     ),
                     build_history_feature_table(history_cutoff, reference_date=reference_date),
                     build_matchup_feature_table(history_cutoff, reference_date=reference_date),
+                    qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=teams or teams_from_rows(working)),
                 )
-            row_model, row_history_features, row_matchup_features = snapshot_cache[cache_key]
+            row_model, row_history_features, row_matchup_features, row_qualifier_features = snapshot_cache[cache_key]
         else:
             row_model = static_model
             row_history_features = history_team_features
             row_matchup_features = matchup_features
+            row_qualifier_features = qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=teams or teams_from_rows(working))
         records.append(
             match_feature_row(
                 row_model,
@@ -1286,8 +1367,14 @@ def build_training_matrix(
                 row["Away"],
                 history_team_features=row_history_features,
                 matchup_features=row_matchup_features,
+                market_rows=market_rows,
+                qualifier_features=row_qualifier_features,
                 fixture_feature_rows=fixture_feature_rows,
                 fixture_id=row.get("FixtureId"),
+                match_date=row_date,
+                match_year=row_year,
+                fixture_context=row.to_dict(),
+                dc_rho=dc_rho,
             )
         )
     x = pd.DataFrame(records).fillna(0.0)
@@ -1309,12 +1396,20 @@ def match_feature_row(
         away: str,
         history_team_features: Optional[pd.DataFrame] = None,
         matchup_features: Optional[pd.DataFrame] = None,
+        market_rows: Optional[pd.DataFrame] = None,
+        qualifier_features: Optional[pd.DataFrame] = None,
         fixture_feature_rows: Optional[pd.DataFrame] = None,
         fixture_id: Optional[Any] = None,
+        match_date: Optional[Any] = None,
+        match_year: Optional[int] = None,
+        fixture_context: Optional[Dict[str, Any]] = None,
+        dc_rho: float = 0.0,
 ) -> Dict[str, float]:
     p_home = base_model.profile(home)
     p_away = base_model.profile(away)
     poisson = base_model.match_probabilities(home, away)
+    lambda_home = float(poisson.get("lambda1", 0.0))
+    lambda_away = float(poisson.get("lambda2", 0.0))
     row = {
         "rating_home": p_home.rating,
         "rating_away": p_away.rating,
@@ -1347,6 +1442,24 @@ def match_feature_row(
         "rating_attack_interaction": float((p_home.rating - p_away.rating) * (p_home.attack - p_away.attack)),
         "rating_defense_interaction": float((p_home.rating - p_away.rating) * (p_home.defense - p_away.defense)),
     }
+    row.update(shrinkage_feature_row(p_home, p_away))
+    row.update(score_grid_features(lambda_home, lambda_away, max_goals=base_model.max_goals, score_cap=4))
+    row.update(dixon_coles_probabilities(lambda_home, lambda_away, rho=dc_rho, max_goals=base_model.max_goals))
+    row.update(model_calibration_features(poisson))
+    market_match = market_for_match(
+        market_rows if market_rows is not None else pd.DataFrame(),
+        home,
+        away,
+        match_date=match_date,
+        year=match_year,
+    )
+    row.update(build_market_feature_row(
+        market_match,
+        model_probs={"H": poisson.get("home", 0.0), "D": poisson.get("draw", 0.0), "A": poisson.get("away", 0.0)},
+        model_totals={"over25": poisson.get("over25", 0.0), "under25": poisson.get("under25", 0.0)},
+    ))
+    merge_qualifier_feature_block(row, qualifier_features if qualifier_features is not None else pd.DataFrame(), home, away)
+    row.update(fixture_context_features(fixture_context or {}, home=home, away=away, fixture_id=fixture_id, match_date=match_date, match_year=match_year))
     merge_team_feature_block(row, team_features, home, away, prefix="kaggle", limit=24)
     merge_team_feature_block(
         row,
@@ -1365,6 +1478,160 @@ def match_feature_row(
         prefix="xi",
     )
     return row
+
+
+def shrinkage_feature_row(p_home, p_away, prior_rating: float = 1500.0, prior_strength: float = 1.0, prior_matches: float = 6.0) -> Dict[str, float]:
+    home_weight = float(p_home.matches / (p_home.matches + prior_matches)) if p_home.matches > 0 else 0.0
+    away_weight = float(p_away.matches / (p_away.matches + prior_matches)) if p_away.matches > 0 else 0.0
+    rating_home = prior_rating + (float(p_home.rating) - prior_rating) * home_weight
+    rating_away = prior_rating + (float(p_away.rating) - prior_rating) * away_weight
+    attack_home = prior_strength + (float(p_home.attack) - prior_strength) * home_weight
+    attack_away = prior_strength + (float(p_away.attack) - prior_strength) * away_weight
+    defense_home = prior_strength + (float(p_home.defense) - prior_strength) * home_weight
+    defense_away = prior_strength + (float(p_away.defense) - prior_strength) * away_weight
+    return {
+        "shrinkage_weight_home": home_weight,
+        "shrinkage_weight_away": away_weight,
+        "rating_home_shrunk": rating_home,
+        "rating_away_shrunk": rating_away,
+        "rating_diff_shrunk": rating_home - rating_away,
+        "attack_home_shrunk": attack_home,
+        "attack_away_shrunk": attack_away,
+        "attack_diff_shrunk": attack_home - attack_away,
+        "defense_home_shrunk": defense_home,
+        "defense_away_shrunk": defense_away,
+        "defense_diff_shrunk": defense_home - defense_away,
+    }
+
+
+def model_calibration_features(poisson: Dict[str, float]) -> Dict[str, float]:
+    result_probs = normalize_probability_vector([
+        float(poisson.get("home", 0.0)),
+        float(poisson.get("draw", 0.0)),
+        float(poisson.get("away", 0.0)),
+    ])
+    total_probs = normalize_probability_vector([
+        float(poisson.get("over25", 0.0)),
+        float(poisson.get("under25", 0.0)),
+    ])
+    result_sorted = sorted(result_probs, reverse=True)
+    total_sorted = sorted(total_probs, reverse=True)
+    return {
+        "model_entropy_1x2": probability_entropy(result_probs),
+        "model_entropy_1x2_norm": probability_entropy(result_probs) / math.log(3.0),
+        "model_entropy_ou25": probability_entropy(total_probs),
+        "model_entropy_ou25_norm": probability_entropy(total_probs) / math.log(2.0),
+        "model_max_prob_1x2": result_sorted[0],
+        "model_second_prob_1x2": result_sorted[1],
+        "model_gap_1x2": result_sorted[0] - result_sorted[1],
+        "model_max_prob_ou25": total_sorted[0],
+        "model_gap_ou25": total_sorted[0] - total_sorted[1],
+        "model_sharpness_1x2": float(sum((prob - (1.0 / 3.0)) ** 2 for prob in result_probs)),
+        "model_sharpness_ou25": float(sum((prob - 0.5) ** 2 for prob in total_probs)),
+        "model_expected_brier_vs_uniform_1x2": float(sum((prob - (1.0 / 3.0)) ** 2 for prob in result_probs)),
+        "model_expected_brier_vs_uniform_ou25": float(sum((prob - 0.5) ** 2 for prob in total_probs)),
+    }
+
+
+def normalize_probability_vector(values: Iterable[float]) -> List[float]:
+    clean = [max(float(value), 0.0) for value in values]
+    total = sum(clean)
+    if total <= 0.0:
+        return [1.0 / max(len(clean), 1)] * len(clean)
+    return [value / total for value in clean]
+
+
+def probability_entropy(values: Iterable[float]) -> float:
+    return float(-sum(max(float(value), 1e-12) * math.log(max(float(value), 1e-12)) for value in values))
+
+
+def merge_qualifier_feature_block(
+        row: Dict[str, float],
+        features: pd.DataFrame,
+        home: str,
+        away: str,
+) -> None:
+    row["qualifier_context_available"] = 0.0
+    if features.empty or "Team" not in features.columns:
+        return
+    home_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(home)]
+    away_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(away)]
+    if not home_features.empty or not away_features.empty:
+        row["qualifier_context_available"] = 1.0
+    numeric_cols = [column for column in features.columns if column != "Team" and pd.api.types.is_numeric_dtype(features[column])]
+    for column in numeric_cols:
+        home_value = float(home_features[column].iloc[0]) if not home_features.empty else 0.0
+        away_value = float(away_features[column].iloc[0]) if not away_features.empty else 0.0
+        safe = normalize_column(column)
+        row[f"{safe}_home"] = home_value
+        row[f"{safe}_away"] = away_value
+        row[f"{safe}_diff"] = home_value - away_value
+
+
+def fixture_context_features(
+        context: Dict[str, Any],
+        home: str,
+        away: str,
+        fixture_id: Optional[Any] = None,
+        match_date: Optional[Any] = None,
+        match_year: Optional[int] = None,
+) -> Dict[str, float]:
+    round_name = str(
+        context.get("Round", context.get("Ronda", context.get("round", context.get("stage", ""))))
+        or ""
+    )
+    group_name = str(context.get("Group", context.get("Grupo", context.get("group", ""))) or "")
+    venue = str(context.get("Venue", context.get("Sede", context.get("ground", ""))) or "")
+    lowered_round = normalize_team_key(round_name)
+    matchday_match = re.search(r"matchday\s+(\d+)", lowered_round)
+    fixture_number = numeric_or_zero(context.get("FixtureId", context.get("No.", fixture_id)))
+    date_ts = pd.to_datetime(match_date if match_date is not None else context.get("Date", context.get("Fecha", pd.NaT)), errors="coerce")
+    year_value = float(match_year or context.get("Year", 0) or (date_ts.year if pd.notna(date_ts) else 0) or 0)
+    is_group = bool(group_name) or "group" in lowered_round or "matchday" in lowered_round
+    is_final = "final" in lowered_round and "semi" not in lowered_round and "quarter" not in lowered_round
+    is_semi = "semi" in lowered_round
+    is_quarter = "quarter" in lowered_round or "cuarto" in lowered_round
+    is_round16 = "round of 16" in lowered_round or "last 16" in lowered_round or "octavo" in lowered_round
+    is_round32 = "round of 32" in lowered_round
+    is_knockout = any([is_final, is_semi, is_quarter, is_round16, is_round32]) or ("knockout" in lowered_round)
+    venue_key = normalize_team_key(venue)
+    home_key = normalize_team_key(home)
+    away_key = normalize_team_key(away)
+    return {
+        "fixture_context_available": 1.0 if context else 0.0,
+        "fixture_number": fixture_number,
+        "fixture_year": year_value,
+        "fixture_month": float(date_ts.month) if pd.notna(date_ts) else 0.0,
+        "fixture_day": float(date_ts.day) if pd.notna(date_ts) else 0.0,
+        "matchday_number": float(matchday_match.group(1)) if matchday_match else 0.0,
+        "stage_group": 1.0 if is_group else 0.0,
+        "stage_knockout": 1.0 if is_knockout and not is_group else 0.0,
+        "stage_round_of_32": 1.0 if is_round32 else 0.0,
+        "stage_round_of_16": 1.0 if is_round16 else 0.0,
+        "stage_quarter_final": 1.0 if is_quarter else 0.0,
+        "stage_semi_final": 1.0 if is_semi else 0.0,
+        "stage_final": 1.0 if is_final else 0.0,
+        "group_letter_ord": group_letter_index(group_name),
+        "venue_mentions_home": 1.0 if home_key and home_key in venue_key else 0.0,
+        "venue_mentions_away": 1.0 if away_key and away_key in venue_key else 0.0,
+        "home_host_fixture": 1.0 if home in HOST_TEAMS else 0.0,
+        "away_host_fixture": 1.0 if away in HOST_TEAMS else 0.0,
+    }
+
+
+def numeric_or_zero(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return float(number) if np.isfinite(number) else 0.0
+
+
+def group_letter_index(group_name: Any) -> float:
+    letter = str(group_letter(str(group_name or "")) or "").upper()[:1]
+    if not letter or not ("A" <= letter <= "Z"):
+        return 0.0
+    return float(ord(letter) - ord("A") + 1)
 
 
 def merge_team_feature_block(
@@ -1494,6 +1761,9 @@ def build_history_feature_table(history_df: pd.DataFrame, reference_date: str = 
         base["form_reversion_goal_diff"] = base.get("all_goal_diff_avg", 0.0) - base.get("last_3_goal_diff_avg", 0.0)
         base["weighted_points_short_vs_long"] = base.get("last_3_weighted_points", 0.0) - base.get("last_10_weighted_points", 0.0)
         base["scoring_trend_3_vs_10"] = base.get("last_3_scoring_rate", 0.0) - base.get("last_10_scoring_rate", 0.0)
+        base.update(linear_trend_features(team_df, prefix="all_trend"))
+        base.update(linear_trend_features(team_df.tail(10), prefix="last_10_trend"))
+        base.update(linear_trend_features(team_df.tail(5), prefix="last_5_trend"))
         rows.append(base)
     return pd.DataFrame(rows).fillna(0.0)
 
@@ -1561,9 +1831,23 @@ def window_summary_features(team_df: pd.DataFrame, window: int, prefix: str) -> 
             f"{prefix}_clean_sheet_rate": 0.0,
             f"{prefix}_scoring_rate": 0.0,
             f"{prefix}_weighted_points": 0.0,
+            f"{prefix}_goals_for_skew": 0.0,
+            f"{prefix}_goals_for_kurtosis": 0.0,
+            f"{prefix}_goals_against_skew": 0.0,
+            f"{prefix}_goals_against_kurtosis": 0.0,
+            f"{prefix}_goal_diff_skew": 0.0,
+            f"{prefix}_goal_diff_kurtosis": 0.0,
+            f"{prefix}_points_skew": 0.0,
+            f"{prefix}_points_kurtosis": 0.0,
+            f"{prefix}_high_scoring_rate": 0.0,
+            f"{prefix}_low_scoring_rate": 0.0,
+            f"{prefix}_blowout_rate": 0.0,
+            f"{prefix}_big_win_rate": 0.0,
+            f"{prefix}_heavy_loss_rate": 0.0,
         }
     recent = team_df.tail(int(window)).copy()
     weights = np.linspace(1.0, 1.0 + max(len(recent) - 1, 0) * 0.12, num=len(recent)) if len(recent) else np.array([1.0])
+    total_goals = recent["GF"] + recent["GA"]
     return {
         f"{prefix}_points_sum": float(recent["Points"].sum()),
         f"{prefix}_points_ppg": float(recent["Points"].mean()),
@@ -1584,7 +1868,64 @@ def window_summary_features(team_df: pd.DataFrame, window: int, prefix: str) -> 
         f"{prefix}_clean_sheet_rate": float(recent["CleanSheet"].mean()),
         f"{prefix}_scoring_rate": float(recent["Scored"].mean()),
         f"{prefix}_weighted_points": float(np.average(recent["Points"], weights=weights)),
+        f"{prefix}_goals_for_skew": series_skew(recent["GF"]),
+        f"{prefix}_goals_for_kurtosis": series_kurtosis(recent["GF"]),
+        f"{prefix}_goals_against_skew": series_skew(recent["GA"]),
+        f"{prefix}_goals_against_kurtosis": series_kurtosis(recent["GA"]),
+        f"{prefix}_goal_diff_skew": series_skew(recent["GoalDiff"]),
+        f"{prefix}_goal_diff_kurtosis": series_kurtosis(recent["GoalDiff"]),
+        f"{prefix}_points_skew": series_skew(recent["Points"]),
+        f"{prefix}_points_kurtosis": series_kurtosis(recent["Points"]),
+        f"{prefix}_high_scoring_rate": float((total_goals >= 4.0).mean()),
+        f"{prefix}_low_scoring_rate": float((total_goals <= 1.0).mean()),
+        f"{prefix}_blowout_rate": float((recent["GoalDiff"].abs() >= 3.0).mean()),
+        f"{prefix}_big_win_rate": float((recent["GoalDiff"] >= 3.0).mean()),
+        f"{prefix}_heavy_loss_rate": float((recent["GoalDiff"] <= -3.0).mean()),
     }
+
+
+def linear_trend_features(team_df: pd.DataFrame, prefix: str) -> Dict[str, float]:
+    output: Dict[str, float] = {}
+    for column, safe in (("Points", "points"), ("GF", "goals_for"), ("GA", "goals_against"), ("GoalDiff", "goal_diff")):
+        slope, r2 = linear_slope_r2(team_df[column] if column in team_df.columns else pd.Series(dtype=float))
+        output[f"{prefix}_{safe}_slope"] = slope
+        output[f"{prefix}_{safe}_r2"] = r2
+    return output
+
+
+def linear_slope_r2(values: pd.Series) -> Tuple[float, float]:
+    series = pd.to_numeric(values, errors="coerce").dropna().astype(float).reset_index(drop=True)
+    if series.shape[0] < 2:
+        return 0.0, 0.0
+    x = np.arange(series.shape[0], dtype=float)
+    y = series.to_numpy(dtype=float)
+    slope, intercept = np.polyfit(x, y, 1)
+    predicted = slope * x + intercept
+    ss_res = float(np.sum((y - predicted) ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else 0.0
+    return float(slope), float(max(min(r2, 1.0), 0.0))
+
+
+def series_skew(values: pd.Series) -> float:
+    series = pd.to_numeric(values, errors="coerce").dropna().astype(float)
+    return float(series.skew()) if series.shape[0] >= 3 and np.isfinite(series.skew()) else 0.0
+
+
+def series_kurtosis(values: pd.Series) -> float:
+    series = pd.to_numeric(values, errors="coerce").dropna().astype(float)
+    return float(series.kurt()) if series.shape[0] >= 4 and np.isfinite(series.kurt()) else 0.0
+
+
+def ema_value(values: Iterable[float], alpha: float = 0.5) -> float:
+    iterator = [float(value) for value in values]
+    if not iterator:
+        return 0.0
+    ema = iterator[0]
+    alpha = min(max(float(alpha), 0.0), 1.0)
+    for value in iterator[1:]:
+        ema = alpha * value + (1.0 - alpha) * ema
+    return float(ema)
 
 
 def build_matchup_feature_table(history_df: pd.DataFrame, reference_date: str = HISTORY_REFERENCE_DATE) -> pd.DataFrame:
@@ -1614,6 +1955,16 @@ def build_matchup_feature_table(history_df: pd.DataFrame, reference_date: str = 
         total = float(len(matches))
         home_goals = [item[1] for item in ordered_matches]
         away_goals = [item[2] for item in ordered_matches]
+        goal_diffs = [g1 - g2 for _, g1, g2 in ordered_matches]
+        points = [3.0 if g1 > g2 else 1.0 if g1 == g2 else 0.0 for _, g1, g2 in ordered_matches]
+        total_goals = [g1 + g2 for _, g1, g2 in ordered_matches]
+        recency_weights = np.linspace(1.0, 1.0 + max(len(ordered_matches) - 1, 0) * 0.2, num=len(ordered_matches)) if ordered_matches else np.array([1.0])
+        result_counts = [
+            sum(1 for _, g1, g2 in ordered_matches if g1 > g2),
+            sum(1 for _, g1, g2 in ordered_matches if g1 == g2),
+            sum(1 for _, g1, g2 in ordered_matches if g2 > g1),
+        ]
+        goal_total_counts = pd.Series(total_goals).value_counts().to_dict() if total_goals else {}
         last_date = ordered_matches[-1][0] if ordered_matches else None
         rows.append({
             "HomeKey": home_key,
@@ -1624,6 +1975,15 @@ def build_matchup_feature_table(history_df: pd.DataFrame, reference_date: str = 
             "away_win_rate": float(sum(1 for _, g1, g2 in ordered_matches if g2 > g1) / max(total, 1.0)),
             "goal_diff_avg": float(np.mean([g1 - g2 for _, g1, g2 in ordered_matches])),
             "goal_diff_std": float(np.std([g1 - g2 for _, g1, g2 in ordered_matches], ddof=0)),
+            "recency_weighted_points": float(np.average(points, weights=recency_weights)) if points else 0.0,
+            "recency_weighted_goal_diff": float(np.average(goal_diffs, weights=recency_weights)) if goal_diffs else 0.0,
+            "ema_points": float(ema_value(points, alpha=0.55)),
+            "ema_goal_diff": float(ema_value(goal_diffs, alpha=0.55)),
+            "result_entropy_1x2": probability_entropy(normalize_probability_vector(result_counts)),
+            "result_entropy_1x2_norm": probability_entropy(normalize_probability_vector(result_counts)) / math.log(3.0),
+            "goals_entropy": probability_entropy(normalize_probability_vector(goal_total_counts.values())),
+            "high_scoring_rate": float(np.mean([goals >= 4.0 for goals in total_goals])) if total_goals else 0.0,
+            "low_scoring_rate": float(np.mean([goals <= 1.0 for goals in total_goals])) if total_goals else 0.0,
             "goals_for_avg": float(np.mean(home_goals)),
             "goals_against_avg": float(np.mean(away_goals)),
             "over25_rate": float(np.mean([(g1 + g2) >= 3.0 for _, g1, g2 in ordered_matches])),
@@ -2497,6 +2857,13 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
     team_features = pd.DataFrame(record.get("team_features", []))
     history_team_features = pd.DataFrame(record.get("history_team_features", []))
     matchup_features = pd.DataFrame(record.get("matchup_features", []))
+    market_rows = pd.DataFrame(record.get("market_data", []))
+    qualifier_rows = pd.DataFrame(record.get("qualifier_matches", []))
+    qualifier_features = qualifier_feature_table(
+        qualifier_rows,
+        reference_date=HISTORY_REFERENCE_DATE,
+        teams=[home, away],
+    )
     fixture_feature_rows = read_fixture_feature_rows()
     x = pd.DataFrame([
         match_feature_row(
@@ -2506,8 +2873,14 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
             away,
             history_team_features=history_team_features,
             matchup_features=matchup_features,
+            market_rows=market_rows,
+            qualifier_features=qualifier_features,
             fixture_feature_rows=fixture_feature_rows,
             fixture_id=fixture_id,
+            match_date=None,
+            match_year=2026,
+            fixture_context={"FixtureId": fixture_id, "Year": 2026},
+            dc_rho=float(record.get("dc_rho", 0.0) or 0.0),
         )
     ])
     feature_columns = record.get("feature_columns", BASE_FEATURE_COLUMNS)
@@ -2789,6 +3162,9 @@ def etl_steps(
     prepared_stale = bool(prepared.get("stale"))
     prepared_label_source = str(prepared.get("label_source") or "")
     prepared_detail = "Artifact listo para entrenamiento." if prepared_ready and not prepared_stale else "Artifact desactualizado; vuelve a preparar ETL." if prepared_stale else "Aún no se ha preparado el artifact ETL."
+    market_status = prepared.get("market_status", {}) if prepared else {}
+    market_rows = int(prepared.get("market_rows", normalized.get("market_rows", 0)) or 0)
+    qualifier_rows = int(prepared.get("qualifier_feature_rows", normalized.get("qualifier_feature_rows", 0)) or 0)
     return [
         {
             "name": "Descarga Kaggle",
@@ -2825,6 +3201,18 @@ def etl_steps(
             "status": "ok" if has_over_under_target(normalized["train"]) else "pending",
             "count": int(pd.to_numeric(normalized["train"].get("OverUnder25"), errors="coerce").dropna().shape[0]) if "OverUnder25" in normalized["train"].columns else 0,
             "detail": "Solo usa goles reales observados; no se generan etiquetas artificiales.",
+        },
+        {
+            "name": "Mercado 1X2 externo",
+            "status": "ok" if market_status.get("has_1x2") else "info",
+            "count": market_rows,
+            "detail": "Odds Football-Data/manual normalizadas; faltantes se dejan en 0 con market_has_1x2=0.",
+        },
+        {
+            "name": "Clasificatorios features",
+            "status": "ok" if qualifier_rows else "info",
+            "count": qualifier_rows,
+            "detail": "Clasificatorios 2026 usados solo como contexto temporal, nunca como labels por defecto.",
         },
         {
             "name": "Walk-forward XI",
@@ -2944,6 +3332,11 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "top_features": record.get("top_features", []),
         "kaggle_files": record.get("kaggle_files", []),
         "history_source": record.get("history_source", ""),
+        "market_rows": int(record.get("market_rows", 0)),
+        "qualifier_feature_rows": int(record.get("qualifier_feature_rows", 0)),
+        "market_status": record.get("market_status", {}),
+        "market_warnings": record.get("market_warnings", []),
+        "dc_rho": float(record.get("dc_rho", 0.0) or 0.0),
         "final_test_year": record.get("final_test_year", ""),
         "split_policy": record.get("split_policy", ""),
         "hidden_from_catalog": bool(record.get("hidden_from_catalog", False)),
