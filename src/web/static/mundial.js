@@ -406,9 +406,9 @@ function startNewWorldcupModel() {
   renderTrainingControls(state.trainingOptions, {});
   applyModelDefaults(modelType, true);
   const modelId = document.getElementById("worldcup-model-id");
-  modelId.value = "";
-  modelId.placeholder = `${autoWorldcupModelId(modelType)}-nuevo`;
-  modelId.dataset.autofilled = "false";
+  modelId.value = nextWorldcupModelId(modelType);
+  modelId.placeholder = modelId.value;
+  modelId.dataset.autofilled = "true";
   document.getElementById("worldcup-tuning-enabled").checked = false;
   applyTuningLocks();
   document.getElementById("sim-use-ml-model").checked = false;
@@ -426,7 +426,7 @@ function startNewWorldcupModel() {
   document.getElementById("training-tuning-flow").innerHTML = tuningFlowHtml({ enabled: false });
   document.getElementById("training-features").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
-  document.getElementById("simulation-summary").textContent = "Nuevo modelo preparado. Ingresa nombre y parámetros antes de entrenar.";
+  document.getElementById("simulation-summary").textContent = `Nuevo modelo preparado: ${modelId.value}`;
   renderActiveModel({});
 }
 
@@ -440,7 +440,18 @@ async function loadSelectedModel() {
   try {
     state.newModelMode = false;
     const result = await api("/api/mundial/models/select", jsonOptions({ model_id: modelId }));
+    state.activeModelId = result.active_model_id || (result.selected || {}).model_id || modelId;
+    state.trainingControlsApplied = false;
     renderModelsCatalog(result);
+    renderTrainingControls(state.trainingOptions, result.selected || {});
+    const modelIdInput = document.getElementById("worldcup-model-id");
+    if (modelIdInput && (result.selected || {}).model_id) {
+      modelIdInput.value = result.selected.model_id;
+      modelIdInput.dataset.autofilled = "true";
+    }
+    renderModelState(result.selected || {}, state.training || {});
+    renderTrainingVisuals(result.selected || {}, state.training || {});
+    renderTrainingTables(result.selected || {}, state.training || {});
     document.getElementById("sim-use-ml-model").checked = true;
     document.getElementById("simulation-summary").textContent = `Híbrido activo: ${result.selected.model_name || result.selected.model_id}`;
   } catch (error) {
@@ -721,8 +732,9 @@ async function trainWorldCupModel(walkForwardMode = "none") {
     showError("Primero ejecuta Preparar ETL para dejar listo el dataset de entrenamiento.");
     return;
   }
-  if (!document.getElementById("worldcup-model-id").value.trim()) {
-    showError("Ingresa un nombre para el nuevo modelo antes de entrenar.");
+  const modelId = ensureWorldcupModelId();
+  if (!modelId) {
+    showError("No se pudo generar el nombre del nuevo modelo.");
     return;
   }
   const modeLabel = walkForwardMode === "result_plus_players"
@@ -937,7 +949,7 @@ function applyModelDefaults(modelKey, force) {
   natural.checked = Boolean(defaults.natural_gradient);
   const modelIdInput = document.getElementById("worldcup-model-id");
   if (modelIdInput && (force || !modelIdInput.value || modelIdInput.dataset.autofilled !== "false")) {
-    modelIdInput.value = autoWorldcupModelId(modelKey);
+    modelIdInput.value = state.newModelMode ? nextWorldcupModelId(modelKey) : autoWorldcupModelId(modelKey);
     modelIdInput.dataset.autofilled = "true";
   }
   applyTuningLocks();
@@ -946,6 +958,28 @@ function applyModelDefaults(modelKey, force) {
 function autoWorldcupModelId(modelKey) {
   const shortModel = { xgboost: "xgb", lightgbm: "lgbm", catboost: "cat", ngboost: "ngb" }[modelKey] || modelKey || "model";
   return `mundial-${shortModel}-hibrido`;
+}
+
+function nextWorldcupModelId(modelKey) {
+  const base = autoWorldcupModelId(modelKey);
+  const existing = new Set((state.models || []).map((model) => String(model.model_id || "")));
+  if (!existing.has(base)) return base;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base}-${index}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+function ensureWorldcupModelId() {
+  const input = document.getElementById("worldcup-model-id");
+  if (!input) return "";
+  const current = input.value.trim();
+  if (current) return current;
+  const modelType = document.getElementById("worldcup-model-type").value || ((state.trainingOptions || {}).defaults || {}).model_type || "xgboost";
+  input.value = nextWorldcupModelId(modelType);
+  input.dataset.autofilled = "true";
+  return input.value;
 }
 
 function renderTrainingWarnings(warnings) {
@@ -1287,10 +1321,22 @@ async function handleWorldcupJobComplete(job) {
   const result = job.result || {};
   if (job.kind === "training") {
     state.newModelMode = false;
+    state.activeModelId = (result.model || {}).model_id || result.active_model_id || state.activeModelId;
     renderTrainingResult(result);
-    await loadTrainingStatus();
     if (result.models) renderModelsCatalog(result.models);
     else await loadModelsCatalog();
+    await loadTrainingStatus();
+    if (state.activeModelId) {
+      const active = state.models.find((model) => model.model_id === state.activeModelId) || result.model || {};
+      renderActiveModel(active);
+      renderTrainingControls(state.trainingOptions, active);
+      const modelIdInput = document.getElementById("worldcup-model-id");
+      if (modelIdInput && active.model_id) {
+        modelIdInput.value = active.model_id;
+        modelIdInput.dataset.autofilled = "true";
+      }
+      renderModelState(active, state.training || {});
+    }
     document.getElementById("sim-use-ml-model").checked = true;
     document.getElementById("simulation-summary").textContent = `Modelo listo: ${(result.model || {}).model_name || (result.model || {}).model_id || "híbrido"}`;
   }

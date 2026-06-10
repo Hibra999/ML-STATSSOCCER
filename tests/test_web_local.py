@@ -239,6 +239,10 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "/api/mundial/models/select" in app_source
     assert "/api/mundial/maintenance/clear" in app_source
     assert "trainingPayload" in app_source
+    assert "nextWorldcupModelId" in app_source
+    assert "ensureWorldcupModelId" in app_source
+    assert "No se pudo generar el nombre del nuevo modelo" in app_source
+    assert "Ingresa un nombre para el nuevo modelo" not in app_source
     assert "paramsTable" in app_source
     assert "evalStrategyLabel" in app_source
     assert "ultimo Mundial test" in app_source
