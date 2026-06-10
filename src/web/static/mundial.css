@@ -159,7 +159,7 @@ main {
 .hero-copy {
   display: grid;
   align-content: center;
-  gap: 14px;
+  gap: 16px;
 }
 .eyebrow {
   width: fit-content;
@@ -175,61 +175,92 @@ h2 { font-size: 22px; }
 h3 { font-size: 16px; }
 .hero p { margin: 0; color: rgba(255, 255, 255, 0.78); }
 .hero-countdown {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(58px, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+.hero-countdown-vs {
+  width: min(360px, 100%);
+  margin-top: 2px;
 }
 .hero-hardware {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(118px, 1fr));
   gap: 10px;
-  flex-wrap: wrap;
+  width: min(760px, 100%);
+  justify-self: center;
+  margin-top: 2px;
 }
 .hardware-chip {
-  min-width: 118px;
-  padding: 10px 12px;
+  min-width: 0;
+  padding: 11px 12px;
   border: 1px solid rgba(255, 255, 255, 0.24);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 10px 22px rgba(4, 18, 31, 0.08);
+  text-align: center;
+}
+.hardware-chip.hardware-ok {
+  border-color: rgba(131, 224, 180, 0.58);
+  background: rgba(18, 133, 96, 0.28);
+}
+.hardware-chip.hardware-warn {
+  border-color: rgba(255, 214, 140, 0.6);
+  background: rgba(185, 133, 34, 0.22);
 }
 .hardware-chip span,
 .hardware-chip small {
   display: block;
   color: rgba(255, 255, 255, 0.72);
   font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hardware-chip strong {
   display: block;
   margin: 3px 0;
   font-size: 18px;
   line-height: 1.1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .countdown-chip {
-  min-width: 74px;
-  padding: 10px 12px;
+  min-width: 0;
+  padding: 12px 10px;
+  text-align: center;
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 14px 30px rgba(4, 18, 31, 0.12);
 }
 .countdown-chip.live {
-  min-width: 220px;
+  grid-column: 1 / -1;
 }
 .countdown-chip span {
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
   color: rgba(255, 255, 255, 0.72);
   font-size: 11px;
+  text-transform: uppercase;
 }
 .countdown-chip strong {
-  font-size: 22px;
+  display: block;
+  font-size: 34px;
   line-height: 1;
 }
 
 .hero-match {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(112px, auto) minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.95fr) minmax(0, 1fr);
+  gap: 18px;
   align-items: center;
-  max-width: 760px;
+  max-width: 980px;
 }
 .match-team {
   display: flex;
@@ -246,15 +277,20 @@ h3 { font-size: 16px; }
 .hero-vs-block {
   display: grid;
   justify-items: center;
-  gap: 6px;
-  min-width: 112px;
+  gap: 10px;
+  min-width: 0;
   text-align: center;
 }
-.hero-vs-block strong {
+.hero-kickoff {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+}
+.hero-kickoff strong {
   font-size: 13px;
   line-height: 1.25;
 }
-.hero-vs-block small {
+.hero-kickoff small {
   max-width: 180px;
   color: rgba(255, 255, 255, 0.76);
   line-height: 1.25;
@@ -262,12 +298,13 @@ h3 { font-size: 16px; }
 .versus {
   display: grid;
   place-items: center;
-  width: 54px;
-  height: 54px;
+  width: 68px;
+  height: 68px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.16);
   font-weight: 800;
-  font-size: 17px;
+  font-size: 20px;
+  box-shadow: 0 14px 34px rgba(4, 18, 31, 0.16);
 }
 
 .hero-metrics {
@@ -1336,6 +1373,9 @@ th {
   .hero-next-grid {
     grid-template-columns: 1fr;
   }
+  .hero-hardware {
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+  }
   .control-grid {
     grid-template-columns: repeat(3, minmax(110px, 1fr));
   }
@@ -1362,6 +1402,15 @@ th {
   .hero {
     padding: 20px;
     min-height: auto;
+  }
+  .hero-countdown {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .countdown-chip strong {
+    font-size: 27px;
+  }
+  .hero-hardware {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .hero-match,
   .hero-metrics,
@@ -1391,20 +1440,22 @@ th {
   .feature-bar {
     grid-template-columns: 1fr;
   }
+  .match-team,
   .match-team.away {
-    justify-content: flex-start;
-    text-align: left;
+    justify-content: center;
+    text-align: center;
   }
   .hero-vs-block {
-    justify-items: start;
-    text-align: left;
+    justify-items: center;
+    width: 100%;
+    text-align: center;
   }
-  .hero-vs-block small {
+  .hero-kickoff small {
     max-width: 100%;
   }
   .versus {
-    width: 44px;
-    height: 44px;
+    width: 58px;
+    height: 58px;
   }
   .section-heading {
     display: grid;

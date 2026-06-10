@@ -218,6 +218,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-predictions" in html_source
     assert "hero-countdown" in html_source
+    assert "hero-countdown-vs" in html_source
+    assert "hero-kickoff" in app_source
     assert "hero-next-grid" in html_source
     assert "simulation-summary" in html_source
     assert "upcoming-team" in app_source
@@ -247,6 +249,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "market-panel" in app_source
     assert "renderWalkForwardNotice" in app_source
     assert "renderHeroHardware" in app_source
+    assert "hardwareChip(\"CUDA\"" in app_source
+    assert "Numba" not in app_source
     assert "trackWorldcupJob" in app_source
     assert "/api/jobs/${jobId}" in app_source
     assert "runUpcomingPredictions" in app_source

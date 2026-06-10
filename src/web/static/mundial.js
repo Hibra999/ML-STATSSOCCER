@@ -179,8 +179,11 @@ function renderOverview(overview) {
     ${matchTeamHtml(highlight.home || {}, "home")}
     <div class="hero-vs-block">
       <span class="versus">VS</span>
-      <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
-      <small>${escapeHtml(highlight.venue || "Sede por confirmar")}</small>
+      <div id="hero-countdown" class="hero-countdown hero-countdown-vs"></div>
+      <div class="hero-kickoff">
+        <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
+        <small>${escapeHtml(highlight.venue || "Sede por confirmar")}</small>
+      </div>
     </div>
     ${matchTeamHtml(highlight.away || {}, "away")}`;
   renderHeroCountdown(overview.countdown_target, overview.countdown_state, highlight);
@@ -324,14 +327,14 @@ function renderHeroHardware(hardware) {
   if (!container) return;
   container.innerHTML = [
     hardwareChip("Device", hardware.actual_device || hardware.device_default || "cpu", "Motor"),
-    hardwareChip("CUDA", hardware.cuda_available ? "Si" : "No", hardware.cuda_available ? "GPU disponible" : "CPU fallback"),
+    hardwareChip("CUDA", hardware.cuda_available ? "Si" : "No", hardware.cuda_available ? "GPU disponible" : "CPU fallback", hardware.cuda_available ? "ok" : "warn"),
     hardwareChip("CPU", hardware.cpu_count || "-", "nucleos"),
     hardwareChip("Threads", hardware.effective_n_jobs || hardware.n_jobs || hardware.default_n_jobs || "-", "n_jobs"),
   ].join("");
 }
 
-function hardwareChip(label, value, detail) {
-  return `<div class="hardware-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
+function hardwareChip(label, value, detail, status) {
+  return `<div class="hardware-chip ${status ? `hardware-${escapeAttr(status)}` : ""}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
 }
 
 async function loadModelsCatalog() {
