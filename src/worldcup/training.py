@@ -406,6 +406,26 @@ def train_single_hybrid_model(
         split_warnings.append("No se encontro fecha suficiente para cortar features historicas antes de evaluacion; se reporta auditoria sin corte temporal.")
     y_train_encoded, label_classes = encode_labels(y_train)
     y_eval_encoded = encode_existing_labels(y_eval, label_classes)
+    legacy_eval = legacy_random_eval_dataset(
+        train_rows=train_rows,
+        base_model=WorldCupModel.from_history(
+            history_df,
+            teams=group_teams,
+            history_weight=float(payload.get("history_weight", 1.0) or 1.0),
+            recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
+            host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
+            max_goals=int(payload.get("max_goals", 10) or 10),
+        ),
+        team_features=feature_store,
+        history_team_features=build_history_feature_table(history_df),
+        matchup_features=build_matchup_feature_table(history_df),
+        fixture_feature_rows=fixture_feature_rows,
+        feature_columns=feature_columns,
+        target=effective_target,
+        eval_size=eval_size,
+        random_state=train_config["seed"],
+        label_classes=label_classes,
+    )
     tuned = tune_model_if_requested(
         train_config,
         x_train,
@@ -431,6 +451,11 @@ def train_single_hybrid_model(
     y_eval_pred = classifier_predict(clf, x_eval)
     emit_training_progress(progress_callback, "metrics", 5, 5, f"Calculando métricas {label}", market=label, model_id=model_id)
     metrics = classification_metrics_from_predictions(y_train_encoded, y_train_pred, y_eval_encoded, y_eval_pred)
+    diagnostic = diagnostic_eval_metrics(clf, legacy_eval, metrics)
+    if diagnostic.get("metrics"):
+        metrics["eval_legacy"] = diagnostic["metrics"]
+    if diagnostic.get("warning"):
+        split_warnings.append(diagnostic["warning"])
     confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes, target=effective_target)
     etl = etl_steps(files, normalized, eval_strategy, prepared=prepared_dataset_status(files=files, normalized=normalized))
     hardware = detect_hardware()
@@ -472,6 +497,7 @@ def train_single_hybrid_model(
         "etl_steps": etl,
         "hardware": hardware,
         "anti_leakage": anti_leakage,
+        "diagnostic_eval": diagnostic,
         "warnings": unique_strings([warning for warning in [target_warning, *split_warnings, *normalized.get("warnings", []), *fit_result.get("warnings", [])] if warning]),
         "top_features": top_feature_importances(clf, feature_columns),
         "walk_forward_mode": walk_forward_mode,
@@ -493,6 +519,7 @@ def train_single_hybrid_model(
         "mode": normalized["training_mode"],
         "eval_strategy": eval_strategy,
         "anti_leakage": anti_leakage,
+        "diagnostic_eval": diagnostic,
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
         "effective_target": effective_target,
         "requested_target": train_config["training_target"],
@@ -616,6 +643,10 @@ def train_dual_market_model(
             "result": result_record.get("anti_leakage", {}),
             "over_under_25": over_record.get("anti_leakage", {}),
         },
+        "diagnostic_eval": {
+            "result": result_record.get("diagnostic_eval", {}),
+            "over_under_25": over_record.get("diagnostic_eval", {}),
+        },
         "warnings": warnings,
         "top_features": result_record.get("top_features", []),
         "markets": market_results,
@@ -645,6 +676,7 @@ def train_dual_market_model(
         "model_type": train_config["model_type"],
         "hardware": bundle_record["hardware"],
         "anti_leakage": bundle_record["anti_leakage"],
+        "diagnostic_eval": bundle_record["diagnostic_eval"],
         "tuning": bundle_record["tuning"],
         "tuning_trace": bundle_record["tuning_trace"],
         "etl_steps": bundle_record["etl_steps"],
@@ -1944,6 +1976,87 @@ def audit_training_leakage(feature_columns: List[str], x_train: pd.DataFrame, x_
     }
 
 
+def legacy_random_eval_dataset(
+        train_rows: pd.DataFrame,
+        base_model: WorldCupModel,
+        team_features: pd.DataFrame,
+        history_team_features: pd.DataFrame,
+        matchup_features: pd.DataFrame,
+        fixture_feature_rows: pd.DataFrame,
+        feature_columns: List[str],
+        target: str,
+        eval_size: float,
+        random_state: int,
+        label_classes: List[Any],
+) -> Dict[str, Any]:
+    try:
+        x_legacy, y_legacy, _ = build_training_matrix(
+            train_rows,
+            base_model,
+            team_features,
+            history_team_features=history_team_features,
+            matchup_features=matchup_features,
+            fixture_feature_rows=fixture_feature_rows,
+            feature_columns=feature_columns,
+            target=target,
+        )
+        _, x_eval, _, y_eval = safe_train_eval_split(
+            x_legacy,
+            y_legacy,
+            test_size=eval_size,
+            random_state=random_state,
+        )
+        if x_eval.empty or pd.Series(y_eval).dropna().empty:
+            return {}
+        return {
+            "x_eval": x_eval,
+            "y_eval": encode_existing_labels(y_eval, label_classes),
+            "strategy": "legacy_random_holdout",
+            "history_features": "global_legacy",
+            "eval_rows": int(len(y_eval)),
+        }
+    except Exception as exc:
+        return {
+            "strategy": "legacy_random_holdout",
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+
+
+def diagnostic_eval_metrics(clf, legacy_eval: Dict[str, Any], metrics: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
+    if not legacy_eval or "x_eval" not in legacy_eval:
+        return {
+            "enabled": False,
+            "strategy": legacy_eval.get("strategy", "legacy_random_holdout") if legacy_eval else "legacy_random_holdout",
+            "error": legacy_eval.get("error", "") if legacy_eval else "",
+        }
+    y_eval = legacy_eval["y_eval"]
+    y_pred = classifier_predict(clf, legacy_eval["x_eval"])
+    legacy_metrics = metric_row(y_eval, y_pred)
+    strict_f1 = float((metrics.get("eval") or {}).get("F1", 0.0) or 0.0)
+    train_f1 = float((metrics.get("train") or {}).get("F1", 0.0) or 0.0)
+    legacy_f1 = float(legacy_metrics.get("F1", 0.0) or 0.0)
+    strict_gap = round(train_f1 - strict_f1, 3)
+    legacy_gap = round(train_f1 - legacy_f1, 3)
+    uplift = round(legacy_f1 - strict_f1, 3)
+    warning = ""
+    if uplift >= 0.12:
+        warning = "Eval legacy random supera claramente al eval temporal; las métricas anteriores probablemente eran optimistas por split/feature leakage."
+    return {
+        "enabled": True,
+        "strategy": legacy_eval.get("strategy", "legacy_random_holdout"),
+        "history_features": legacy_eval.get("history_features", "global_legacy"),
+        "eval_rows": legacy_eval.get("eval_rows", 0),
+        "metrics": legacy_metrics,
+        "strict_f1": strict_f1,
+        "legacy_f1": legacy_f1,
+        "train_f1": train_f1,
+        "strict_gap": strict_gap,
+        "legacy_gap": legacy_gap,
+        "legacy_vs_strict_f1": uplift,
+        "warning": warning,
+    }
+
+
 def encode_labels(y: pd.Series) -> Tuple[pd.Series, List[Any]]:
     values = pd.Series(y).reset_index(drop=True)
     if values.astype(str).isin(TARGET_LABELS).all():
@@ -2593,6 +2706,7 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "confusion_matrix": record.get("confusion_matrix", result.get("confusion_matrix", {})),
         "classes": record.get("classes", []),
         "eval_strategy": record.get("eval_strategy", result.get("eval_strategy", "")),
+        "diagnostic_eval": record.get("diagnostic_eval", result.get("diagnostic_eval", {})),
         "train_rows": int(result.get("train_rows", 0) or 0),
         "eval_rows": int(result.get("eval_rows", 0) or 0),
         "tuning": record.get("tuning", result.get("tuning", {})),
@@ -2882,6 +2996,7 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "etl_steps": record.get("etl_steps", []),
         "hardware": record.get("hardware", {}),
         "anti_leakage": record.get("anti_leakage", {}),
+        "diagnostic_eval": record.get("diagnostic_eval", {}),
         "warnings": record.get("warnings", []),
         "top_features": record.get("top_features", []),
         "kaggle_files": record.get("kaggle_files", []),
@@ -2934,6 +3049,7 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "prediction_rows": 0,
         "hardware": detect_hardware(),
         "anti_leakage": {},
+        "diagnostic_eval": {},
         "tuning": {"enabled": False},
         "tuning_trace": tuning_trace({"enabled": False}),
         "etl_steps": [],

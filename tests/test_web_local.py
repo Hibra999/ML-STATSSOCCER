@@ -245,6 +245,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "trainingPayload" in app_source
     assert "paramsTable" in app_source
     assert "evalStrategyLabel" in app_source
+    assert "diagnostic_eval" in app_source
+    assert "eval_legacy" in app_source
+    assert "legacy random diagnostico" in app_source
     assert "renderConfusionMatrix" in app_source
     assert "renderEtlFlow" in app_source
     assert "renderTuningFlow" in app_source
@@ -811,6 +814,11 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["enabled"] is False
     assert result["model"]["hardware"]["actual_device"] in {"cpu", "cuda"}
+    assert result["diagnostic_eval"]["result"]["enabled"] is True
+    assert result["diagnostic_eval"]["result"]["strategy"] == "legacy_random_holdout"
+    assert result["model"]["diagnostic_eval"]["result"]["enabled"] is True
+    assert result["model"]["markets"]["result"]["diagnostic_eval"]["enabled"] is True
+    assert "eval_legacy" in result["metrics"]
     assert result["eval_rows"] == 2
     assert prediction["fixture"]["home"] == "Mexico"
     assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
@@ -833,6 +841,8 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert dual_result["model"]["bundle"] is True
     assert dual_result["model"]["market_mode"] == "dual_markets"
     assert set(dual_result["model"]["market_models"]) == {"result", "over_under_25"}
+    assert dual_result["diagnostic_eval"]["result"]["strategy"] == "legacy_random_holdout"
+    assert dual_result["model"]["markets"]["result"]["diagnostic_eval"]["strategy"] == "legacy_random_holdout"
     assert dual_result["model"]["markets"]["result"]["confusion_matrix"]["matrix"]
     assert dual_result["model"]["markets"]["over_under_25"]["confusion_matrix"]["matrix"]
     assert dual_prediction["model_probs"]["model_id"] == "mex-dual"
@@ -920,6 +930,10 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert result["model"]["eval_strategy"] == "holdout_temporal"
     assert result["anti_leakage"]["result"]["split_temporal"] is True
     assert result["anti_leakage"]["result"]["history_features"] == "pre_eval_cutoff"
+    assert result["diagnostic_eval"]["result"]["enabled"] is True
+    assert result["diagnostic_eval"]["result"]["strategy"] == "legacy_random_holdout"
+    assert result["model"]["markets"]["result"]["diagnostic_eval"]["history_features"] == "global_legacy"
+    assert "eval_legacy" in result["model"]["markets"]["result"]["metrics"]
     assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
     assert result["model"]["markets"]["over_under_25"]["confusion_matrix"]["labels"] == ["Under 2.5", "Over 2.5"]
     assert result["model"]["etl_steps"]

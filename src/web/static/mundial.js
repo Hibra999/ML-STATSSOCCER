@@ -810,7 +810,13 @@ function trainingMarketSections(model, payload) {
   const markets = (model && model.markets) || (payload && payload.markets) || {};
   const keys = ["result", "over_under_25"].filter((key) => markets[key]);
   if (keys.length) {
-    return keys.map((key) => ({ key, label: markets[key].label || marketLabel(key), ...markets[key] }));
+    const diagnostics = (model && model.diagnostic_eval) || (payload && payload.diagnostic_eval) || {};
+    return keys.map((key) => ({
+      key,
+      label: markets[key].label || marketLabel(key),
+      diagnostic_eval: markets[key].diagnostic_eval || diagnostics[key] || {},
+      ...markets[key],
+    }));
   }
   const target = (model && (model.effective_target || model.requested_target)) || (payload && (payload.effective_target || payload.requested_target)) || "result";
   return [{
@@ -818,6 +824,7 @@ function trainingMarketSections(model, payload) {
     label: marketLabel(target),
     metrics: (model && model.metrics) || (payload && payload.metrics) || {},
     confusion_matrix: (model && model.confusion_matrix) || (payload && payload.confusion_matrix) || {},
+    diagnostic_eval: (model && model.diagnostic_eval) || (payload && payload.diagnostic_eval) || {},
     tuning_trace: (model && model.tuning_trace) || (payload && payload.tuning_trace) || (model && model.tuning) || {},
     top_features: (model && model.top_features) || [],
     train_rows: payload && payload.train_rows,
@@ -884,6 +891,7 @@ function marketLabel(key) {
 function evalStrategyLabel(strategy) {
   if (strategy === "test_file") return "test etiquetado";
   if (strategy === "holdout_temporal") return "holdout temporal";
+  if (strategy === "legacy_random_holdout") return "legacy random diagnostico";
   if (strategy === "holdout_random_no_date") return "holdout sin fecha";
   if (strategy === "holdout_from_train") return "holdout desde train";
   if (strategy === "unavailable") return "sin evaluacion";
@@ -997,9 +1005,18 @@ function renderMetricCards(markets) {
   const sections = Array.isArray(markets) ? markets : [{ label: "Evaluacion", metrics: markets || {} }];
   document.getElementById("training-metric-cards").innerHTML = sections.map((market) => {
     const evalMetrics = (market.metrics && (market.metrics.eval || market.metrics.Eval)) || {};
+    const diagnostic = market.diagnostic_eval || {};
+    const diagnosticText = diagnostic.enabled
+      ? `Temporal F1 ${formatMetricValue(diagnostic.strict_f1)} / legacy ${formatMetricValue(diagnostic.legacy_f1)} / brecha ${formatMetricValue(diagnostic.legacy_vs_strict_f1)}`
+      : "";
     const rows = ["Accuracy", "F1", "Precision", "Recall"].map((key) => predictionCard(key, evalMetrics[key] ?? "-")).join("");
-    return `<section class="market-panel"><header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml((market.train_rows ?? "-"))} train / ${escapeHtml((market.eval_rows ?? "-"))} eval</small></header><div class="market-card-grid">${rows}</div></section>`;
+    return `<section class="market-panel"><header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml((market.train_rows ?? "-"))} train / ${escapeHtml((market.eval_rows ?? "-"))} eval</small></header><div class="market-card-grid">${rows}</div>${diagnosticText ? `<small class="diagnostic-line">${escapeHtml(diagnosticText)}</small>` : ""}</section>`;
   }).join("");
+}
+
+function formatMetricValue(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(3) : "-";
 }
 
 function renderConfusionMatrix(payload) {
@@ -1107,6 +1124,9 @@ function renderTrainingTables(model, payload) {
 
 function metricsTableFromMarket(market) {
   const metrics = market.metrics || {};
+  if (!metrics.eval_legacy && market.diagnostic_eval && market.diagnostic_eval.metrics) {
+    metrics.eval_legacy = market.diagnostic_eval.metrics;
+  }
   const rows = Object.entries(metrics).map(([split, values]) => ({ Split: split, ...(values || {}) }));
   const columns = rows.length ? Object.keys(rows[0]) : [];
   return { columns, rows, total: rows.length };
