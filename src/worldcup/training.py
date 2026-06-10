@@ -17,6 +17,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
+from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
 from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, group_letter, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
 from src.worldcup.market_provider import (
     load_market_data,
@@ -266,6 +267,11 @@ def dataset_status() -> Dict[str, Any]:
         "qualifier_feature_rows": int(prepared.get("qualifier_feature_rows", 0)),
         "market_status": prepared.get("market_status", {}),
         "market_warnings": prepared.get("market_warnings", []),
+        "api_football_status": prepared.get("api_football_status", {}),
+        "api_football_warnings": prepared.get("api_football_warnings", []),
+        "api_football_fixture_rows": int(prepared.get("api_football_fixture_rows", 0)),
+        "api_football_stat_rows": int(prepared.get("api_football_stat_rows", 0)),
+        "api_football_market_rows": int(prepared.get("api_football_market_rows", 0)),
         "train_rows": train_rows,
         "test_rows": test_rows,
         "eval_rows": test_rows if test_rows else planned_holdout_rows(train_rows),
@@ -346,6 +352,7 @@ def train_single_hybrid_model(
     feature_store = normalized["team_features"]
     market_rows = normalized.get("market_data", pd.DataFrame())
     qualifier_rows = normalized.get("qualifier_matches", pd.DataFrame())
+    api_football = normalized.get("api_football", {}) if isinstance(normalized.get("api_football", {}), dict) else {}
     dc_rho = float(normalized.get("dc_rho", 0.0) or 0.0)
     fixture_feature_rows = read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
     target_warning = ""
@@ -368,6 +375,7 @@ def train_single_hybrid_model(
             team_features=feature_store,
             market_rows=market_rows,
             qualifier_rows=qualifier_rows,
+            api_football=api_football,
             fixture_feature_rows=fixture_feature_rows,
             dc_rho=dc_rho,
             history_weight=float(payload.get("history_weight", 1.0) or 1.0),
@@ -383,6 +391,7 @@ def train_single_hybrid_model(
             team_features=feature_store,
             market_rows=market_rows,
             qualifier_rows=qualifier_rows,
+            api_football=api_football,
             fixture_feature_rows=fixture_feature_rows,
             dc_rho=dc_rho,
             feature_columns=feature_columns,
@@ -403,6 +412,7 @@ def train_single_hybrid_model(
             team_features=feature_store,
             market_rows=market_rows,
             qualifier_rows=qualifier_rows,
+            api_football=api_football,
             fixture_feature_rows=fixture_feature_rows,
             dc_rho=dc_rho,
             history_weight=float(payload.get("history_weight", 1.0) or 1.0),
@@ -418,6 +428,7 @@ def train_single_hybrid_model(
             team_features=feature_store,
             market_rows=market_rows,
             qualifier_rows=qualifier_rows,
+            api_football=api_football,
             fixture_feature_rows=fixture_feature_rows,
             dc_rho=dc_rho,
             feature_columns=feature_columns,
@@ -475,10 +486,16 @@ def train_single_hybrid_model(
         "matchup_features": build_matchup_feature_table(history_df).to_dict(orient="records"),
         "market_data": market_rows.to_dict(orient="records") if isinstance(market_rows, pd.DataFrame) else [],
         "qualifier_matches": qualifier_rows.to_dict(orient="records") if isinstance(qualifier_rows, pd.DataFrame) else [],
+        "api_football": api_football_records(api_football),
         "market_rows": int(normalized.get("market_rows", 0)),
         "qualifier_feature_rows": int(normalized.get("qualifier_feature_rows", 0)),
         "market_status": normalized.get("market_status", {}),
         "market_warnings": normalized.get("market_warnings", []),
+        "api_football_status": normalized.get("api_football_status", {}),
+        "api_football_warnings": normalized.get("api_football_warnings", []),
+        "api_football_fixture_rows": int(normalized.get("api_football_fixture_rows", 0) or 0),
+        "api_football_stat_rows": int(normalized.get("api_football_stat_rows", 0) or 0),
+        "api_football_market_rows": int(normalized.get("api_football_market_rows", 0) or 0),
         "dc_rho": dc_rho,
         "kaggle_files": [str(path) for path in files],
         "history_source": normalized.get("history_source", history_source),
@@ -502,7 +519,7 @@ def train_single_hybrid_model(
         "tuning_trace": tuning_trace(tuned),
         "etl_steps": etl,
         "hardware": hardware,
-        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *fit_result.get("warnings", [])] if warning]),
+        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *normalized.get("api_football_warnings", []), *fit_result.get("warnings", [])] if warning]),
         "top_features": top_feature_importances(clf, feature_columns),
         "walk_forward_mode": walk_forward_mode,
         "walk_forward_summary": walk_forward_summary,
@@ -627,10 +644,16 @@ def train_dual_market_model(
         "matchup_features": result_record.get("matchup_features", []),
         "market_data": result_record.get("market_data", []),
         "qualifier_matches": result_record.get("qualifier_matches", []),
+        "api_football": result_record.get("api_football", {}),
         "market_rows": int(result_record.get("market_rows", 0)),
         "qualifier_feature_rows": int(result_record.get("qualifier_feature_rows", 0)),
         "market_status": result_record.get("market_status", {}),
         "market_warnings": result_record.get("market_warnings", []),
+        "api_football_status": result_record.get("api_football_status", {}),
+        "api_football_warnings": result_record.get("api_football_warnings", []),
+        "api_football_fixture_rows": int(result_record.get("api_football_fixture_rows", 0) or 0),
+        "api_football_stat_rows": int(result_record.get("api_football_stat_rows", 0) or 0),
+        "api_football_market_rows": int(result_record.get("api_football_market_rows", 0) or 0),
         "dc_rho": float(result_record.get("dc_rho", 0.0) or 0.0),
         "kaggle_files": [str(path) for path in files],
         "history_source": result_record.get("history_source", over_record.get("history_source", "")),
@@ -840,6 +863,12 @@ def build_prepared_dataset(
     market_bundle = load_market_data(force_download=bool(refresh_history), allow_download=bool(refresh_history), use_scraper=False)
     market_data = market_bundle.get("matches", pd.DataFrame()).copy()
     qualifier_matches = market_bundle.get("qualifiers", pd.DataFrame()).copy()
+    api_football_bundle = load_api_football_data(force_download=bool(refresh_history), allow_download=bool(refresh_history))
+    api_market_rows = api_football_bundle.get("market_rows", pd.DataFrame()).copy()
+    if not api_market_rows.empty:
+        market_data = pd.concat([market_data, api_market_rows], ignore_index=True) if not market_data.empty else api_market_rows
+    combined_has_1x2 = bool(not market_data.empty and market_data[["market_odds_home", "market_odds_draw", "market_odds_away"]].apply(pd.to_numeric, errors="coerce").notna().all(axis=1).any()) if {"market_odds_home", "market_odds_draw", "market_odds_away"}.issubset(market_data.columns) else False
+    combined_has_ou25 = bool(not market_data.empty and market_data[["market_odds_over25", "market_odds_under25"]].apply(pd.to_numeric, errors="coerce").notna().all(axis=1).any()) if {"market_odds_over25", "market_odds_under25"}.issubset(market_data.columns) else False
     history_rows = history_match_rows(history_df, source=history_source)
     warnings: List[str] = []
     label_source = "kaggle_match_result"
@@ -900,16 +929,34 @@ def build_prepared_dataset(
         "team_features": team_features,
         "market_data": market_data,
         "qualifier_matches": qualifier_matches,
-        "market_rows": int(market_bundle.get("market_rows", 0)),
+        "market_rows": int(market_data.shape[0]),
         "qualifier_feature_rows": int(market_bundle.get("qualifier_rows", 0)),
         "market_status": {
-            "status": market_bundle.get("status", "missing"),
-            "has_1x2": bool(market_bundle.get("has_1x2", False)),
-            "has_ou25": bool(market_bundle.get("has_ou25", False)),
-            "sources": market_bundle.get("sources", []),
+            "status": "ok" if combined_has_1x2 or combined_has_ou25 else market_bundle.get("status", "missing"),
+            "has_1x2": combined_has_1x2,
+            "has_ou25": combined_has_ou25,
+            "sources": [*market_bundle.get("sources", []), *api_football_bundle.get("sources", [])],
             "loaded_at": market_bundle.get("loaded_at", ""),
         },
         "market_warnings": market_bundle.get("warnings", []),
+        "api_football": {
+            "fixtures": api_football_bundle.get("fixtures", pd.DataFrame()),
+            "statistics": api_football_bundle.get("statistics", pd.DataFrame()),
+            "team_stats": api_football_bundle.get("team_stats", pd.DataFrame()),
+            "lineups": api_football_bundle.get("lineups", pd.DataFrame()),
+            "injuries": api_football_bundle.get("injuries", pd.DataFrame()),
+            "odds": api_football_bundle.get("odds", pd.DataFrame()),
+            "market_rows": api_market_rows,
+        },
+        "api_football_status": {
+            "status": api_football_bundle.get("status", "missing"),
+            "sources": api_football_bundle.get("sources", []),
+            "loaded_at": api_football_bundle.get("loaded_at", ""),
+        },
+        "api_football_warnings": api_football_bundle.get("warnings", []),
+        "api_football_fixture_rows": int(api_football_bundle.get("fixtures", pd.DataFrame()).shape[0]),
+        "api_football_stat_rows": int(api_football_bundle.get("team_stats", pd.DataFrame()).shape[0]),
+        "api_football_market_rows": int(api_market_rows.shape[0]),
         "dc_rho": float(dc_rho),
         "target_column": "Label + OverUnder25",
         "team_columns": normalized["team_columns"],
@@ -1086,6 +1133,11 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "qualifier_feature_rows": int(dataset.get("qualifier_feature_rows", 0)),
         "market_status": dataset.get("market_status", {}),
         "market_warnings": dataset.get("market_warnings", []),
+        "api_football_status": dataset.get("api_football_status", {}),
+        "api_football_warnings": dataset.get("api_football_warnings", []),
+        "api_football_fixture_rows": int(dataset.get("api_football_fixture_rows", 0)),
+        "api_football_stat_rows": int(dataset.get("api_football_stat_rows", 0)),
+        "api_football_market_rows": int(dataset.get("api_football_market_rows", 0)),
         "warnings": dataset.get("warnings", []),
     }
 
@@ -1108,6 +1160,11 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "qualifier_feature_rows": int(dataset.get("qualifier_feature_rows", 0)),
         "market_status": dataset.get("market_status", {}),
         "market_warnings": dataset.get("market_warnings", []),
+        "api_football_status": dataset.get("api_football_status", {}),
+        "api_football_warnings": dataset.get("api_football_warnings", []),
+        "api_football_fixture_rows": int(dataset.get("api_football_fixture_rows", 0)),
+        "api_football_stat_rows": int(dataset.get("api_football_stat_rows", 0)),
+        "api_football_market_rows": int(dataset.get("api_football_market_rows", 0)),
         "dc_rho": float(dataset.get("dc_rho", 0.0) or 0.0),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
         "result_ready": bool(dataset.get("result_ready", False)),
@@ -1321,6 +1378,7 @@ def build_training_matrix(
         matchup_features: Optional[pd.DataFrame] = None,
         market_rows: Optional[pd.DataFrame] = None,
         qualifier_rows: Optional[pd.DataFrame] = None,
+        api_football: Optional[Dict[str, pd.DataFrame]] = None,
         fixture_feature_rows: Optional[pd.DataFrame] = None,
         feature_columns: Optional[List[str]] = None,
         target: str = "result",
@@ -1342,11 +1400,12 @@ def build_training_matrix(
         market_rows = pd.DataFrame()
     if qualifier_rows is None:
         qualifier_rows = pd.DataFrame()
+    api_football = api_football or {}
     records = []
     static_model = base_model
     if static_model is None and history_df is None:
         static_model = WorldCupModel.from_history(pd.DataFrame(), teams=teams or teams_from_rows(working))
-    snapshot_cache: Dict[Tuple[str, str], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
+    snapshot_cache: Dict[Tuple[str, str], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     for _, row in working.iterrows():
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
@@ -1368,13 +1427,27 @@ def build_training_matrix(
                     build_history_feature_table(history_cutoff, reference_date=reference_date),
                     build_matchup_feature_table(history_cutoff, reference_date=reference_date),
                     qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=teams or teams_from_rows(working)),
+                    api_football_feature_table(
+                        api_football.get("team_stats", pd.DataFrame()),
+                        reference_date=reference_date,
+                        teams=teams or teams_from_rows(working),
+                        lineups=api_football.get("lineups", pd.DataFrame()),
+                        injuries=api_football.get("injuries", pd.DataFrame()),
+                    ),
                 )
-            row_model, row_history_features, row_matchup_features, row_qualifier_features = snapshot_cache[cache_key]
+            row_model, row_history_features, row_matchup_features, row_qualifier_features, row_api_football_features = snapshot_cache[cache_key]
         else:
             row_model = static_model
             row_history_features = history_team_features
             row_matchup_features = matchup_features
             row_qualifier_features = qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=teams or teams_from_rows(working))
+            row_api_football_features = api_football_feature_table(
+                api_football.get("team_stats", pd.DataFrame()),
+                reference_date=reference_date,
+                teams=teams or teams_from_rows(working),
+                lineups=api_football.get("lineups", pd.DataFrame()),
+                injuries=api_football.get("injuries", pd.DataFrame()),
+            )
         records.append(
             match_feature_row(
                 row_model,
@@ -1385,6 +1458,7 @@ def build_training_matrix(
                 matchup_features=row_matchup_features,
                 market_rows=market_rows,
                 qualifier_features=row_qualifier_features,
+                api_football_features=row_api_football_features,
                 fixture_feature_rows=fixture_feature_rows,
                 fixture_id=row.get("FixtureId"),
                 match_date=row_date,
@@ -1414,6 +1488,7 @@ def match_feature_row(
         matchup_features: Optional[pd.DataFrame] = None,
         market_rows: Optional[pd.DataFrame] = None,
         qualifier_features: Optional[pd.DataFrame] = None,
+        api_football_features: Optional[pd.DataFrame] = None,
         fixture_feature_rows: Optional[pd.DataFrame] = None,
         fixture_id: Optional[Any] = None,
         match_date: Optional[Any] = None,
@@ -1475,6 +1550,7 @@ def match_feature_row(
         model_totals={"over25": poisson.get("over25", 0.0), "under25": poisson.get("under25", 0.0)},
     ))
     merge_qualifier_feature_block(row, qualifier_features if qualifier_features is not None else pd.DataFrame(), home, away)
+    merge_team_feature_block(row, api_football_features if api_football_features is not None else pd.DataFrame(), home, away, prefix="api_football")
     row.update(fixture_context_features(fixture_context or {}, home=home, away=away, fixture_id=fixture_id, match_date=match_date, match_year=match_year))
     merge_team_feature_block(row, team_features, home, away, prefix="kaggle", limit=24)
     merge_team_feature_block(
@@ -2160,6 +2236,26 @@ def has_over_under_target(rows: pd.DataFrame) -> bool:
         return False
     values = pd.to_numeric(rows["OverUnder25"], errors="coerce").dropna()
     return values.shape[0] > 1 and values.astype(int).nunique() >= 2
+
+
+def api_football_records(bundle: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    if not isinstance(bundle, dict):
+        return {}
+    output: Dict[str, List[Dict[str, Any]]] = {}
+    for key in ("fixtures", "statistics", "team_stats", "lineups", "injuries", "odds", "market_rows"):
+        value = bundle.get(key, pd.DataFrame())
+        output[key] = value.to_dict(orient="records") if isinstance(value, pd.DataFrame) and not value.empty else []
+    return output
+
+
+def api_football_dataframes(bundle: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
+    if not isinstance(bundle, dict):
+        return {}
+    output: Dict[str, pd.DataFrame] = {}
+    for key in ("fixtures", "statistics", "team_stats", "lineups", "injuries", "odds", "market_rows"):
+        value = bundle.get(key, pd.DataFrame())
+        output[key] = value.copy() if isinstance(value, pd.DataFrame) else pd.DataFrame(value or [])
+    return output
 
 
 def read_fixture_feature_rows() -> pd.DataFrame:
@@ -2875,10 +2971,18 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
     matchup_features = pd.DataFrame(record.get("matchup_features", []))
     market_rows = pd.DataFrame(record.get("market_data", []))
     qualifier_rows = pd.DataFrame(record.get("qualifier_matches", []))
+    api_football = api_football_dataframes(record.get("api_football", {}))
     qualifier_features = qualifier_feature_table(
         qualifier_rows,
         reference_date=HISTORY_REFERENCE_DATE,
         teams=[home, away],
+    )
+    api_football_features = api_football_feature_table(
+        api_football.get("team_stats", pd.DataFrame()),
+        reference_date=HISTORY_REFERENCE_DATE,
+        teams=[home, away],
+        lineups=api_football.get("lineups", pd.DataFrame()),
+        injuries=api_football.get("injuries", pd.DataFrame()),
     )
     fixture_feature_rows = read_fixture_feature_rows()
     x = pd.DataFrame([
@@ -2891,6 +2995,7 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
             matchup_features=matchup_features,
             market_rows=market_rows,
             qualifier_features=qualifier_features,
+            api_football_features=api_football_features,
             fixture_feature_rows=fixture_feature_rows,
             fixture_id=fixture_id,
             match_date=None,
@@ -3181,6 +3286,10 @@ def etl_steps(
     market_status = prepared.get("market_status", {}) if prepared else {}
     market_rows = int(prepared.get("market_rows", normalized.get("market_rows", 0)) or 0)
     qualifier_rows = int(prepared.get("qualifier_feature_rows", normalized.get("qualifier_feature_rows", 0)) or 0)
+    api_status = prepared.get("api_football_status", {}) if prepared else {}
+    api_fixture_rows = int(prepared.get("api_football_fixture_rows", normalized.get("api_football_fixture_rows", 0)) or 0)
+    api_stat_rows = int(prepared.get("api_football_stat_rows", normalized.get("api_football_stat_rows", 0)) or 0)
+    api_market_rows = int(prepared.get("api_football_market_rows", normalized.get("api_football_market_rows", 0)) or 0)
     return [
         {
             "name": "Descarga Kaggle",
@@ -3229,6 +3338,12 @@ def etl_steps(
             "status": "ok" if qualifier_rows else "info",
             "count": qualifier_rows,
             "detail": "Clasificatorios 2026 usados solo como contexto temporal, nunca como labels por defecto.",
+        },
+        {
+            "name": "API-Football features",
+            "status": "ok" if api_stat_rows or api_market_rows else "info",
+            "count": api_stat_rows,
+            "detail": f"Status {api_status.get('status', 'missing')}; fixtures={api_fixture_rows}, stats={api_stat_rows}, odds={api_market_rows}. Siempre se cortan por fecha del partido.",
         },
         {
             "name": "Walk-forward XI",
@@ -3352,6 +3467,11 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "qualifier_feature_rows": int(record.get("qualifier_feature_rows", 0)),
         "market_status": record.get("market_status", {}),
         "market_warnings": record.get("market_warnings", []),
+        "api_football_status": record.get("api_football_status", {}),
+        "api_football_warnings": record.get("api_football_warnings", []),
+        "api_football_fixture_rows": int(record.get("api_football_fixture_rows", 0) or 0),
+        "api_football_stat_rows": int(record.get("api_football_stat_rows", 0) or 0),
+        "api_football_market_rows": int(record.get("api_football_market_rows", 0) or 0),
         "dc_rho": float(record.get("dc_rho", 0.0) or 0.0),
         "final_test_year": record.get("final_test_year", ""),
         "split_policy": record.get("split_policy", ""),
@@ -3407,6 +3527,11 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "etl_steps": [],
         "warnings": [],
         "top_features": [],
+        "api_football_status": {},
+        "api_football_warnings": [],
+        "api_football_fixture_rows": 0,
+        "api_football_stat_rows": 0,
+        "api_football_market_rows": 0,
         "hidden_from_catalog": False,
         "markets": {},
         "market_models": {},

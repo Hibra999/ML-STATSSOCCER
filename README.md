@@ -67,6 +67,15 @@ Abrir en:
 http://127.0.0.1:5052
 ```
 
+Features opcionales para Mundial desde API-Football:
+
+```bash
+export API_FOOTBALL_KEY="tu_api_key"
+python mundial.py
+```
+
+La app usa la cache local en `storage/worldcup/api_football/` y solo intenta descargar datos oficiales cuando se refresca el historial/ETL. Las features se construyen con corte temporal por fecha de partido para evitar leakage.
+
 La aplicacion se enlaza a `127.0.0.1`. No esta pensada para exponerse publicamente.
 
 ## Uso Basico
