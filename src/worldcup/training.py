@@ -8,6 +8,7 @@ import pickle
 import re
 import shutil
 import subprocess
+from importlib import metadata as importlib_metadata
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -2535,6 +2536,11 @@ def fit_configured_classifier(
         return {"classifier": classifier, "device": device, "warnings": device_warnings}
     except Exception as exc:
         if device == "cuda":
+            if requested_device == "cuda":
+                raise WorldCupTrainingError(
+                    f"CUDA fue solicitado explicitamente, pero el entrenamiento fallo "
+                    f"({exc.__class__.__name__}: {exc})."
+                ) from exc
             fallback = build_worldcup_classifier(
                 model_key=model_key,
                 params=params,
@@ -2612,7 +2618,7 @@ def build_worldcup_classifier(
         else:
             kwargs["objective"] = "binary:logistic"
         if device == "cuda":
-            kwargs.update({"tree_method": "hist", "device": "cuda"})
+            kwargs.update(xgboost_cuda_params())
         return XGBClassifier(**kwargs)
     if model_key == "lightgbm":
         from src.models.classifiers.boosting import WarningFreeLGBMClassifier
@@ -2665,6 +2671,17 @@ def build_worldcup_classifier(
             verbose=False,
         )
     raise WorldCupTrainingError(f'Modelo "{model_key}" no soportado para Mundial.')
+
+
+def xgboost_cuda_params() -> Dict[str, Any]:
+    try:
+        version = importlib_metadata.version("xgboost")
+        major = int(str(version).split(".", 1)[0])
+    except Exception:
+        major = 2
+    if major >= 2:
+        return {"tree_method": "hist", "device": "cuda"}
+    return {"tree_method": "gpu_hist", "predictor": "gpu_predictor"}
 
 
 def tune_model_if_requested(

@@ -259,6 +259,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "renderWalkForwardNotice" in app_source
     assert "renderHeroHardware" in app_source
     assert "hardwareChip(\"CUDA\"" in app_source
+    assert "preferredTrainingDevice" in app_source
     assert "Numba" not in app_source
     assert "trackWorldcupJob" in app_source
     assert "/api/jobs/${jobId}" in app_source
@@ -423,6 +424,56 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert options["defaults"]["market_mode"] == "dual_markets"
     assert [target["key"] for target in options["targets"]] == ["dual_markets"]
     assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
+
+
+def test_worldcup_auto_device_uses_cuda_when_available(monkeypatch):
+    from src.worldcup import training
+
+    monkeypatch.setattr(training, "detect_hardware", lambda: {
+        "cpu_count": 16,
+        "default_n_jobs": -1,
+        "cuda_available": True,
+        "cuda_devices": ["GPU 0: NVIDIA GeForce RTX 5070"],
+        "cuda_error": "",
+        "device_default": "cuda",
+    })
+
+    assert training.resolve_device("xgboost", "auto") == ("cuda", [])
+    assert training.resolve_device("catboost", "cuda") == ("cuda", [])
+    assert training.resolve_device("xgboost", "cpu") == ("cpu", [])
+
+
+def test_worldcup_xgboost_cuda_params_support_old_and_new_versions(monkeypatch):
+    from src.worldcup import training
+
+    monkeypatch.setattr(training.importlib_metadata, "version", lambda package: "1.7.6")
+    assert training.xgboost_cuda_params() == {"tree_method": "gpu_hist", "predictor": "gpu_predictor"}
+
+    monkeypatch.setattr(training.importlib_metadata, "version", lambda package: "2.1.0")
+    assert training.xgboost_cuda_params() == {"tree_method": "hist", "device": "cuda"}
+
+
+def test_worldcup_explicit_cuda_failure_does_not_silently_fallback(monkeypatch):
+    from src.worldcup import training
+
+    monkeypatch.setattr(training, "resolve_device", lambda model_key, requested_device: ("cuda", []))
+
+    def fail_build_classifier(**kwargs):
+        raise RuntimeError("no gpu backend")
+
+    monkeypatch.setattr(training, "build_worldcup_classifier", fail_build_classifier)
+
+    with pytest.raises(training.WorldCupTrainingError, match="CUDA fue solicitado explicitamente"):
+        training.fit_configured_classifier(
+            x_train=pd.DataFrame({"feature": [0.0, 1.0]}),
+            y_train=pd.Series([0, 1]),
+            model_key="xgboost",
+            params={},
+            n_jobs=1,
+            requested_device="cuda",
+            seed=7,
+            num_classes=2,
+        )
 
 
 def test_worldcup_fallback_has_2026_groups_opener_and_bracket():

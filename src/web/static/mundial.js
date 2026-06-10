@@ -900,9 +900,9 @@ function renderTrainingControls(options, model) {
     modelIdInput.value = modelId;
     modelIdInput.dataset.autofilled = "true";
   }
-  document.getElementById("worldcup-device").value = (model.hardware || {}).requested_device || (options.defaults || {}).device || "auto";
-  document.getElementById("worldcup-n-jobs").value = (model.hardware || {}).n_jobs ?? (options.defaults || {}).n_jobs ?? -1;
   if (!state.trainingControlsApplied) {
+    document.getElementById("worldcup-device").value = preferredTrainingDevice(options, model);
+    document.getElementById("worldcup-n-jobs").value = (options.defaults || {}).n_jobs ?? -1;
     document.getElementById("worldcup-n-trials").value = (options.defaults || {}).n_trials || 12;
     document.getElementById("worldcup-objective").value = (options.defaults || {}).objective || "F1";
     document.getElementById("worldcup-optuna-sampler").value = (options.defaults || {}).optuna_sampler || "tpe";
@@ -954,6 +954,16 @@ function applyModelDefaults(modelKey, force) {
     modelIdInput.dataset.autofilled = "true";
   }
   applyTuningLocks();
+}
+
+function preferredTrainingDevice(options, model) {
+  const defaults = options.defaults || {};
+  const hardware = options.hardware || {};
+  const requested = (model.hardware || {}).requested_device || "";
+  const fallback = defaults.device || "auto";
+  if (requested === "cpu" && hardware.cuda_available) return fallback;
+  if (requested === "cuda" && !hardware.cuda_available) return fallback;
+  return requested || fallback;
 }
 
 function autoWorldcupModelId(modelKey) {
