@@ -16,6 +16,7 @@ const state = {
   countdownTimer: null,
   jobs: new Map(),
   jobTimer: null,
+  jobPollingInFlight: false,
   newModelMode: false,
 };
 
@@ -1307,42 +1308,97 @@ function trackWorldcupJob(job, kind) {
 }
 
 function startWorldcupJobPolling() {
-  if (state.jobTimer) return;
-  state.jobTimer = window.setInterval(pollWorldcupJobs, 1000);
-  pollWorldcupJobs();
+  if (state.jobTimer || state.jobPollingInFlight) return;
+  scheduleWorldcupJobPoll(0);
+}
+
+function scheduleWorldcupJobPoll(delay) {
+  if (state.jobTimer) window.clearTimeout(state.jobTimer);
+  state.jobTimer = window.setTimeout(pollWorldcupJobs, Math.max(Number(delay) || 0, 0));
 }
 
 async function pollWorldcupJobs() {
-  let hasActive = false;
-  for (const jobId of [...state.jobs.keys()]) {
-    const previous = state.jobs.get(jobId) || {};
-    if (isTerminalJob(previous) && previous.handled) continue;
-    try {
-      const job = await api(`/api/jobs/${jobId}`);
-      job.kind = previous.kind;
-      job.handled = previous.handled;
-      if (isTerminalJob(job) && !job.handled) {
-        job.handled = true;
-        state.jobs.set(jobId, job);
-        await handleWorldcupJobComplete(job);
-      } else {
-        state.jobs.set(jobId, job);
-      }
-      if (!isTerminalJob(job)) hasActive = true;
-      renderWorldcupJobProgress(job.kind);
-    } catch (error) {
-      previous.status = "failed";
-      previous.error = error.message;
-      previous.handled = true;
-      state.jobs.set(jobId, previous);
-      await handleWorldcupJobComplete(previous);
-      renderWorldcupJobProgress(previous.kind);
-    }
-  }
-  if (!hasActive && state.jobTimer) {
-    window.clearInterval(state.jobTimer);
+  if (state.jobPollingInFlight) return;
+  if (state.jobTimer) {
+    window.clearTimeout(state.jobTimer);
     state.jobTimer = null;
   }
+  state.jobPollingInFlight = true;
+  let hasActive = false;
+  let nextDelay = 10000;
+  try {
+    for (const jobId of [...state.jobs.keys()]) {
+      const previous = state.jobs.get(jobId) || {};
+      if (isTerminalJob(previous) && previous.handled) continue;
+      try {
+        const job = await api(`/api/jobs/${jobId}`);
+        job.kind = previous.kind;
+        job.handled = previous.handled;
+        applyWorldcupJobPollState(job, previous);
+        if (isTerminalJob(job) && !job.handled) {
+          job.handled = true;
+          state.jobs.set(jobId, job);
+          await handleWorldcupJobComplete(job);
+        } else {
+          state.jobs.set(jobId, job);
+        }
+        if (!isTerminalJob(job)) {
+          hasActive = true;
+          nextDelay = Math.min(nextDelay, worldcupJobPollDelay(job));
+        }
+        renderWorldcupJobProgress(job.kind);
+      } catch (error) {
+        previous.status = "failed";
+        previous.error = error.message;
+        previous.handled = true;
+        state.jobs.set(jobId, previous);
+        await handleWorldcupJobComplete(previous);
+        renderWorldcupJobProgress(previous.kind);
+      }
+    }
+  } finally {
+    state.jobPollingInFlight = false;
+  }
+  for (const job of state.jobs.values()) {
+    if (!isTerminalJob(job)) {
+      hasActive = true;
+      nextDelay = Math.min(nextDelay, worldcupJobPollDelay(job));
+    }
+  }
+  if (hasActive) {
+    scheduleWorldcupJobPoll(nextDelay);
+  }
+}
+
+function applyWorldcupJobPollState(job, previous) {
+  const nextSignature = worldcupJobProgressSignature(job);
+  const previousSignature = previous.pollSignature || worldcupJobProgressSignature(previous);
+  job.pollSignature = nextSignature;
+  job.pollIdleCount = nextSignature === previousSignature ? Number(previous.pollIdleCount || 0) + 1 : 0;
+}
+
+function worldcupJobProgressSignature(job) {
+  const progress = job.progress || {};
+  return [
+    job.status || "",
+    progress.stage || "",
+    progress.current ?? "",
+    progress.total ?? "",
+    progress.percent ?? "",
+    progress.current_trial ?? "",
+    progress.total_trials ?? "",
+  ].join("|");
+}
+
+function worldcupJobPollDelay(job) {
+  const progress = job.progress || {};
+  const kind = job.kind || "";
+  const stage = progress.stage || "";
+  const base = kind === "simulation" ? 2000 : stage === "tuning" ? 5000 : 3000;
+  const idleCount = Number(job.pollIdleCount || 0);
+  if (idleCount >= 4) return 10000;
+  if (idleCount >= 2) return Math.min(base * 2, 10000);
+  return base;
 }
 
 async function handleWorldcupJobComplete(job) {

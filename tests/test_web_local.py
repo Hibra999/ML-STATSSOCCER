@@ -260,6 +260,11 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "renderHeroHardware" in app_source
     assert "hardwareChip(\"CUDA\"" in app_source
     assert "preferredTrainingDevice" in app_source
+    assert "setInterval(pollWorldcupJobs, 1000)" not in app_source
+    assert "setTimeout(pollWorldcupJobs" in app_source
+    assert "jobPollingInFlight" in app_source
+    assert "worldcupJobPollDelay" in app_source
+    assert "worldcupJobProgressSignature" in app_source
     assert "Numba" not in app_source
     assert "trackWorldcupJob" in app_source
     assert "/api/jobs/${jobId}" in app_source
