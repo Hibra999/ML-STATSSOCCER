@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260609-11">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260609-10">
 </head>
 <body>
   <header class="topbar">
@@ -31,6 +31,8 @@
         <span class="eyebrow">Apartado independiente</span>
         <h1>Mundial 2026</h1>
         <p id="hero-meta">Cargando fixture inaugural...</p>
+        <div id="hero-countdown" class="hero-countdown"></div>
+        <div id="hero-hardware" class="hero-hardware"></div>
         <div class="hero-match" id="hero-match"></div>
       </div>
       <div class="hero-metrics">
@@ -40,7 +42,6 @@
         <div class="metric"><span>Jugadores</span><strong id="metric-players">0</strong></div>
         <div id="hero-next-grid" class="hero-next-grid"></div>
       </div>
-      <div id="hero-hardware" class="hero-hardware"></div>
     </section>
 
     <section id="grupos" class="section-block worldcup-view">
@@ -192,6 +193,7 @@
             <button id="training-retrain-base" type="button">Reentrenar con partido nuevo</button>
             <button id="training-retrain-players" type="button">Reentrenar con partido + jugadores</button>
           </div>
+          <div id="worldcup-training-progress" class="worldcup-progress hidden"></div>
           <div id="training-model-state" class="model-state-grid"></div>
           <div id="training-warnings" class="status-strip"></div>
         </article>
@@ -240,6 +242,7 @@
           <div class="actions-row">
             <button id="simulate-btn" class="primary" type="button">Simular torneo</button>
           </div>
+          <div id="worldcup-simulation-progress" class="worldcup-progress hidden"></div>
           <div id="simulation-summary" class="status-strip"></div>
         </article>
       </div>
@@ -258,10 +261,14 @@
 
     <section id="datos" class="section-block worldcup-view">
       <div class="section-heading">
-        <h2>Datos</h2>
+        <h2>Datos y procedimiento</h2>
         <button id="players-refresh" type="button">Actualizar jugadores</button>
       </div>
-      <div class="data-grid single-data-grid">
+      <div class="data-grid">
+        <div>
+          <h3>Procedimiento</h3>
+          <div id="procedure-list" class="procedure-list"></div>
+        </div>
         <div>
           <h3>Jugadores</h3>
           <small id="players-source"></small>

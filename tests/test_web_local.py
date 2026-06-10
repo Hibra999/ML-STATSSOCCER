@@ -71,7 +71,7 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/maintenance/clear" in paths
     assert "/api/mundial/predict-match" in paths
     assert "/api/mundial/predict-upcoming" in paths
-    assert "/api/mundial/procedure" not in paths
+    assert "/api/mundial/procedure" in paths
     assert "/api/jobs/{job_id}" in paths
     assert "/api/worldcup/overview" not in paths
     assert "/assets" in paths
@@ -156,12 +156,8 @@ def test_predict_ui_uses_automatic_fixtures_only():
 def test_mundial_ui_is_standalone_and_personalizable():
     html_source = open("src/web/static/mundial.html", "r", encoding="utf-8").read()
     app_source = open("src/web/static/mundial.js", "r", encoding="utf-8").read()
-    css_source = open("src/web/static/mundial.css", "r", encoding="utf-8").read()
 
     assert "Mundial 2026" in html_source
-    assert "Datos y procedimiento" not in html_source
-    assert "procedure-list" not in html_source
-    assert "renderProcedure" not in app_source
     assert "worldcup-view active" in html_source
     nav_source = html_source.split("<nav>", 1)[1].split("</nav>", 1)[0]
     nav_order = [
@@ -201,10 +197,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-use-player-features" in html_source
     assert "sim-use-ml-model" in html_source
     assert "training-train" in html_source
-    assert "worldcup-training-progress" not in html_source
-    assert "worldcup-simulation-progress" not in html_source
-    assert "worldcup-progress" not in css_source
-    assert "renderWorldcupJobProgress" not in app_source
+    assert "worldcup-training-progress" in html_source
+    assert "worldcup-simulation-progress" in html_source
     assert "training-retrain-base" in html_source
     assert "training-retrain-players" in html_source
     assert "training-walkforward-notice" in html_source
@@ -223,7 +217,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Siempre 1X2 + O/U 2.5" in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-predictions" in html_source
-    assert "hero-countdown-vs" in app_source
+    assert "hero-countdown" in html_source
     assert "hero-next-grid" in html_source
     assert "simulation-summary" in html_source
     assert "upcoming-team" in app_source
@@ -245,9 +239,6 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "trainingPayload" in app_source
     assert "paramsTable" in app_source
     assert "evalStrategyLabel" in app_source
-    assert "diagnostic_eval" in app_source
-    assert "eval_legacy" in app_source
-    assert "legacy random diagnostico" in app_source
     assert "renderConfusionMatrix" in app_source
     assert "renderEtlFlow" in app_source
     assert "renderTuningFlow" in app_source
@@ -256,18 +247,10 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "market-panel" in app_source
     assert "renderWalkForwardNotice" in app_source
     assert "renderHeroHardware" in app_source
-    assert "XGBoost" in app_source
-    assert "Numba" in app_source
-    assert "Detectado" in app_source
-    assert "CUDA kernel" in app_source
-    assert "CPU-only" in app_source
-    assert "shortCudaDevice" in app_source
-    assert "grid-column: 1 / -1" in css_source
     assert "trackWorldcupJob" in app_source
     assert "/api/jobs/${jobId}" in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
-    assert "/api/mundial/procedure" not in app_source
     assert "renderHeroCountdown" in app_source
     assert "heroNextCardHtml" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
@@ -284,137 +267,11 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert keys == {"ngboost", "catboost", "lightgbm", "xgboost"}
     assert options["hardware"]["cpu_count"] >= 1
     assert options["hardware"]["default_n_jobs"] == -1
-    assert "xgboost_cuda_ready" in options["hardware"]
-    assert "numba_backend" in options["hardware"]
     assert options["defaults"]["model_type"] == "xgboost"
     assert options["defaults"]["training_target"] == "result"
     assert options["defaults"]["market_mode"] == "dual_markets"
     assert [target["key"] for target in options["targets"]] == ["dual_markets"]
     assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
-
-
-def test_worldcup_accelerator_cpu_sanitizes_float32_matrix():
-    from src.worldcup.accelerators import prepare_numeric_matrix, training_acceleration_backend
-
-    raw = np.array([[1.0, np.nan], [np.inf, -np.inf]], dtype=np.float64)
-    matrix = prepare_numeric_matrix(raw, use_cuda=False)
-    backend = training_acceleration_backend(prefer_cuda=False)
-
-    assert matrix.dtype == np.float32
-    assert matrix.tolist() == [[1.0, 0.0], [0.0, 0.0]]
-    assert backend["backend"] == "cpu"
-    assert backend["model_backend"] == "cpu"
-    assert backend["numba_backend"] == "cpu"
-    assert "numba_cuda_available" in backend
-
-
-def test_worldcup_accelerator_separates_model_cuda_from_numba_cuda(monkeypatch):
-    from src.worldcup import accelerators
-
-    monkeypatch.setattr(accelerators, "numba_cuda_available", lambda: False)
-    backend = accelerators.training_acceleration_backend(prefer_cuda=True, cuda_available=True)
-
-    assert backend["backend"] == "cuda"
-    assert backend["model_backend"] == "cuda"
-    assert backend["numba_backend"] == "cpu"
-    assert backend["xgboost_cuda_ready"] is True
-
-
-def test_worldcup_accelerator_reports_numba_cuda_when_kernel_available(monkeypatch):
-    from src.worldcup import accelerators
-
-    monkeypatch.setattr(accelerators, "numba_cuda_available", lambda: True)
-    monkeypatch.setattr(accelerators, "_sanitize_float32_cuda", object())
-    backend = accelerators.training_acceleration_backend(prefer_cuda=True, cuda_available=True)
-
-    assert backend["backend"] == "cuda"
-    assert backend["numba_backend"] == "cuda"
-    assert backend["numba_cuda_available"] is True
-
-
-def test_worldcup_resolve_device_keeps_xgboost_cuda_when_numba_cuda_missing(monkeypatch):
-    from src.worldcup import training
-
-    monkeypatch.setattr(training, "detect_hardware", lambda: {
-        "cpu_count": 32,
-        "default_n_jobs": -1,
-        "cuda_available": True,
-        "system_cuda_available": True,
-        "xgboost_cuda_ready": True,
-        "cuda_devices": ["GPU 0: NVIDIA GeForce RTX 5070 (UUID: test)"],
-        "cuda_error": "",
-        "nvidia_smi_available": True,
-        "numba": True,
-        "numba_cuda_available": False,
-        "numba_backend": "cpu",
-        "device_default": "cuda",
-    })
-    device, warnings, hardware = training.resolve_device("xgboost", "auto")
-    backend = training.training_acceleration_backend(prefer_cuda=device == "cuda", cuda_available=hardware["xgboost_cuda_ready"])
-
-    assert device == "cuda"
-    assert warnings == []
-    assert backend["backend"] == "cuda"
-    assert backend["numba_backend"] == "cpu"
-
-
-def test_worldcup_resolve_device_keeps_ngboost_cpu_only_on_cuda_request(monkeypatch):
-    from src.worldcup import training
-
-    monkeypatch.setattr(training, "detect_hardware", lambda: {
-        "cpu_count": 32,
-        "default_n_jobs": -1,
-        "cuda_available": True,
-        "system_cuda_available": True,
-        "xgboost_cuda_ready": True,
-        "cuda_devices": ["GPU 0: NVIDIA GeForce RTX 5070"],
-        "cuda_error": "",
-        "nvidia_smi_available": True,
-        "numba": True,
-        "numba_cuda_available": True,
-        "numba_backend": "cuda",
-        "device_default": "cuda",
-    })
-    device, warnings, _ = training.resolve_device("ngboost", "cuda")
-
-    assert device == "cpu"
-    assert any("CPU-only" in warning for warning in warnings)
-
-
-def test_worldcup_xgboost_cpu_hist_training_and_cuda_fallback(monkeypatch):
-    from src.worldcup import training
-
-    monkeypatch.setattr(training, "detect_hardware", lambda: {
-        "cpu_count": 2,
-        "default_n_jobs": -1,
-        "cuda_available": False,
-        "cuda_devices": [],
-        "cuda_error": "sin cuda en test",
-        "numba_cuda_available": False,
-        "device_default": "cpu",
-    })
-    x = pd.DataFrame({
-        "a": [0.0, 1.0, 2.0, 3.0, np.nan, np.inf],
-        "b": [1.0, 0.0, 1.0, 0.0, 2.0, -np.inf],
-    })
-    y = pd.Series([0, 1, 2, 0, 1, 2])
-    result = training.fit_configured_classifier(
-        x_train=x,
-        y_train=y,
-        model_key="xgboost",
-        params={"n_estimators": 5, "max_depth": 2, "learning_rate": 0.2},
-        n_jobs=1,
-        requested_device="cuda",
-        seed=7,
-        num_classes=3,
-    )
-    params = result["classifier"].get_params()
-
-    assert result["device"] == "cpu"
-    assert result["accelerator"]["backend"] == "cpu"
-    assert params["tree_method"] == "hist"
-    assert params["device"] == "cpu"
-    assert any("CUDA no disponible" in warning for warning in result["warnings"])
 
 
 def test_worldcup_fallback_has_2026_groups_opener_and_bracket():
@@ -461,8 +318,6 @@ def test_worldcup_simulation_returns_advancement_probabilities():
     assert result["matches"].shape[0] == 72
     assert "Pasa grupo %" in result["advancement"].columns
     assert "Over 2.5 %" in result["matches"].columns
-    assert result["backend"]["backend"] in {"cuda", "cpu_numba", "numpy", "python"}
-    assert result["backend"]["label"].startswith("Monte Carlo")
     assert result["advancement"]["Campeon %"].sum() == pytest.approx(100, abs=0.01)
 
 
@@ -484,45 +339,6 @@ def test_worldcup_simulation_emits_progress_payloads():
     assert payloads[-1]["total"] == 100
     assert payloads[-1]["percent"] == 100
     assert payloads[-1]["message"] == "Monte Carlo completado"
-
-
-def test_worldcup_training_leakage_audit_rejects_target_features():
-    from src.worldcup import training
-
-    x_train = pd.DataFrame({"rating_diff": [1.0, 2.0], "HG": [0.0, 1.0]})
-    x_eval = pd.DataFrame({"rating_diff": [3.0], "HG": [2.0]})
-
-    with pytest.raises(training.WorldCupTrainingError, match="Data leakage detectado"):
-        training.audit_training_leakage(["rating_diff", "HG"], x_train, x_eval, "holdout_temporal")
-
-
-def test_worldcup_training_split_prefers_temporal_dates():
-    from src.worldcup import training
-
-    x = pd.DataFrame({"rating_diff": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]})
-    y = pd.Series(["H", "D", "A", "H", "D", "A"])
-    dates = pd.Series(pd.date_range("2020-01-01", periods=6, freq="D"))
-    _, x_eval, _, y_eval, strategy, warnings = training.safe_train_eval_split_with_dates(
-        x,
-        y,
-        dates,
-        test_size=0.34,
-        random_state=7,
-    )
-
-    assert strategy == "holdout_temporal"
-    assert warnings == []
-    assert x_eval["rating_diff"].tolist() == [0.5, 0.6]
-    assert y_eval.tolist() == ["D", "A"]
-
-
-def test_worldcup_simulation_summary_exposes_backend():
-    from src.web import mundial_services
-
-    result = mundial_services.simulate({"iterations": 100, "seed": 7, "use_ml_model": False})
-
-    assert result["summary"]["simulation_backend"]["backend"] in {"cuda", "cpu_numba", "numpy", "python"}
-    assert "Monte Carlo" in result["summary"]["simulation_backend"]["label"]
 
 
 def test_worldcup_lanus_lineup_normalization_extracts_starting_elevens():
@@ -814,11 +630,6 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["enabled"] is False
     assert result["model"]["hardware"]["actual_device"] in {"cpu", "cuda"}
-    assert result["diagnostic_eval"]["result"]["enabled"] is True
-    assert result["diagnostic_eval"]["result"]["strategy"] == "legacy_random_holdout"
-    assert result["model"]["diagnostic_eval"]["result"]["enabled"] is True
-    assert result["model"]["markets"]["result"]["diagnostic_eval"]["enabled"] is True
-    assert "eval_legacy" in result["metrics"]
     assert result["eval_rows"] == 2
     assert prediction["fixture"]["home"] == "Mexico"
     assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
@@ -841,8 +652,6 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert dual_result["model"]["bundle"] is True
     assert dual_result["model"]["market_mode"] == "dual_markets"
     assert set(dual_result["model"]["market_models"]) == {"result", "over_under_25"}
-    assert dual_result["diagnostic_eval"]["result"]["strategy"] == "legacy_random_holdout"
-    assert dual_result["model"]["markets"]["result"]["diagnostic_eval"]["strategy"] == "legacy_random_holdout"
     assert dual_result["model"]["markets"]["result"]["confusion_matrix"]["matrix"]
     assert dual_result["model"]["markets"]["over_under_25"]["confusion_matrix"]["matrix"]
     assert dual_prediction["model_probs"]["model_id"] == "mex-dual"
@@ -924,16 +733,10 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert status["eval_rows"] > 0
     assert status["eval_strategy"] == "holdout_from_train"
     assert result["mode"] == "match_result"
-    assert result["eval_strategy"] == "holdout_temporal"
+    assert result["eval_strategy"] == "holdout_from_train"
     assert result["prediction_rows"] == 2
     assert result["model"]["target_column"] == "Label + OverUnder25"
-    assert result["model"]["eval_strategy"] == "holdout_temporal"
-    assert result["anti_leakage"]["result"]["split_temporal"] is True
-    assert result["anti_leakage"]["result"]["history_features"] == "pre_eval_cutoff"
-    assert result["diagnostic_eval"]["result"]["enabled"] is True
-    assert result["diagnostic_eval"]["result"]["strategy"] == "legacy_random_holdout"
-    assert result["model"]["markets"]["result"]["diagnostic_eval"]["history_features"] == "global_legacy"
-    assert "eval_legacy" in result["model"]["markets"]["result"]["metrics"]
+    assert result["model"]["eval_strategy"] == "holdout_from_train"
     assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
     assert result["model"]["markets"]["over_under_25"]["confusion_matrix"]["labels"] == ["Under 2.5", "Over 2.5"]
     assert result["model"]["etl_steps"]

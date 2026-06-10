@@ -16,13 +16,6 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precisio
 from sklearn.model_selection import train_test_split as sklearn_train_test_split
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
-from src.worldcup.accelerators import (
-    numba_jit_available,
-    numba_cuda_available,
-    prepare_xgboost_prediction_array,
-    prepare_xgboost_training_arrays,
-    training_acceleration_backend,
-)
 from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
 from src.worldcup.model import HOST_TEAMS, WorldCupModel
 
@@ -53,29 +46,6 @@ BASE_FEATURE_COLUMNS = [
 ]
 TARGET_LABELS = ["H", "D", "A"]
 TEAM_TARGET_COLUMNS = ["quarter_finalist", "semi_finalist", "finalist", "winner"]
-LEAKAGE_FEATURE_NAMES = {
-    "label",
-    "target",
-    "result",
-    "outcome",
-    "winner",
-    "winning_team",
-    "match_result",
-    "home_goals",
-    "away_goals",
-    "goals_home",
-    "goals_away",
-    "team1_goals",
-    "team2_goals",
-    "g1",
-    "g2",
-    "hg",
-    "ag",
-    "score",
-    "score1",
-    "score2",
-    "overunder25",
-}
 MODEL_PARAM_KEYS = [
     "n_estimators",
     "max_depth",
@@ -161,10 +131,7 @@ def detect_hardware() -> Dict[str, Any]:
     cpu_count = int(os.cpu_count() or 1)
     cuda_devices: List[str] = []
     cuda_error = ""
-    nvidia_smi = bool(shutil.which("nvidia-smi"))
-    numba_cuda = numba_cuda_available()
-    numba_jit = numba_jit_available()
-    if nvidia_smi:
+    if shutil.which("nvidia-smi"):
         try:
             result = subprocess.run(
                 ["nvidia-smi", "-L"],
@@ -181,22 +148,13 @@ def detect_hardware() -> Dict[str, Any]:
             cuda_error = f"{exc.__class__.__name__}: {exc}"
     else:
         cuda_error = "nvidia-smi no disponible"
-    if numba_cuda and not cuda_devices:
-        cuda_devices = ["CUDA detectado por Numba"]
-    cuda_available = bool(cuda_devices) or numba_cuda
     return {
         "cpu_count": cpu_count,
         "default_n_jobs": -1,
-        "cuda_available": cuda_available,
-        "system_cuda_available": bool(cuda_devices),
-        "xgboost_cuda_ready": cuda_available,
+        "cuda_available": bool(cuda_devices),
         "cuda_devices": cuda_devices,
         "cuda_error": cuda_error,
-        "nvidia_smi_available": nvidia_smi,
-        "numba": numba_jit,
-        "numba_cuda_available": numba_cuda,
-        "numba_backend": "cuda" if numba_cuda else ("cpu" if numba_jit else "none"),
-        "device_default": "cuda" if cuda_available else "cpu",
+        "device_default": "cuda" if cuda_devices else "cpu",
     }
 
 
@@ -345,14 +303,8 @@ def train_single_hybrid_model(
 
     group_teams = teams_from_tournament(tournament)
     history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
-    target_warning = ""
-    eval_strategy = "unavailable"
-    effective_target = train_config["training_target"]
-    eval_size = float(payload.get("eval_size", 0.25) or 0.25)
-    history_cutoff = evaluation_history_cutoff(train_rows, test_rows, effective_target, eval_size)
-    feature_history_df = history_before_cutoff(history_df, history_cutoff)
     base_model = WorldCupModel.from_history(
-        feature_history_df,
+        history_df,
         teams=group_teams,
         history_weight=float(payload.get("history_weight", 1.0) or 1.0),
         recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
@@ -360,12 +312,14 @@ def train_single_hybrid_model(
         max_goals=int(payload.get("max_goals", 10) or 10),
     )
     feature_store = normalized["team_features"]
-    history_team_features = build_history_feature_table(feature_history_df, reference_date=str(history_cutoff.date()) if history_cutoff is not None else HISTORY_REFERENCE_DATE)
-    matchup_features = build_matchup_feature_table(feature_history_df, reference_date=str(history_cutoff.date()) if history_cutoff is not None else HISTORY_REFERENCE_DATE)
+    history_team_features = build_history_feature_table(history_df)
+    matchup_features = build_matchup_feature_table(history_df)
     fixture_feature_rows = read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
+    target_warning = ""
+    eval_strategy = "unavailable"
+    effective_target = train_config["training_target"]
     if effective_target == "over_under_25" and not has_over_under_target(train_rows):
         raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar O/U 2.5.")
-    train_dates = training_row_dates(train_rows, effective_target)
     x_train, y_train, feature_columns = build_training_matrix(
         train_rows,
         base_model,
@@ -375,13 +329,12 @@ def train_single_hybrid_model(
         fixture_feature_rows=fixture_feature_rows,
         target=effective_target,
     )
-    split_warnings: List[str] = []
     if test_rows.empty:
-        x_train, x_eval, y_train, y_eval, eval_strategy, split_warnings = safe_train_eval_split_with_dates(
+        eval_strategy = "holdout_from_train"
+        x_train, x_eval, y_train, y_eval = safe_train_eval_split(
             x_train,
             y_train,
-            train_dates,
-            test_size=eval_size,
+            test_size=float(payload.get("eval_size", 0.25) or 0.25),
             random_state=train_config["seed"],
         )
     else:
@@ -399,33 +352,8 @@ def train_single_hybrid_model(
 
     if x_train.empty or pd.Series(y_train).dropna().empty:
         raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
-    anti_leakage = audit_training_leakage(feature_columns, x_train, x_eval, eval_strategy)
-    anti_leakage["history_cutoff"] = str(history_cutoff.date()) if history_cutoff is not None else ""
-    anti_leakage["history_features"] = "pre_eval_cutoff" if history_cutoff is not None else "global_no_date"
-    if history_cutoff is None:
-        split_warnings.append("No se encontro fecha suficiente para cortar features historicas antes de evaluacion; se reporta auditoria sin corte temporal.")
     y_train_encoded, label_classes = encode_labels(y_train)
     y_eval_encoded = encode_existing_labels(y_eval, label_classes)
-    legacy_eval = legacy_random_eval_dataset(
-        train_rows=train_rows,
-        base_model=WorldCupModel.from_history(
-            history_df,
-            teams=group_teams,
-            history_weight=float(payload.get("history_weight", 1.0) or 1.0),
-            recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
-            host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
-            max_goals=int(payload.get("max_goals", 10) or 10),
-        ),
-        team_features=feature_store,
-        history_team_features=build_history_feature_table(history_df),
-        matchup_features=build_matchup_feature_table(history_df),
-        fixture_feature_rows=fixture_feature_rows,
-        feature_columns=feature_columns,
-        target=effective_target,
-        eval_size=eval_size,
-        random_state=train_config["seed"],
-        label_classes=label_classes,
-    )
     tuned = tune_model_if_requested(
         train_config,
         x_train,
@@ -451,22 +379,14 @@ def train_single_hybrid_model(
     y_eval_pred = classifier_predict(clf, x_eval)
     emit_training_progress(progress_callback, "metrics", 5, 5, f"Calculando métricas {label}", market=label, model_id=model_id)
     metrics = classification_metrics_from_predictions(y_train_encoded, y_train_pred, y_eval_encoded, y_eval_pred)
-    diagnostic = diagnostic_eval_metrics(clf, legacy_eval, metrics)
-    if diagnostic.get("metrics"):
-        metrics["eval_legacy"] = diagnostic["metrics"]
-    if diagnostic.get("warning"):
-        split_warnings.append(diagnostic["warning"])
     confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes, target=effective_target)
     etl = etl_steps(files, normalized, eval_strategy, prepared=prepared_dataset_status(files=files, normalized=normalized))
     hardware = detect_hardware()
     hardware.update({
         "requested_device": train_config["device"],
         "actual_device": fit_result["device"],
-        "model_type": train_config["model_type"],
-        "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
         "n_jobs": train_config["n_jobs"],
         "effective_n_jobs": effective_n_jobs(train_config["n_jobs"], hardware["cpu_count"]),
-        "training_accelerator": fit_result.get("accelerator", {}),
     })
     record = {
         "classifier": clf,
@@ -496,9 +416,7 @@ def train_single_hybrid_model(
         "tuning_trace": tuning_trace(tuned),
         "etl_steps": etl,
         "hardware": hardware,
-        "anti_leakage": anti_leakage,
-        "diagnostic_eval": diagnostic,
-        "warnings": unique_strings([warning for warning in [target_warning, *split_warnings, *normalized.get("warnings", []), *fit_result.get("warnings", [])] if warning]),
+        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *fit_result.get("warnings", [])] if warning]),
         "top_features": top_feature_importances(clf, feature_columns),
         "walk_forward_mode": walk_forward_mode,
         "walk_forward_summary": walk_forward_summary,
@@ -518,8 +436,6 @@ def train_single_hybrid_model(
         "source": KAGGLE_DATASET_SLUG,
         "mode": normalized["training_mode"],
         "eval_strategy": eval_strategy,
-        "anti_leakage": anti_leakage,
-        "diagnostic_eval": diagnostic,
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
         "effective_target": effective_target,
         "requested_target": train_config["training_target"],
@@ -639,14 +555,6 @@ def train_dual_market_model(
         "tuning_trace": bundle_tuning_trace(market_results),
         "etl_steps": bundle_etl_steps(result_record.get("etl_steps", []), market_models),
         "hardware": result_record.get("hardware", detect_hardware()),
-        "anti_leakage": {
-            "result": result_record.get("anti_leakage", {}),
-            "over_under_25": over_record.get("anti_leakage", {}),
-        },
-        "diagnostic_eval": {
-            "result": result_record.get("diagnostic_eval", {}),
-            "over_under_25": over_record.get("diagnostic_eval", {}),
-        },
         "warnings": warnings,
         "top_features": result_record.get("top_features", []),
         "markets": market_results,
@@ -675,8 +583,6 @@ def train_dual_market_model(
         "model_id": bundle_id,
         "model_type": train_config["model_type"],
         "hardware": bundle_record["hardware"],
-        "anti_leakage": bundle_record["anti_leakage"],
-        "diagnostic_eval": bundle_record["diagnostic_eval"],
         "tuning": bundle_record["tuning"],
         "tuning_trace": bundle_record["tuning_trace"],
         "etl_steps": bundle_record["etl_steps"],
@@ -1039,7 +945,6 @@ def standardize_match_rows(df: pd.DataFrame, source: str = "") -> pd.DataFrame:
     target_col = first_existing(clean.columns, ["result", "outcome", "target", "label", "winner", "winning_team", "match_result"])
     goals_home = first_existing(clean.columns, ["home_goals", "goals_home", "team1_goals", "g1", "score1"])
     goals_away = first_existing(clean.columns, ["away_goals", "goals_away", "team2_goals", "g2", "score2"])
-    date_col = first_existing(clean.columns, ["date", "match_date", "fecha", "kickoff"])
     if not home_col or not away_col:
         return pd.DataFrame()
     rows = []
@@ -1054,8 +959,6 @@ def standardize_match_rows(df: pd.DataFrame, source: str = "") -> pd.DataFrame:
         if label not in TARGET_LABELS:
             continue
         record = {"Home": home, "Away": away, "Label": label, "Source": source}
-        if date_col:
-            record["Date"] = row.get(date_col)
         if goals_home and goals_away:
             try:
                 record["HG"] = float(row.get(goals_home))
@@ -1472,7 +1375,7 @@ def window_summary_features(team_df: pd.DataFrame, window: int, prefix: str) -> 
     }
 
 
-def build_matchup_feature_table(history_df: pd.DataFrame, reference_date: str = HISTORY_REFERENCE_DATE) -> pd.DataFrame:
+def build_matchup_feature_table(history_df: pd.DataFrame) -> pd.DataFrame:
     if history_df.empty:
         return pd.DataFrame(columns=["HomeKey", "AwayKey"])
     working = history_df.copy()
@@ -1492,7 +1395,7 @@ def build_matchup_feature_table(history_df: pd.DataFrame, reference_date: str = 
             match_date = pd.Timestamp(row["Date"])
             grouped.setdefault((normalize_team_key(home), normalize_team_key(away)), []).append((match_date, g1, g2))
             grouped.setdefault((normalize_team_key(away), normalize_team_key(home)), []).append((match_date, g2, g1))
-    reference_ts = pd.Timestamp(reference_date)
+    reference_ts = pd.Timestamp(HISTORY_REFERENCE_DATE)
     for (home_key, away_key), matches in grouped.items():
         ordered_matches = sorted(matches, key=lambda item: item[0])
         recent_matches = ordered_matches[-3:]
@@ -1890,173 +1793,6 @@ def safe_train_eval_split(x: pd.DataFrame, y: pd.Series, test_size: float, rando
         return x.copy(), x.copy(), y_series.copy(), y_series.copy()
 
 
-def training_row_dates(rows: pd.DataFrame, target: str = "result") -> pd.Series:
-    working = rows.copy()
-    if target == "over_under_25":
-        working = working[working["OverUnder25"].notna()] if "OverUnder25" in working.columns else working.iloc[0:0]
-    if "Date" not in working.columns:
-        return pd.Series([pd.NaT] * len(working))
-    return pd.to_datetime(working["Date"], errors="coerce").reset_index(drop=True)
-
-
-def evaluation_history_cutoff(train_rows: pd.DataFrame, test_rows: pd.DataFrame, target: str, eval_size: float) -> Optional[pd.Timestamp]:
-    if not test_rows.empty:
-        test_dates = training_row_dates(test_rows, target)
-        if not test_dates.empty and test_dates.notna().any():
-            return pd.Timestamp(test_dates.dropna().min())
-    train_dates = training_row_dates(train_rows, target)
-    if train_dates.empty or train_dates.notna().sum() != len(train_dates) or train_dates.nunique(dropna=True) < 2:
-        return None
-    test_count = max(1, int(round(len(train_dates) * float(eval_size))))
-    if len(train_dates) - test_count < 1:
-        return None
-    ordered = train_dates.sort_values(kind="stable").reset_index(drop=True)
-    return pd.Timestamp(ordered.iloc[-test_count])
-
-
-def history_before_cutoff(history_df: pd.DataFrame, cutoff: Optional[pd.Timestamp]) -> pd.DataFrame:
-    if cutoff is None or history_df.empty or "Date" not in history_df.columns:
-        return history_df
-    working = history_df.copy()
-    working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
-    return working[working["Date"].notna() & (working["Date"] < cutoff)].copy()
-
-
-def safe_train_eval_split_with_dates(
-        x: pd.DataFrame,
-        y: pd.Series,
-        dates: pd.Series,
-        test_size: float,
-        random_state: int,
-):
-    y_series = pd.Series(y).reset_index(drop=True)
-    date_series = pd.to_datetime(pd.Series(dates), errors="coerce").reset_index(drop=True)
-    warnings: List[str] = []
-    if len(date_series) == len(y_series) and date_series.notna().sum() == len(y_series) and date_series.nunique(dropna=True) > 1:
-        test_count = max(1, int(round(len(y_series) * float(test_size))))
-        if len(y_series) - test_count >= 1:
-            order = np.argsort(date_series.to_numpy(dtype="datetime64[ns]"), kind="stable")
-            train_idx = order[:-test_count]
-            eval_idx = order[-test_count:]
-            y_train = y_series.iloc[train_idx].reset_index(drop=True)
-            y_eval = y_series.iloc[eval_idx].reset_index(drop=True)
-            if set(y_eval.astype(str)).issubset(set(y_train.astype(str))) and y_train.nunique(dropna=True) >= 2:
-                return (
-                    x.iloc[train_idx].reset_index(drop=True),
-                    x.iloc[eval_idx].reset_index(drop=True),
-                    y_train,
-                    y_eval,
-                    "holdout_temporal",
-                    warnings,
-                )
-            warnings.append("Split temporal omitido porque eval contenia clases ausentes en train; se uso holdout estratificado.")
-    else:
-        warnings.append("Sin fechas suficientes para split temporal; se uso holdout estratificado.")
-    x_train, x_eval, y_train, y_eval = safe_train_eval_split(x, y_series, test_size=test_size, random_state=random_state)
-    return x_train, x_eval, y_train, y_eval, "holdout_random_no_date", warnings
-
-
-def audit_training_leakage(feature_columns: List[str], x_train: pd.DataFrame, x_eval: pd.DataFrame, eval_strategy: str) -> Dict[str, Any]:
-    checked = list(dict.fromkeys([*feature_columns, *map(str, x_train.columns), *map(str, x_eval.columns)]))
-    compact_blocked = {name.replace("_", "") for name in LEAKAGE_FEATURE_NAMES}
-    blocked = [
-        column for column in checked
-        if normalize_column(column) in LEAKAGE_FEATURE_NAMES or normalize_column(column).replace("_", "") in compact_blocked
-    ]
-    if blocked:
-        raise WorldCupTrainingError(f"Data leakage detectado: columnas objetivo en features: {', '.join(blocked[:8])}.")
-    return {
-        "target_columns_removed": True,
-        "blocked_features": [],
-        "eval_strategy": eval_strategy,
-        "feature_count": int(len(feature_columns)),
-        "train_rows_checked": int(x_train.shape[0]),
-        "eval_rows_checked": int(x_eval.shape[0]),
-        "split_temporal": eval_strategy in {"test_file", "holdout_temporal"},
-    }
-
-
-def legacy_random_eval_dataset(
-        train_rows: pd.DataFrame,
-        base_model: WorldCupModel,
-        team_features: pd.DataFrame,
-        history_team_features: pd.DataFrame,
-        matchup_features: pd.DataFrame,
-        fixture_feature_rows: pd.DataFrame,
-        feature_columns: List[str],
-        target: str,
-        eval_size: float,
-        random_state: int,
-        label_classes: List[Any],
-) -> Dict[str, Any]:
-    try:
-        x_legacy, y_legacy, _ = build_training_matrix(
-            train_rows,
-            base_model,
-            team_features,
-            history_team_features=history_team_features,
-            matchup_features=matchup_features,
-            fixture_feature_rows=fixture_feature_rows,
-            feature_columns=feature_columns,
-            target=target,
-        )
-        _, x_eval, _, y_eval = safe_train_eval_split(
-            x_legacy,
-            y_legacy,
-            test_size=eval_size,
-            random_state=random_state,
-        )
-        if x_eval.empty or pd.Series(y_eval).dropna().empty:
-            return {}
-        return {
-            "x_eval": x_eval,
-            "y_eval": encode_existing_labels(y_eval, label_classes),
-            "strategy": "legacy_random_holdout",
-            "history_features": "global_legacy",
-            "eval_rows": int(len(y_eval)),
-        }
-    except Exception as exc:
-        return {
-            "strategy": "legacy_random_holdout",
-            "error": f"{exc.__class__.__name__}: {exc}",
-        }
-
-
-def diagnostic_eval_metrics(clf, legacy_eval: Dict[str, Any], metrics: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
-    if not legacy_eval or "x_eval" not in legacy_eval:
-        return {
-            "enabled": False,
-            "strategy": legacy_eval.get("strategy", "legacy_random_holdout") if legacy_eval else "legacy_random_holdout",
-            "error": legacy_eval.get("error", "") if legacy_eval else "",
-        }
-    y_eval = legacy_eval["y_eval"]
-    y_pred = classifier_predict(clf, legacy_eval["x_eval"])
-    legacy_metrics = metric_row(y_eval, y_pred)
-    strict_f1 = float((metrics.get("eval") or {}).get("F1", 0.0) or 0.0)
-    train_f1 = float((metrics.get("train") or {}).get("F1", 0.0) or 0.0)
-    legacy_f1 = float(legacy_metrics.get("F1", 0.0) or 0.0)
-    strict_gap = round(train_f1 - strict_f1, 3)
-    legacy_gap = round(train_f1 - legacy_f1, 3)
-    uplift = round(legacy_f1 - strict_f1, 3)
-    warning = ""
-    if uplift >= 0.12:
-        warning = "Eval legacy random supera claramente al eval temporal; las métricas anteriores probablemente eran optimistas por split/feature leakage."
-    return {
-        "enabled": True,
-        "strategy": legacy_eval.get("strategy", "legacy_random_holdout"),
-        "history_features": legacy_eval.get("history_features", "global_legacy"),
-        "eval_rows": legacy_eval.get("eval_rows", 0),
-        "metrics": legacy_metrics,
-        "strict_f1": strict_f1,
-        "legacy_f1": legacy_f1,
-        "train_f1": train_f1,
-        "strict_gap": strict_gap,
-        "legacy_gap": legacy_gap,
-        "legacy_vs_strict_f1": uplift,
-        "warning": warning,
-    }
-
-
 def encode_labels(y: pd.Series) -> Tuple[pd.Series, List[Any]]:
     values = pd.Series(y).reset_index(drop=True)
     if values.astype(str).isin(TARGET_LABELS).all():
@@ -2089,18 +1825,7 @@ def fit_configured_classifier(
         seed: int,
         num_classes: int,
 ) -> Dict[str, Any]:
-    device, device_warnings, hardware = resolve_device(model_key, requested_device)
-    accelerator = training_acceleration_backend(
-        prefer_cuda=device == "cuda",
-        cuda_available=hardware.get("xgboost_cuda_ready") if model_key == "xgboost" else hardware.get("cuda_available"),
-    )
-    fit_x, fit_y = x_train, y_train
-    if model_key == "xgboost":
-        fit_x, fit_y = prepare_xgboost_training_arrays(
-            x_train,
-            y_train,
-            use_cuda=accelerator.get("numba_backend") == "cuda",
-        )
+    device, device_warnings = resolve_device(model_key, requested_device)
     try:
         classifier = build_worldcup_classifier(
             model_key=model_key,
@@ -2110,9 +1835,9 @@ def fit_configured_classifier(
             seed=seed,
             num_classes=num_classes,
         )
-        classifier.fit(fit_x, fit_y)
+        classifier.fit(x_train, y_train)
         finalize_classifier_for_inference(classifier, model_key=model_key, trained_device=device)
-        return {"classifier": classifier, "device": device, "warnings": device_warnings, "accelerator": accelerator}
+        return {"classifier": classifier, "device": device, "warnings": device_warnings}
     except Exception as exc:
         if device == "cuda":
             fallback = build_worldcup_classifier(
@@ -2123,13 +1848,12 @@ def fit_configured_classifier(
                 seed=seed,
                 num_classes=num_classes,
             )
-            fallback.fit(fit_x, fit_y)
+            fallback.fit(x_train, y_train)
             finalize_classifier_for_inference(fallback, model_key=model_key, trained_device="cpu")
             return {
                 "classifier": fallback,
                 "device": "cpu",
                 "warnings": [*device_warnings, f"CUDA fallo durante fit ({exc.__class__.__name__}); se reintento en CPU."],
-                "accelerator": training_acceleration_backend(prefer_cuda=False, cuda_available=False),
             }
         raise
 
@@ -2149,20 +1873,20 @@ def finalize_classifier_for_inference(classifier, model_key: str, trained_device
         pass
 
 
-def resolve_device(model_key: str, requested_device: str) -> Tuple[str, List[str], Dict[str, Any]]:
+def resolve_device(model_key: str, requested_device: str) -> Tuple[str, List[str]]:
     hardware = detect_hardware()
     warnings_out: List[str] = []
     if model_key == "ngboost":
-        if requested_device in {"auto", "cuda"} and hardware["cuda_available"]:
-            warnings_out.append("NGBoost es CPU-only en esta integracion; se entreno en CPU.")
-        return "cpu", warnings_out, hardware
+        if requested_device == "cuda":
+            warnings_out.append("NGBoost no usa CUDA en esta integracion; se entreno en CPU.")
+        return "cpu", warnings_out
     if requested_device == "cpu":
-        return "cpu", warnings_out, hardware
+        return "cpu", warnings_out
     if requested_device in {"auto", "cuda"} and hardware["cuda_available"]:
-        return "cuda", warnings_out, hardware
+        return "cuda", warnings_out
     if requested_device == "cuda":
         warnings_out.append(f"CUDA no disponible ({hardware.get('cuda_error') or 'sin dispositivos'}); se entreno en CPU.")
-    return "cpu", warnings_out, hardware
+    return "cpu", warnings_out
 
 
 def build_worldcup_classifier(
@@ -2186,15 +1910,14 @@ def build_worldcup_classifier(
             "reg_alpha": float(params.get("alpha_regularization", 0.0)),
             "random_state": seed,
             "n_jobs": n_jobs,
-            "tree_method": "hist",
-            "device": "cuda" if device == "cuda" else "cpu",
             "eval_metric": "mlogloss" if num_classes > 2 else "logloss",
-            "verbosity": 0,
         }
         if num_classes > 2:
             kwargs.update({"objective": "multi:softprob", "num_class": num_classes})
         else:
             kwargs["objective"] = "binary:logistic"
+        if device == "cuda":
+            kwargs.update({"tree_method": "hist", "device": "cuda"})
         return XGBClassifier(**kwargs)
     if model_key == "lightgbm":
         from src.models.classifiers.boosting import WarningFreeLGBMClassifier
@@ -2644,13 +2367,13 @@ def blend_probabilities(base_probs: Dict[str, float], ml_probs: Dict[str, float]
 
 def classifier_predict(classifier, x: pd.DataFrame) -> np.ndarray:
     if classifier.__class__.__module__.startswith("xgboost"):
-        return np.asarray(classifier.predict(prepare_xgboost_prediction_array(x)))
+        return np.asarray(classifier.predict(np.asarray(x, dtype=np.float32)))
     return np.asarray(classifier.predict(x))
 
 
 def classifier_predict_proba(classifier, x: pd.DataFrame) -> np.ndarray:
     if classifier.__class__.__module__.startswith("xgboost"):
-        return np.asarray(classifier.predict_proba(prepare_xgboost_prediction_array(x)))
+        return np.asarray(classifier.predict_proba(np.asarray(x, dtype=np.float32)))
     return np.asarray(classifier.predict_proba(x))
 
 
@@ -2706,7 +2429,6 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "confusion_matrix": record.get("confusion_matrix", result.get("confusion_matrix", {})),
         "classes": record.get("classes", []),
         "eval_strategy": record.get("eval_strategy", result.get("eval_strategy", "")),
-        "diagnostic_eval": record.get("diagnostic_eval", result.get("diagnostic_eval", {})),
         "train_rows": int(result.get("train_rows", 0) or 0),
         "eval_rows": int(result.get("eval_rows", 0) or 0),
         "tuning": record.get("tuning", result.get("tuning", {})),
@@ -2867,7 +2589,7 @@ def etl_steps(
             "name": "Split evaluacion",
             "status": "ok" if eval_strategy != "unavailable" else "pending",
             "count": test_rows if test_rows else planned_holdout_rows(train_rows),
-            "detail": "Test etiquetado" if eval_strategy == "test_file" else "Holdout temporal" if eval_strategy == "holdout_temporal" else "Holdout estratificado sin fecha" if eval_strategy == "holdout_random_no_date" else "Sin evaluacion.",
+            "detail": "Test etiquetado" if eval_strategy == "test_file" else "Holdout desde train" if eval_strategy == "holdout_from_train" else "Sin evaluacion.",
         },
         {
             "name": "Features seleccion",
@@ -2995,8 +2717,6 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "tuning_trace": record.get("tuning_trace", {}),
         "etl_steps": record.get("etl_steps", []),
         "hardware": record.get("hardware", {}),
-        "anti_leakage": record.get("anti_leakage", {}),
-        "diagnostic_eval": record.get("diagnostic_eval", {}),
         "warnings": record.get("warnings", []),
         "top_features": record.get("top_features", []),
         "kaggle_files": record.get("kaggle_files", []),
@@ -3048,8 +2768,6 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "eval_strategy": "",
         "prediction_rows": 0,
         "hardware": detect_hardware(),
-        "anti_leakage": {},
-        "diagnostic_eval": {},
         "tuning": {"enabled": False},
         "tuning_trace": tuning_trace({"enabled": False}),
         "etl_steps": [],

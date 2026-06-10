@@ -19,6 +19,13 @@ const state = {
   newModelMode: false,
 };
 
+const jobLabels = {
+  queued: "En cola",
+  running: "En proceso",
+  succeeded: "Completado",
+  failed: "Error",
+};
+
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
   loadAll(false);
@@ -69,7 +76,7 @@ async function loadAll(refresh) {
   clearAlert();
   setLoading();
   try {
-    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, training, models] = await Promise.all([
+    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, training, models, procedure] = await Promise.all([
       api(`/api/mundial/overview?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/groups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/fixtures?refresh=${refresh ? "true" : "false"}`),
@@ -79,6 +86,7 @@ async function loadAll(refresh) {
       api(`/api/mundial/player-features?refresh=${refresh ? "true" : "false"}`),
       api("/api/mundial/training/status"),
       api("/api/mundial/models"),
+      api("/api/mundial/procedure"),
     ]);
     state.overview = overview;
     state.groups = groups.groups || [];
@@ -104,6 +112,7 @@ async function loadAll(refresh) {
     renderPlayerFeatures(playerFeatures);
     renderTrainingStatus(training);
     renderModelsCatalog(models);
+    renderProcedure(procedure);
     fillLineupSelect();
   } catch (error) {
     showError(error.message);
@@ -130,6 +139,8 @@ function setLoading() {
   document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("models-list").innerHTML = loadingHtml("Modelos pendientes");
   document.getElementById("simulation-summary").innerHTML = "";
+  renderWorldcupJobProgress("training");
+  renderWorldcupJobProgress("simulation");
 }
 
 function applyDefaultConfig(config) {
@@ -168,11 +179,8 @@ function renderOverview(overview) {
     ${matchTeamHtml(highlight.home || {}, "home")}
     <div class="hero-vs-block">
       <span class="versus">VS</span>
-      <div class="hero-kickoff">
-        <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
-        <small>${escapeHtml(highlight.venue || "Sede por confirmar")}</small>
-      </div>
-      <div id="hero-countdown" class="hero-countdown hero-countdown-vs"></div>
+      <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
+      <small>${escapeHtml(highlight.venue || "Sede por confirmar")}</small>
     </div>
     ${matchTeamHtml(highlight.away || {}, "away")}`;
   renderHeroCountdown(overview.countdown_target, overview.countdown_state, highlight);
@@ -314,44 +322,16 @@ function heroNextCardHtml(fixture) {
 function renderHeroHardware(hardware) {
   const container = document.getElementById("hero-hardware");
   if (!container) return;
-  const accelerator = hardware.training_accelerator || {};
-  const cudaDetected = Boolean(hardware.cuda_available);
-  const device = String(hardware.actual_device || hardware.device_default || (cudaDetected ? "cuda" : "cpu")).toLowerCase();
-  const modelType = String(hardware.model_type || (document.getElementById("worldcup-model-type") || {}).value || "").toLowerCase();
-  const modelLabel = hardware.model_label || ({ xgboost: "XGBoost", lightgbm: "LightGBM", catboost: "CatBoost", ngboost: "NGBoost" }[modelType]) || "Modelo";
-  const cpuOnly = modelType === "ngboost";
-  const cudaDevices = Array.isArray(hardware.cuda_devices) ? hardware.cuda_devices.filter(Boolean) : [];
-  const cudaDevice = shortCudaDevice(cudaDevices[0] || "");
-  const cudaDetail = cudaDetected
-    ? cudaDevice || "GPU disponible"
-    : cleanMessage(hardware.cuda_error || "CPU fallback");
-  const modelUsesCuda = !cpuOnly && device === "cuda";
-  const modelMode = cpuOnly ? "CPU-only" : (modelUsesCuda ? "GPU" : "CPU");
-  const xgboostCuda = modelType === "xgboost" ? modelUsesCuda : Boolean(hardware.xgboost_cuda_ready || cudaDetected);
-  const xgboostMode = xgboostCuda ? "CUDA hist" : "CPU hist";
-  const numbaMode = hardware.numba_cuda_available ? "CUDA kernel" : (hardware.numba === false ? "No disponible" : "CPU njit");
-  const numbaDetail = hardware.numba_cuda_available ? "kernel GPU" : (hardware.numba === false ? "sin numba" : "prange/fastmath");
-  const modelBackend = accelerator.model_backend || accelerator.backend || (modelUsesCuda ? "cuda" : "cpu");
-  const acceleratorName = cpuOnly ? "CPU-only" : `${modelLabel} ${String(modelBackend).toUpperCase()}`;
-  const acceleratorDetail = cpuOnly ? "NGBoost sin CUDA" : (modelBackend === "cuda" ? "entrenamiento GPU" : "entrenamiento CPU");
-  const threads = hardware.effective_n_jobs || hardware.n_jobs || hardware.default_n_jobs || hardware.cpu_count || "-";
   container.innerHTML = [
-    hardwareChip("CUDA", cudaDetected ? "Detectado" : "No detectado", cudaDetail, cudaDetected ? "ok" : "warn", cudaDevices[0] || cudaDetail),
-    hardwareChip("Modelo", modelMode, modelLabel, modelUsesCuda ? "ok" : (cpuOnly ? "warn" : "")),
-    hardwareChip("XGBoost", xgboostMode, xgboostCuda ? "device cuda" : "tree_method hist", xgboostCuda ? "ok" : ""),
-    hardwareChip("Numba", numbaMode, numbaDetail, hardware.numba_cuda_available ? "ok" : ""),
-    hardwareChip("CPU", threads, `${hardware.cpu_count || "-"} nucleos`, ""),
-    hardwareChip("Acelerador", acceleratorName, acceleratorDetail, modelBackend === "cuda" ? "ok" : ""),
+    hardwareChip("Device", hardware.actual_device || hardware.device_default || "cpu", "Motor"),
+    hardwareChip("CUDA", hardware.cuda_available ? "Si" : "No", hardware.cuda_available ? "GPU disponible" : "CPU fallback"),
+    hardwareChip("CPU", hardware.cpu_count || "-", "nucleos"),
+    hardwareChip("Threads", hardware.effective_n_jobs || hardware.n_jobs || hardware.default_n_jobs || "-", "n_jobs"),
   ].join("");
 }
 
-function hardwareChip(label, value, detail, tone = "", title = "") {
-  const titleAttr = title ? ` title="${escapeAttr(title)}"` : "";
-  return `<div class="hardware-chip ${tone ? `hardware-${escapeAttr(tone)}` : ""}"${titleAttr}><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
-}
-
-function shortCudaDevice(value) {
-  return String(value || "").replace(/\s*\(UUID:.*\)$/i, "");
+function hardwareChip(label, value, detail) {
+  return `<div class="hardware-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
 }
 
 async function loadModelsCatalog() {
@@ -752,7 +732,7 @@ async function trainWorldCupModel(walkForwardMode = "none") {
   try {
     const job = await api("/api/mundial/models/train", jsonOptions(trainingPayload(walkForwardMode)));
     trackWorldcupJob(job, "training");
-    document.getElementById("training-status").textContent = `${modeLabel} en segundo plano...`;
+    document.getElementById("simulation-summary").textContent = "Entrenamiento en proceso...";
   } catch (error) {
     showError(error.message);
   }
@@ -810,13 +790,7 @@ function trainingMarketSections(model, payload) {
   const markets = (model && model.markets) || (payload && payload.markets) || {};
   const keys = ["result", "over_under_25"].filter((key) => markets[key]);
   if (keys.length) {
-    const diagnostics = (model && model.diagnostic_eval) || (payload && payload.diagnostic_eval) || {};
-    return keys.map((key) => ({
-      key,
-      label: markets[key].label || marketLabel(key),
-      diagnostic_eval: markets[key].diagnostic_eval || diagnostics[key] || {},
-      ...markets[key],
-    }));
+    return keys.map((key) => ({ key, label: markets[key].label || marketLabel(key), ...markets[key] }));
   }
   const target = (model && (model.effective_target || model.requested_target)) || (payload && (payload.effective_target || payload.requested_target)) || "result";
   return [{
@@ -824,7 +798,6 @@ function trainingMarketSections(model, payload) {
     label: marketLabel(target),
     metrics: (model && model.metrics) || (payload && payload.metrics) || {},
     confusion_matrix: (model && model.confusion_matrix) || (payload && payload.confusion_matrix) || {},
-    diagnostic_eval: (model && model.diagnostic_eval) || (payload && payload.diagnostic_eval) || {},
     tuning_trace: (model && model.tuning_trace) || (payload && payload.tuning_trace) || (model && model.tuning) || {},
     top_features: (model && model.top_features) || [],
     train_rows: payload && payload.train_rows,
@@ -890,9 +863,6 @@ function marketLabel(key) {
 
 function evalStrategyLabel(strategy) {
   if (strategy === "test_file") return "test etiquetado";
-  if (strategy === "holdout_temporal") return "holdout temporal";
-  if (strategy === "legacy_random_holdout") return "legacy random diagnostico";
-  if (strategy === "holdout_random_no_date") return "holdout sin fecha";
   if (strategy === "holdout_from_train") return "holdout desde train";
   if (strategy === "unavailable") return "sin evaluacion";
   return strategy || "pendiente";
@@ -1005,18 +975,9 @@ function renderMetricCards(markets) {
   const sections = Array.isArray(markets) ? markets : [{ label: "Evaluacion", metrics: markets || {} }];
   document.getElementById("training-metric-cards").innerHTML = sections.map((market) => {
     const evalMetrics = (market.metrics && (market.metrics.eval || market.metrics.Eval)) || {};
-    const diagnostic = market.diagnostic_eval || {};
-    const diagnosticText = diagnostic.enabled
-      ? `Temporal F1 ${formatMetricValue(diagnostic.strict_f1)} / legacy ${formatMetricValue(diagnostic.legacy_f1)} / brecha ${formatMetricValue(diagnostic.legacy_vs_strict_f1)}`
-      : "";
     const rows = ["Accuracy", "F1", "Precision", "Recall"].map((key) => predictionCard(key, evalMetrics[key] ?? "-")).join("");
-    return `<section class="market-panel"><header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml((market.train_rows ?? "-"))} train / ${escapeHtml((market.eval_rows ?? "-"))} eval</small></header><div class="market-card-grid">${rows}</div>${diagnosticText ? `<small class="diagnostic-line">${escapeHtml(diagnosticText)}</small>` : ""}</section>`;
+    return `<section class="market-panel"><header><strong>${escapeHtml(market.label || "Mercado")}</strong><small>${escapeHtml((market.train_rows ?? "-"))} train / ${escapeHtml((market.eval_rows ?? "-"))} eval</small></header><div class="market-card-grid">${rows}</div></section>`;
   }).join("");
-}
-
-function formatMetricValue(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number.toFixed(3) : "-";
 }
 
 function renderConfusionMatrix(payload) {
@@ -1124,9 +1085,6 @@ function renderTrainingTables(model, payload) {
 
 function metricsTableFromMarket(market) {
   const metrics = market.metrics || {};
-  if (!metrics.eval_legacy && market.diagnostic_eval && market.diagnostic_eval.metrics) {
-    metrics.eval_legacy = market.diagnostic_eval.metrics;
-  }
   const rows = Object.entries(metrics).map(([split, values]) => ({ Split: split, ...(values || {}) }));
   const columns = rows.length ? Object.keys(rows[0]) : [];
   return { columns, rows, total: rows.length };
@@ -1272,6 +1230,7 @@ function trackWorldcupJob(job, kind) {
   job.handled = false;
   state.jobs.set(job.job_id, job);
   setWorldcupJobBusy(kind, true);
+  renderWorldcupJobProgress(kind);
   startWorldcupJobPolling();
 }
 
@@ -1298,12 +1257,14 @@ async function pollWorldcupJobs() {
         state.jobs.set(jobId, job);
       }
       if (!isTerminalJob(job)) hasActive = true;
+      renderWorldcupJobProgress(job.kind);
     } catch (error) {
       previous.status = "failed";
       previous.error = error.message;
       previous.handled = true;
       state.jobs.set(jobId, previous);
       await handleWorldcupJobComplete(previous);
+      renderWorldcupJobProgress(previous.kind);
     }
   }
   if (!hasActive && state.jobTimer) {
@@ -1317,7 +1278,6 @@ async function handleWorldcupJobComplete(job) {
   if (job.status === "failed") {
     showError(job.error || "Proceso fallido");
     if (job.kind === "training" && state.training) renderTrainingStatus(state.training);
-    if (job.kind === "simulation") document.getElementById("simulation-summary").textContent = "";
     return;
   }
   const result = job.result || {};
@@ -1328,11 +1288,55 @@ async function handleWorldcupJobComplete(job) {
     if (result.models) renderModelsCatalog(result.models);
     else await loadModelsCatalog();
     document.getElementById("sim-use-ml-model").checked = true;
-    document.getElementById("training-status").textContent = `Modelo listo: ${(result.model || {}).model_name || (result.model || {}).model_id || "híbrido"}`;
+    document.getElementById("simulation-summary").textContent = `Modelo listo: ${(result.model || {}).model_name || (result.model || {}).model_id || "híbrido"}`;
   }
   if (job.kind === "simulation") {
     renderSimulation(result);
   }
+}
+
+function renderWorldcupJobProgress(kind) {
+  const target = document.getElementById(kind === "simulation" ? "worldcup-simulation-progress" : "worldcup-training-progress");
+  if (!target) return;
+  const job = latestWorldcupJob(kind);
+  if (!job) {
+    target.className = "worldcup-progress hidden";
+    target.innerHTML = "";
+    return;
+  }
+  const progress = job.progress || {};
+  const percent = clampPercent(progress.percent ?? (job.status === "succeeded" ? 100 : 0));
+  const current = progress.current_trial || progress.current || 0;
+  const total = progress.total_trials || progress.total || 0;
+  const label = progress.message || job.message || jobLabels[job.status] || job.status;
+  const best = progress.best_value === "" || progress.best_value === null || progress.best_value === undefined
+    ? ""
+    : `<span>Mejor ${escapeHtml(formatNumber(progress.best_value))}</span>`;
+  const stateText = progress.last_state ? `<span>${escapeHtml(progress.last_state)}</span>` : "";
+  const market = progress.market ? `<span>${escapeHtml(progress.market)}</span>` : "";
+  const error = job.error ? `<span>${escapeHtml(cleanMessage(job.error))}</span>` : "";
+  target.className = `worldcup-progress ${escapeAttr(job.status || "queued")}`;
+  target.innerHTML = `
+    <div class="progress-header">
+      <div class="progress-title">
+        <strong>${escapeHtml(jobLabels[job.status] || job.status || "Proceso")}</strong>
+        <small>${escapeHtml(label)}</small>
+      </div>
+      <strong>${escapeHtml(percent)}%</strong>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" style="width:${escapeAttr(percent)}%"></div></div>
+    <div class="progress-meta">
+      <span>${escapeHtml(progress.stage || job.status || "queued")}</span>
+      <span>${escapeHtml(current)}/${escapeHtml(total)}</span>
+      ${market}
+      ${best}
+      ${stateText}
+      ${error}
+    </div>`;
+}
+
+function latestWorldcupJob(kind) {
+  return [...state.jobs.values()].filter((job) => job.kind === kind).pop();
 }
 
 function isTerminalJob(job) {
@@ -1347,6 +1351,18 @@ function setWorldcupJobBusy(kind, busy) {
     const button = document.getElementById(id);
     if (button) button.disabled = Boolean(busy);
   });
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(100, Math.max(0, Math.round(number)));
+}
+
+function formatNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return value;
+  return number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function predictionCard(label, value) {
@@ -1428,9 +1444,8 @@ function renderSimulation(result) {
   const featureState = config.use_player_features ? "features XI activas" : "features XI off";
   const mlState = config.use_ml_model ? "ML híbrido activo" : "ML híbrido off";
   const layers = (summary.hybrid_layers || []).join(" + ");
-  const backend = (summary.simulation_backend || {}).label || "Monte Carlo CPU";
   document.getElementById("simulation-summary").textContent =
-    `${summary.model || "Modelo"} - ${backend} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState} - ${mlState} - ${layers}`;
+    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState} - ${mlState} - ${layers}`;
   const rows = (result.advancement && result.advancement.rows) || [];
   const topChampions = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 8);
   document.getElementById("champion-strip").innerHTML = topChampions.map((row) => {
@@ -1443,6 +1458,14 @@ function renderSimulation(result) {
   }).join("");
   renderTable("advancement-table", result.advancement);
   renderTable("match-probs-table", result.matches);
+}
+
+function renderProcedure(payload) {
+  document.getElementById("procedure-list").innerHTML = (payload.steps || []).map((step, index) => `
+    <article class="procedure-step">
+      <span>${escapeHtml(index + 1)}</span>
+      <div><strong>${escapeHtml(step.name)}</strong><p>${escapeHtml(step.detail)}</p></div>
+    </article>`).join("");
 }
 
 function rebuildTeamAssets() {

@@ -162,6 +162,10 @@ def create_mundial_app() -> FastAPI:
     def simulate(payload: Dict[str, Any] = Body(default={})):
         return _submit("Simulando Monte Carlo Mundial", services.simulate, payload, with_progress=True)
 
+    @app.get("/api/mundial/procedure")
+    def procedure():
+        return _wrap(services.procedure)
+
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
         job = jobs.get(job_id)
