@@ -6,7 +6,7 @@ from xgboost import XGBClassifier
 from src.preprocessing.utils.sampling import SamplerType
 from src.preprocessing.utils.target import TargetType
 from src.models.model import ClassificationModel
-from src.models.classifiers.boosting import sanitize_probabilities
+from src.models.classifiers.boosting import auto_boosting_device, sanitize_probabilities, xgboost_cuda_params
 
 
 class XGBoost(ClassificationModel):
@@ -45,6 +45,7 @@ class XGBoost(ClassificationModel):
             learning_rate: float = 0.3,
             lambda_regularization: float = 1.0,
             alpha_regularization: float = 0.0,
+            device: str = "auto",
             **kwargs
     ):
         self._n_estimators = n_estimators
@@ -53,6 +54,7 @@ class XGBoost(ClassificationModel):
         self._learning_rate = learning_rate
         self._lambda_regularization = lambda_regularization
         self._alpha_regularization = alpha_regularization
+        self._device = auto_boosting_device(device)
 
         super().__init__(
             league_id=league_id,
@@ -67,17 +69,20 @@ class XGBoost(ClassificationModel):
     def build_classifier(self, input_size: int, num_classes: int) -> BaseEstimator:
         """ Builds an XGBoost classification model. """
 
-        return XGBClassifier(
-            booster='gbtree',
-            n_estimators=self._n_estimators,
-            learning_rate=self._learning_rate,
-            max_depth=self._max_depth,
-            min_child_weight=self._min_child_weight,
-            reg_lambda=self._lambda_regularization,
-            reg_alpha=self._alpha_regularization,
-            random_state=0,
-            n_jobs=-1
-        )
+        kwargs = {
+            "booster": "gbtree",
+            "n_estimators": self._n_estimators,
+            "learning_rate": self._learning_rate,
+            "max_depth": self._max_depth,
+            "min_child_weight": self._min_child_weight,
+            "reg_lambda": self._lambda_regularization,
+            "reg_alpha": self._alpha_regularization,
+            "random_state": 0,
+            "n_jobs": -1,
+        }
+        if self._device == "cuda":
+            kwargs.update(xgboost_cuda_params())
+        return XGBClassifier(**kwargs)
 
     def get_feature_importances(self) -> np.ndarray:
         """ Gets feature importances of XGBoost. """
@@ -104,6 +109,8 @@ class XGBoost(ClassificationModel):
             return {'low': 0.1, 'high': 2.0, 'step': 0.1}
         elif param == 'alpha_regularization':
             return {'low': 0.0, 'high': 1.0, 'step': 0.1}
+        elif param == 'device':
+            return ['auto', 'cpu', 'cuda']
         else:
             raise ValueError(f'Undefined parameter: "{param}".')
 
@@ -114,6 +121,7 @@ class XGBoost(ClassificationModel):
             'min_child_weight': self._min_child_weight,
             'learning_rate': self._learning_rate,
             'lambda_regularization': self._lambda_regularization,
-            'alpha_regularization': self._alpha_regularization
+            'alpha_regularization': self._alpha_regularization,
+            'device': self._device,
         })
         return model_config

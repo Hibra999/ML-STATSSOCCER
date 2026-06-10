@@ -8,7 +8,6 @@ import pickle
 import re
 import shutil
 import subprocess
-from importlib import metadata as importlib_metadata
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -18,6 +17,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
+from src.models.classifiers.boosting import catboost_device_params, lightgbm_device_params, xgboost_cuda_params
 from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
 from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, group_letter, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
 from src.worldcup.market_provider import (
@@ -2637,7 +2637,7 @@ def build_worldcup_classifier(
             random_state=seed,
             n_jobs=n_jobs,
             verbosity=-1,
-            device_type="gpu" if device == "cuda" else "cpu",
+            **lightgbm_device_params(device),
         )
     if model_key == "catboost":
         from catboost import CatBoostClassifier
@@ -2653,7 +2653,7 @@ def build_worldcup_classifier(
             verbose=False,
             allow_writing_files=False,
             thread_count=n_jobs,
-            task_type="GPU" if device == "cuda" else "CPU",
+            **catboost_device_params(device),
         )
     if model_key == "ngboost":
         from ngboost import NGBClassifier
@@ -2671,17 +2671,6 @@ def build_worldcup_classifier(
             verbose=False,
         )
     raise WorldCupTrainingError(f'Modelo "{model_key}" no soportado para Mundial.')
-
-
-def xgboost_cuda_params() -> Dict[str, Any]:
-    try:
-        version = importlib_metadata.version("xgboost")
-        major = int(str(version).split(".", 1)[0])
-    except Exception:
-        major = 2
-    if major >= 2:
-        return {"tree_method": "hist", "device": "cuda"}
-    return {"tree_method": "gpu_hist", "predictor": "gpu_predictor"}
 
 
 def tune_model_if_requested(

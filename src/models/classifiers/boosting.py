@@ -1,4 +1,6 @@
 import warnings
+import shutil
+from importlib import metadata as importlib_metadata
 
 import numpy as np
 import pandas as pd
@@ -79,6 +81,47 @@ if LGBMClassifier is not None:
             return pd.DataFrame(values, columns=self._warning_free_feature_names)
 else:
     WarningFreeLGBMClassifier = None
+
+
+def auto_boosting_device(requested_device: str = "auto") -> str:
+    requested = str(requested_device or "auto").strip().lower()
+    if requested == "cpu":
+        return "cpu"
+    if requested in {"auto", "cuda", "gpu"} and shutil.which("nvidia-smi"):
+        return "cuda"
+    if requested in {"cuda", "gpu"}:
+        return "cuda"
+    return "cpu"
+
+
+def lightgbm_device_params(device: str) -> Dict[str, Any]:
+    if str(device).lower() != "cuda":
+        return {"device_type": "cpu"}
+    return {
+        "device_type": "gpu",
+        "gpu_platform_id": 0,
+        "gpu_device_id": 0,
+    }
+
+
+def catboost_device_params(device: str) -> Dict[str, Any]:
+    if str(device).lower() != "cuda":
+        return {"task_type": "CPU"}
+    return {
+        "task_type": "GPU",
+        "devices": "0",
+    }
+
+
+def xgboost_cuda_params() -> Dict[str, Any]:
+    try:
+        version = importlib_metadata.version("xgboost")
+        major = int(str(version).split(".", 1)[0])
+    except Exception:
+        major = 2
+    if major >= 2:
+        return {"tree_method": "hist", "device": "cuda"}
+    return {"tree_method": "gpu_hist", "predictor": "gpu_predictor"}
 
 
 class ProbabilitySanitizingModel(ClassificationModel):
@@ -190,6 +233,7 @@ class CatBoost(ProbabilitySanitizingModel):
             learning_rate: float = 0.05,
             l2_leaf_reg: float = 3.0,
             random_strength: float = 1.0,
+            device: str = "auto",
             **kwargs
     ):
         self._n_estimators = n_estimators
@@ -197,6 +241,7 @@ class CatBoost(ProbabilitySanitizingModel):
         self._learning_rate = learning_rate
         self._l2_leaf_reg = l2_leaf_reg
         self._random_strength = random_strength
+        self._device = auto_boosting_device(device)
         super().__init__(
             league_id=league_id,
             model_id=model_id,
@@ -224,6 +269,7 @@ class CatBoost(ProbabilitySanitizingModel):
             verbose=False,
             allow_writing_files=False,
             thread_count=-1,
+            **catboost_device_params(self._device),
         )
 
     def get_feature_importances(self) -> np.ndarray:
@@ -244,6 +290,8 @@ class CatBoost(ProbabilitySanitizingModel):
             return {"low": 1.0, "high": 10.0, "step": 0.5}
         if param == "random_strength":
             return {"low": 0.0, "high": 5.0, "step": 0.5}
+        if param == "device":
+            return ["auto", "cpu", "cuda"]
         raise ValueError(f'Undefined parameter: "{param}".')
 
     def _get_model_config(self, model_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -253,6 +301,7 @@ class CatBoost(ProbabilitySanitizingModel):
             "learning_rate": self._learning_rate,
             "l2_leaf_reg": self._l2_leaf_reg,
             "random_strength": self._random_strength,
+            "device": self._device,
         })
         return model_config
 
@@ -273,6 +322,7 @@ class LightGBM(ProbabilitySanitizingModel):
             min_child_samples: int = 20,
             lambda_regularization: float = 0.0,
             alpha_regularization: float = 0.0,
+            device: str = "auto",
             **kwargs
     ):
         self._n_estimators = n_estimators
@@ -282,6 +332,7 @@ class LightGBM(ProbabilitySanitizingModel):
         self._min_child_samples = min_child_samples
         self._lambda_regularization = lambda_regularization
         self._alpha_regularization = alpha_regularization
+        self._device = auto_boosting_device(device)
         super().__init__(
             league_id=league_id,
             model_id=model_id,
@@ -308,6 +359,7 @@ class LightGBM(ProbabilitySanitizingModel):
             random_state=0,
             n_jobs=-1,
             verbosity=-1,
+            **lightgbm_device_params(self._device),
         )
 
     def get_feature_importances(self) -> np.ndarray:
@@ -332,6 +384,8 @@ class LightGBM(ProbabilitySanitizingModel):
             return {"low": 0.0, "high": 5.0, "step": 0.5}
         if param == "alpha_regularization":
             return {"low": 0.0, "high": 5.0, "step": 0.5}
+        if param == "device":
+            return ["auto", "cpu", "cuda"]
         raise ValueError(f'Undefined parameter: "{param}".')
 
     def _get_model_config(self, model_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -343,5 +397,6 @@ class LightGBM(ProbabilitySanitizingModel):
             "min_child_samples": self._min_child_samples,
             "lambda_regularization": self._lambda_regularization,
             "alpha_regularization": self._alpha_regularization,
+            "device": self._device,
         })
         return model_config

@@ -440,17 +440,112 @@ def test_worldcup_auto_device_uses_cuda_when_available(monkeypatch):
 
     assert training.resolve_device("xgboost", "auto") == ("cuda", [])
     assert training.resolve_device("catboost", "cuda") == ("cuda", [])
+    assert training.resolve_device("lightgbm", "auto") == ("cuda", [])
     assert training.resolve_device("xgboost", "cpu") == ("cpu", [])
 
 
 def test_worldcup_xgboost_cuda_params_support_old_and_new_versions(monkeypatch):
+    from src.models.classifiers import boosting
+
+    monkeypatch.setattr(boosting.importlib_metadata, "version", lambda package: "1.7.6")
+    assert boosting.xgboost_cuda_params() == {"tree_method": "gpu_hist", "predictor": "gpu_predictor"}
+
+    monkeypatch.setattr(boosting.importlib_metadata, "version", lambda package: "2.1.0")
+    assert boosting.xgboost_cuda_params() == {"tree_method": "hist", "device": "cuda"}
+
+
+def test_worldcup_gpu_params_are_passed_to_lightgbm_and_catboost(monkeypatch):
+    import sys
+    from src.models.classifiers import boosting
     from src.worldcup import training
 
-    monkeypatch.setattr(training.importlib_metadata, "version", lambda package: "1.7.6")
-    assert training.xgboost_cuda_params() == {"tree_method": "gpu_hist", "predictor": "gpu_predictor"}
+    captured = {}
 
-    monkeypatch.setattr(training.importlib_metadata, "version", lambda package: "2.1.0")
-    assert training.xgboost_cuda_params() == {"tree_method": "hist", "device": "cuda"}
+    class FakeLGBM:
+        def __init__(self, **kwargs):
+            captured["lightgbm"] = kwargs
+
+    class FakeCatBoost:
+        def __init__(self, **kwargs):
+            captured["catboost"] = kwargs
+
+    monkeypatch.setattr(boosting, "WarningFreeLGBMClassifier", FakeLGBM)
+    monkeypatch.setitem(sys.modules, "catboost", SimpleNamespace(CatBoostClassifier=FakeCatBoost))
+
+    training.build_worldcup_classifier("lightgbm", {}, n_jobs=1, device="cuda", seed=7, num_classes=3)
+    training.build_worldcup_classifier("catboost", {}, n_jobs=1, device="cuda", seed=7, num_classes=3)
+
+    assert captured["lightgbm"]["device_type"] == "gpu"
+    assert captured["lightgbm"]["gpu_device_id"] == 0
+    assert captured["catboost"]["task_type"] == "GPU"
+    assert captured["catboost"]["devices"] == "0"
+
+
+def test_generic_boosting_wrappers_expose_gpu_device(monkeypatch):
+    import sys
+    from src.cli.model_specs import MODEL_SPECS, build_model_params
+    from src.models.classifiers import boosting
+    from src.models.classifiers import extremeboosting
+    from src.models.classifiers.extremeboosting import XGBoost
+    from src.preprocessing.utils.target import TargetType
+
+    captured = {}
+
+    class FakeLGBM:
+        def __init__(self, **kwargs):
+            captured["lightgbm"] = kwargs
+
+    class FakeCatBoost:
+        def __init__(self, **kwargs):
+            captured["catboost"] = kwargs
+
+    class FakeXGB:
+        def __init__(self, **kwargs):
+            captured["xgboost"] = kwargs
+
+    monkeypatch.setattr(boosting.shutil, "which", lambda cmd: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(boosting, "WarningFreeLGBMClassifier", FakeLGBM)
+    monkeypatch.setattr(extremeboosting, "XGBClassifier", FakeXGB)
+    monkeypatch.setitem(sys.modules, "catboost", SimpleNamespace(CatBoostClassifier=FakeCatBoost))
+
+    args = SimpleNamespace(
+        target=TargetType.RESULT.value,
+        normalizer="none",
+        sampler="none",
+        calibrate=False,
+        n_estimators=None,
+        max_depth=None,
+        min_child_weight=None,
+        learning_rate=None,
+        lambda_regularization=None,
+        alpha_regularization=None,
+        num_leaves=None,
+        min_child_samples=None,
+        minibatch_frac=None,
+        natural_gradient=None,
+        l2_leaf_reg=None,
+        random_strength=None,
+        device="cuda",
+    )
+
+    params = build_model_params(args, league_id="mx", model_id="gpu-test", model_key="xgboost")
+    xgb_model = XGBoost(**params)
+    lgbm_model = boosting.LightGBM(**build_model_params(args, league_id="mx", model_id="gpu-test", model_key="lightgbm"))
+    cat_model = boosting.CatBoost(**build_model_params(args, league_id="mx", model_id="gpu-test", model_key="catboost"))
+    xgb_model.build_classifier(input_size=2, num_classes=3)
+    lgbm_model.build_classifier(input_size=2, num_classes=3)
+    cat_model.build_classifier(input_size=2, num_classes=3)
+
+    assert params["device"] == "cuda"
+    assert xgb_model.get_default_model_config()["device"] == "cuda"
+    assert lgbm_model.get_default_model_config()["device"] == "cuda"
+    assert cat_model.get_default_model_config()["device"] == "cuda"
+    assert captured["xgboost"].get("device") == "cuda" or captured["xgboost"].get("tree_method") == "gpu_hist"
+    assert captured["lightgbm"]["device_type"] == "gpu"
+    assert captured["catboost"]["task_type"] == "GPU"
+    assert "device" in MODEL_SPECS["xgboost"].defaults
+    assert "device" in MODEL_SPECS["lightgbm"].defaults
+    assert "device" in MODEL_SPECS["catboost"].defaults
 
 
 def test_worldcup_explicit_cuda_failure_does_not_silently_fallback(monkeypatch):

@@ -40,6 +40,7 @@ MODEL_SPECS: Dict[str, ModelSpec] = {
             "learning_rate": 0.05,
             "l2_leaf_reg": 3.0,
             "random_strength": 1.0,
+            "device": "auto",
         },
     ),
     "lightgbm": ModelSpec(
@@ -55,6 +56,7 @@ MODEL_SPECS: Dict[str, ModelSpec] = {
             "min_child_samples": 20,
             "lambda_regularization": 0.0,
             "alpha_regularization": 0.0,
+            "device": "auto",
         },
     ),
     "xgboost": ModelSpec(
@@ -69,6 +71,7 @@ MODEL_SPECS: Dict[str, ModelSpec] = {
             "learning_rate": 0.3,
             "lambda_regularization": 1.0,
             "alpha_regularization": 0.0,
+            "device": "auto",
         },
     ),
 }
@@ -106,6 +109,7 @@ def add_model_specific_arguments(parser, model_key: Optional[str] = None):
     parser.add_argument("--natural-gradient", type=parse_bool, help="NGBoost natural gradient.")
     parser.add_argument("--l2-leaf-reg", type=float, help="CatBoost L2 leaf regularization.")
     parser.add_argument("--random-strength", type=float, help="CatBoost random strength.")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], help="Boosting device. Use auto to prefer CUDA when nvidia-smi is available.")
 
 
 def build_model_params(args, league_id: str, model_id: str, model_key: str) -> Dict[str, Any]:
@@ -134,6 +138,7 @@ def build_model_params(args, league_id: str, model_id: str, model_key: str) -> D
         "natural_gradient": getattr(args, "natural_gradient", None),
         "l2_leaf_reg": getattr(args, "l2_leaf_reg", None),
         "random_strength": getattr(args, "random_strength", None),
+        "device": getattr(args, "device", None),
     }
     for key, value in overrides.items():
         if value is not None and key in params:
@@ -177,6 +182,7 @@ def tunable_param_names(spec: ModelSpec) -> List[str]:
         "natural_gradient",
         "l2_leaf_reg",
         "random_strength",
+        "device",
     ]
     valid = []
     for param in candidates:
