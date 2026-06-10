@@ -142,6 +142,8 @@ def match_probabilities_dataframe(matches: List[Dict[str, Any]], model: WorldCup
             "P E1 %": _pct(probabilities["home"]),
             "P Empate %": _pct(probabilities["draw"]),
             "P E2 %": _pct(probabilities["away"]),
+            "Over 0.5 %": _pct(probabilities.get("over05", 0.0)),
+            "Under 0.5 %": _pct(probabilities.get("under05", 0.0)),
             "Over 1.5 %": _pct(probabilities.get("over15", 0.0)),
             "Under 1.5 %": _pct(probabilities.get("under15", 0.0)),
             "Over 2.5 %": _pct(probabilities["over25"]),

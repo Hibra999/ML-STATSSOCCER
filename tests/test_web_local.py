@@ -215,7 +215,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "training-etl-flow" in html_source
     assert "training-confusion-matrix" in html_source
     assert "training-tuning-flow" in html_source
-    assert "Siempre 1X2 + O/U 2.5" in html_source
+    assert "Siempre 1X2 + U/O 0.5, 1.5, 2.5 y 3.5" in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-predictions" in html_source
     assert "hero-countdown" in html_source
@@ -956,8 +956,12 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert dual_result["model"]["bundle"] is True
     assert dual_result["model"]["market_mode"] == "dual_markets"
     assert set(dual_result["model"]["market_models"]) == {"result", "over_under_25"}
+    assert {"over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"}.issubset(dual_result["model"]["markets"])
     assert dual_result["model"]["markets"]["result"]["confusion_matrix"]["matrix"]
+    assert dual_result["model"]["markets"]["over_under_05"]["confusion_matrix"]["labels"] == ["Under 0.5", "Over 0.5"]
+    assert dual_result["model"]["markets"]["over_under_15"]["confusion_matrix"]["labels"] == ["Under 1.5", "Over 1.5"]
     assert dual_result["model"]["markets"]["over_under_25"]["confusion_matrix"]["matrix"]
+    assert dual_result["model"]["markets"]["over_under_35"]["confusion_matrix"]["labels"] == ["Under 3.5", "Over 3.5"]
     assert dual_prediction["model_probs"]["model_id"] == "mex-dual"
     assert dual_prediction["model_probs"]["ml"]
     assert dual_prediction["model_probs"]["over_under_ml"]
@@ -1031,7 +1035,7 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert status["raw_training_mode"] == "team_strength"
     assert status["training_mode"] == "match_result"
     assert status["prepared_label_source"] == "historical_worldcup"
-    assert status["target_column"] == "Label + OverUnder25"
+    assert status["target_column"] == "Label + GoalsDistribution + OverUnder05/15/25/35"
     assert status["test_rows"] > 0
     assert status["prediction_rows"] == 2
     assert status["eval_rows"] > 0
@@ -1040,10 +1044,13 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert result["mode"] == "match_result"
     assert result["eval_strategy"] == "final_worldcup_test"
     assert result["prediction_rows"] == 2
-    assert result["model"]["target_column"] == "Label + OverUnder25"
+    assert result["model"]["target_column"] == "Label + GoalsDistribution + OverUnder05/15/25/35"
     assert result["model"]["eval_strategy"] == "final_worldcup_test"
     assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
+    assert result["model"]["markets"]["over_under_05"]["confusion_matrix"]["labels"] == ["Under 0.5", "Over 0.5"]
+    assert result["model"]["markets"]["over_under_15"]["confusion_matrix"]["labels"] == ["Under 1.5", "Over 1.5"]
     assert result["model"]["markets"]["over_under_25"]["confusion_matrix"]["labels"] == ["Under 2.5", "Over 2.5"]
+    assert result["model"]["markets"]["over_under_35"]["confusion_matrix"]["labels"] == ["Under 3.5", "Over 3.5"]
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["steps"]
     assert result["model"]["model_label"] == "XGBoost"

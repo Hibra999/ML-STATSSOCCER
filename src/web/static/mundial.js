@@ -27,6 +27,15 @@ const jobLabels = {
   failed: "Error",
 };
 
+const goalMarketLines = [
+  { key: "over_under_05", label: "U/O 0.5", over: "over05", under: "under05" },
+  { key: "over_under_15", label: "U/O 1.5", over: "over15", under: "under15" },
+  { key: "over_under_25", label: "U/O 2.5", over: "over25", under: "under25" },
+  { key: "over_under_35", label: "U/O 3.5", over: "over35", under: "under35" },
+];
+
+const trainingMarketOrder = ["result", ...goalMarketLines.map((line) => line.key), "goals_distribution"];
+
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
   loadAll(false);
@@ -420,7 +429,7 @@ function startNewWorldcupModel() {
   document.getElementById("training-model-state").innerHTML = [
     predictionCard("Modo", "Nuevo modelo"),
     predictionCard("Modelo", "Sin guardar"),
-    predictionCard("Mercados", "1X2 + O/U 2.5"),
+    predictionCard("Mercados", "1X2 + U/O 0.5/1.5/2.5/3.5"),
     predictionCard("Eval", "pendiente"),
   ].join("");
   document.getElementById("training-metric-cards").innerHTML = loadingHtml("Entrena el nuevo modelo");
@@ -730,8 +739,12 @@ async function prepareTrainingEtl() {
 
 async function trainWorldCupModel(walkForwardMode = "none") {
   clearAlert();
-  if (!state.training || !state.training.etl_ready || state.training.etl_stale) {
+  if (!state.training || !state.training.etl_ready) {
     showError("Primero ejecuta Preparar ETL para dejar listo el dataset de entrenamiento.");
+    return;
+  }
+  if (state.training.etl_stale) {
+    showError("El ETL esta desactualizado; vuelve a ejecutar Preparar ETL antes de entrenar.");
     return;
   }
   const modelId = ensureWorldcupModelId();
@@ -761,7 +774,7 @@ function renderTrainingStatus(payload) {
   const hardware = (model.hardware && model.trained) ? model.hardware : ((state.trainingOptions || {}).hardware || {});
   renderHeroHardware(hardware);
   document.getElementById("training-status").textContent = payload.available
-    ? `${payload.train_rows || 0} train listo - ${payload.etl_ready ? "ETL listo" : "ETL pendiente"} - ${evalStrategyLabel(payload.eval_strategy)}`
+    ? `${payload.train_rows || 0} train listo - ${etlStatusLabel(payload)} - ${evalStrategyLabel(payload.eval_strategy)}`
     : "Dataset Kaggle no descargado";
   document.getElementById("training-source").textContent = `${payload.dataset_slug || "Kaggle"} - ${payload.training_mode || "sin modo"} - ${payload.prepared_label_source || "fuente pendiente"}`;
   document.getElementById("training-summary").innerHTML = datasetSummaryHtml(payload);
@@ -786,7 +799,7 @@ function renderTrainingResult(payload) {
     eval_rows: payload.eval_rows,
     eval_strategy: payload.eval_strategy,
     prediction_rows: payload.prediction_rows,
-    target_column: payload.effective_target,
+    target_column: (payload.model || {}).target_column || payload.target_column || payload.effective_target,
   });
   renderModelState(payload.model || {}, payload);
   renderTrainingVisuals(payload.model || {}, payload);
@@ -804,13 +817,13 @@ function renderTrainingVisuals(model, payload) {
 
 function trainingMarketSections(model, payload) {
   const markets = (model && model.markets) || (payload && payload.markets) || {};
-  const keys = ["result", "over_under_25", "goals_distribution"].filter((key) => markets[key]);
+  const keys = trainingMarketOrder.filter((key) => markets[key]);
   if (keys.length) {
     return keys.map((key) => ({ key, label: markets[key].label || marketLabel(key), ...markets[key] }));
   }
   const target = (model && (model.effective_target || model.requested_target)) || (payload && (payload.effective_target || payload.requested_target)) || "result";
   return [{
-    key: target === "over_under_25" ? "over_under_25" : "result",
+    key: target === "over_under_25" ? "over_under_25" : target === "goals_distribution" ? "goals_distribution" : "result",
     label: marketLabel(target),
     metrics: (model && model.metrics) || (payload && payload.metrics) || {},
     confusion_matrix: (model && model.confusion_matrix) || (payload && payload.confusion_matrix) || {},
@@ -827,17 +840,28 @@ function datasetSummaryHtml(payload) {
     : `${payload.eval_rows || 0} holdout`;
   const walkForward = payload.walk_forward || {};
   const refresh = payload.walk_forward_refresh || {};
+  const goalsReady = payload.prepared_goals_distribution_ready ?? payload.prepared_over_under_ready;
   return [
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
-    datasetCard("ETL", payload.etl_ready ? (payload.etl_stale ? "Desactualizado" : "Listo") : "Pendiente", payload.prepared_label_source || "preparar artifact"),
+    datasetCard("ETL", etlStatusShort(payload), payload.prepared_label_source || "preparar artifact"),
     datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
     datasetCard("Evaluacion", evalValue, evalStrategyLabel(payload.eval_strategy)),
     datasetCard("Predicción 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
     datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} base / ${refresh.ready_with_players || 0} con jugadores`),
-    datasetCard("O/U 2.5", payload.prepared_over_under_ready ? "Listo" : "Pendiente", "solo con goles reales"),
+    datasetCard("U/O goles", goalsReady ? "Listo" : "Pendiente", "0.5 / 1.5 / 2.5 / 3.5 con goles reales"),
     datasetCard("Target", payload.target_column || "-", "label entrenable"),
   ].join("");
+}
+
+function etlStatusLabel(payload) {
+  if (!payload || !payload.etl_ready) return "ETL pendiente";
+  return payload.etl_stale ? "ETL desactualizado" : "ETL listo";
+}
+
+function etlStatusShort(payload) {
+  if (!payload || !payload.etl_ready) return "Pendiente";
+  return payload.etl_stale ? "Desactualizado" : "Listo";
 }
 
 function datasetCard(label, value, detail) {
@@ -856,11 +880,11 @@ function renderModelState(model, payload) {
 function modelMarketLabel(model) {
   if (!model) return "-";
   if (model.bundle || model.market_mode === "dual_markets" || model.requested_target === "dual_markets") {
-    return model.market_models && !model.market_models.over_under_25 ? "1X2 + U/O Poisson" : "1X2 + U/O goles";
+    return model.market_models && !model.market_models.over_under_25 ? "1X2 + U/O Poisson" : "1X2 + U/O 0.5/1.5/2.5/3.5";
   }
   const target = model.effective_target || model.requested_target || model.training_target || "";
   if (target === "goals_distribution") return "Distribución goles";
-  if (target === "over_under_25") return "O/U 2.5";
+  if (target === "over_under_25") return "U/O 2.5";
   if (target === "team_strength") return "1X2 team-strength";
   if (target === "result") return "1X2";
   return target || "-";
@@ -873,7 +897,8 @@ function walkForwardModeLabel(mode) {
 }
 
 function marketLabel(key) {
-  if (key === "over_under_25") return "O/U 2.5";
+  const line = goalMarketLines.find((item) => item.key === key);
+  if (line) return line.label;
   if (key === "goals_distribution") return "Distribución goles";
   if (key === "team_strength") return "1X2 team-strength";
   return "1X2";
@@ -1188,7 +1213,8 @@ function metricsTableFromMarket(market) {
 }
 
 function confusionTargetLabel(target) {
-  if (target === "over_under_25") return "2 clases: Under / Over";
+  if (String(target || "").startsWith("over_under_")) return "2 clases: Under / Over";
+  if (target === "goals_distribution") return "Buckets de goles totales";
   return "3 clases: 1 / X / 2";
 }
 
@@ -1288,11 +1314,13 @@ function renderUpcomingPredictions(result) {
         <span>2 <b>${escapeHtml(probs.away ?? "")}%</b></span>
       </div>
       <div class="prob-strip muted">
+        <span>O0.5 <b>${escapeHtml(probs.over05 ?? "")}%</b></span>
         <span>O1.5 <b>${escapeHtml(probs.over15 ?? "")}%</b></span>
         <span>O2.5 <b>${escapeHtml(probs.over25 ?? "")}%</b></span>
         <span>O3.5 <b>${escapeHtml(probs.over35 ?? "")}%</b></span>
       </div>
       <div class="prob-strip muted">
+        <span>U0.5 <b>${escapeHtml(probs.under05 ?? "")}%</b></span>
         <span>U1.5 <b>${escapeHtml(probs.under15 ?? "")}%</b></span>
         <span>U2.5 <b>${escapeHtml(probs.under25 ?? "")}%</b></span>
         <span>U3.5 <b>${escapeHtml(probs.under35 ?? "")}%</b></span>
@@ -1449,6 +1477,8 @@ async function handleWorldcupJobComplete(job) {
     await loadTrainingStatus();
     if (state.activeModelId) {
       const active = state.models.find((model) => model.model_id === state.activeModelId) || result.model || {};
+      state.training = { ...(state.training || {}), model: active };
+      renderTrainingStatus(state.training);
       renderActiveModel(active);
       renderTrainingControls(state.trainingOptions, active);
       const modelIdInput = document.getElementById("worldcup-model-id");

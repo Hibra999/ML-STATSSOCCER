@@ -152,8 +152,8 @@ def emit_training_progress(callback, stage: str, current: int, total: int, messa
 
 def market_label_for_progress(target: str) -> str:
     if target == GOALS_DISTRIBUTION_TARGET:
-        return "Distribucion goles"
-    return "O/U 2.5" if target == "over_under_25" else "1X2"
+        return "Distribucion goles / U/O multi-linea"
+    return "U/O 2.5" if target == "over_under_25" else "1X2"
 
 
 def training_options() -> Dict[str, Any]:
@@ -177,7 +177,7 @@ def training_options() -> Dict[str, Any]:
     return {
         "models": json_safe(models),
         "targets": [
-            {"key": "dual_markets", "label": "Ambos: 1X2 + O/U 2.5"},
+            {"key": "dual_markets", "label": "Ambos: 1X2 + U/O 0.5, 1.5, 2.5, 3.5"},
         ],
         "hardware": detect_hardware(),
         "defaults": default_training_payload(),
@@ -285,6 +285,7 @@ def dataset_status() -> Dict[str, Any]:
         "final_test_year": prepared.get("final_test_year", ""),
         "split_policy": prepared.get("split_policy", ""),
         "prepared_over_under_ready": bool(prepared.get("over_under_ready", False)),
+        "prepared_goals_distribution_ready": bool(prepared.get("goals_distribution_ready", prepared.get("over_under_ready", False))),
         "prepared_warnings": prepared.get("warnings", []),
         "market_rows": int(prepared.get("market_rows", 0)),
         "qualifier_feature_rows": int(prepared.get("qualifier_feature_rows", 0)),
@@ -332,7 +333,7 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
     payload = payload or {}
     train_config = training_config(payload)
     if train_config["market_mode"] != "dual_markets":
-        raise WorldCupTrainingError("Mundial 2026 entrena siempre el bundle dual 1X2 + O/U 2.5.")
+        raise WorldCupTrainingError("Mundial 2026 entrena siempre el bundle dual 1X2 + distribucion de goles / U/O multi-linea.")
     emit_training_progress(progress_callback, "preparing", 0, 6, "Preparando entrenamiento Mundial")
     return train_dual_market_model(
         tournament=tournament,
@@ -382,7 +383,7 @@ def train_single_hybrid_model(
     eval_strategy = "unavailable"
     effective_target = train_config["training_target"]
     if effective_target == "over_under_25" and not has_over_under_target(train_rows):
-        raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar O/U 2.5.")
+        raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar U/O 2.5.")
     if effective_target == GOALS_DISTRIBUTION_TARGET and not has_goals_distribution_target(train_rows):
         raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar distribucion de goles.")
     eval_size = float(payload.get("eval_size", 0.25) or 0.25)
@@ -652,7 +653,8 @@ def train_dual_market_model(
             )
             over_record = load_hybrid_model(over_child_id) or {}
             if over_record.get("effective_target") == GOALS_DISTRIBUTION_TARGET:
-                market_results["over_under_25"] = goal_line_training_summary(over_record, over_result, line_suffix="25")
+                for suffix in TOTAL_GOAL_LINE_SUFFIXES:
+                    market_results[f"over_under_{suffix}"] = goal_line_training_summary(over_record, over_result, line_suffix=suffix)
                 market_results["goals_distribution"] = market_training_summary(over_record, over_result, "Distribucion goles")
                 market_models["over_under_25"] = over_child_id
             else:
@@ -920,7 +922,7 @@ def build_prepared_dataset(
             raise WorldCupTrainingError("El ETL no encontro partidos con goles reales para construir el dataset de entrenamiento.")
         labeled_rows = history_rows
         label_source = "historical_worldcup"
-        warnings.append("El Kaggle actual no trae filas de partido entrenables; el ETL usa resultados historicos abiertos del Mundial para 1X2 y O/U 2.5.")
+        warnings.append("El Kaggle actual no trae filas de partido entrenables; el ETL usa resultados historicos abiertos del Mundial para 1X2 y U/O 0.5, 1.5, 2.5 y 3.5.")
     elif has_over_under_target(raw_train):
         labeled_parts = [raw_train]
         if has_over_under_target(raw_test):
@@ -928,16 +930,16 @@ def build_prepared_dataset(
         labeled_rows = pd.concat(labeled_parts, ignore_index=True)
         label_source = "kaggle_match_result"
         if raw_test.empty or not has_over_under_target(raw_test):
-            warnings.append("El test Kaggle no trae goles suficientes para O/U 2.5; el ETL separara el ultimo Mundial etiquetado como test final si hay fechas.")
+            warnings.append("El test Kaggle no trae goles suficientes para U/O multi-linea; el ETL separara el ultimo Mundial etiquetado como test final si hay fechas.")
     else:
         if history_rows.empty:
-            raise WorldCupTrainingError("El Kaggle actual no trae goles suficientes para O/U 2.5 y no se encontraron partidos historicos con goles reales.")
+            raise WorldCupTrainingError("El Kaggle actual no trae goles suficientes para U/O multi-linea y no se encontraron partidos historicos con goles reales.")
         labeled_parts = [raw_train, history_rows]
         if has_over_under_target(raw_test):
             labeled_parts.append(raw_test)
         labeled_rows = pd.concat(labeled_parts, ignore_index=True)
         label_source = "kaggle_match_result + historical_worldcup"
-        warnings.append("El Kaggle actual no alcanza para O/U 2.5; el ETL complemento las etiquetas de partido con el historico abierto del Mundial.")
+        warnings.append("El Kaggle actual no alcanza para U/O multi-linea; el ETL complemento las etiquetas de partido con el historico abierto del Mundial.")
         if raw_test.empty or not has_over_under_target(raw_test):
             warnings.append("El test Kaggle no trae goles suficientes; el ultimo Mundial etiquetado se usara como test final si hay fechas.")
 
@@ -949,7 +951,8 @@ def build_prepared_dataset(
         warnings.append(f"Test final bloqueado al Mundial {final_test_year}; entrenamiento/validacion usan solo años anteriores.")
     over_under_ready = has_over_under_target(train_df)
     if not over_under_ready:
-        raise WorldCupTrainingError("El ETL no pudo construir un target real de O/U 2.5 con goles observados.")
+        raise WorldCupTrainingError("El ETL no pudo construir targets reales de U/O multi-linea con goles observados.")
+    goals_distribution_ready = has_goals_distribution_target(train_df)
 
     prepared_at = datetime.now(timezone.utc).isoformat()
     preview_source = train_df if not train_df.empty else test_df if not test_df.empty else team_features
@@ -996,7 +999,7 @@ def build_prepared_dataset(
         "api_football_stat_rows": int(api_football_bundle.get("team_stats", pd.DataFrame()).shape[0]),
         "api_football_market_rows": int(api_market_rows.shape[0]),
         "dc_rho": float(dc_rho),
-        "target_column": "Label + OverUnder25",
+        "target_column": "Label + GoalsDistribution + OverUnder05/15/25/35",
         "team_columns": normalized["team_columns"],
         "trainable": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
         "preview": preview_payload(preview_source),
@@ -1006,6 +1009,7 @@ def build_prepared_dataset(
         "final_test_year": final_test_year,
         "split_policy": "latest_worldcup_final_test" if final_test_year else "temporal_holdout_from_train",
         "over_under_ready": over_under_ready,
+        "goals_distribution_ready": goals_distribution_ready,
         "result_ready": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
     }
 
@@ -1155,6 +1159,7 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
             "final_test_year": "",
             "split_policy": "",
             "over_under_ready": False,
+            "goals_distribution_ready": False,
             "warnings": [],
         }
     source_files = {str(path) for path in files}
@@ -1173,6 +1178,7 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "final_test_year": str(dataset.get("final_test_year") or ""),
         "split_policy": str(dataset.get("split_policy") or ""),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
+        "goals_distribution_ready": bool(dataset.get("goals_distribution_ready", dataset.get("over_under_ready", False))),
         "market_rows": int(dataset.get("market_rows", 0)),
         "qualifier_feature_rows": int(dataset.get("qualifier_feature_rows", 0)),
         "market_status": dataset.get("market_status", {}),
@@ -1211,6 +1217,7 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "api_football_market_rows": int(dataset.get("api_football_market_rows", 0)),
         "dc_rho": float(dataset.get("dc_rho", 0.0) or 0.0),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
+        "goals_distribution_ready": bool(dataset.get("goals_distribution_ready", dataset.get("over_under_ready", False))),
         "result_ready": bool(dataset.get("result_ready", False)),
         "preview": dataset.get("preview", {"columns": [], "rows": [], "total": 0}),
         "history_source": dataset.get("history_source", ""),
@@ -3070,7 +3077,7 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
     notes.extend(result_notes)
     notes.extend(over_output.get("notes", []))
     if not over_output.get("over_under_25"):
-        notes.append("O/U 2.5 viene de Poisson porque el bundle activo no tiene hijo O/U entrenado.")
+        notes.append("U/O multi-linea viene de Poisson porque el bundle activo no tiene hijo de goles entrenado.")
     return {
         "result": result_output.get("result", {}),
         "over_under_25": over_output.get("over_under_25", {}),
@@ -3362,11 +3369,11 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
 def goal_line_training_summary(record: Dict[str, Any], result: Dict[str, Any], line_suffix: str = "25") -> Dict[str, Any]:
     derived_key = f"over_under_{line_suffix}"
     derived = (record.get("derived_total_markets") or {}).get(derived_key, {})
-    summary = market_training_summary(record, result, derived.get("label") or "O/U 2.5")
+    summary = market_training_summary(record, result, derived.get("label") or goal_line_label_from_suffix(line_suffix))
     if derived:
         summary["metrics"] = derived.get("metrics", {})
         summary["confusion_matrix"] = derived.get("confusion_matrix", {})
-    summary["effective_target"] = GOALS_DISTRIBUTION_TARGET
+    summary["effective_target"] = derived_key
     summary["derived_from"] = GOALS_DISTRIBUTION_TARGET
     summary["available_lines"] = sorted((record.get("derived_total_markets") or {}).keys())
     return summary
@@ -3466,11 +3473,18 @@ def derived_total_market_metrics(y_train, y_train_pred, y_eval, y_eval_pred) -> 
         eval_pred = total_binary_for_line(y_eval_pred, line)
         output[target] = {
             "line": line,
-            "label": f"O/U {line:.1f}",
+            "label": f"U/O {line:.1f}",
             "metrics": classification_metrics_from_predictions(train_actual, train_pred, eval_actual, eval_pred),
             "confusion_matrix": binary_over_under_confusion(eval_actual, eval_pred, line),
         }
     return output
+
+
+def goal_line_label_from_suffix(line_suffix: str) -> str:
+    text = str(line_suffix or "").strip()
+    if len(text) == 2 and text.isdigit():
+        return f"U/O {int(text[0])}.{text[1]}"
+    return "U/O goles"
 
 
 def total_binary_for_line(values, line: float) -> pd.Series:
