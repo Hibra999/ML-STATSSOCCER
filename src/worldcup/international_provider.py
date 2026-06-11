@@ -133,6 +133,8 @@ def international_results_status() -> Dict[str, Any]:
     warning = str(matches.attrs.get("warning") or "")
     expected_exists = INTERNATIONAL_MATCHES_FILE.exists()
     available = bool(not matches.empty)
+    worldcup_rows = int(matches["tournament"].map(is_worldcup_tournament).sum()) if available and "tournament" in matches.columns else 0
+    friendly_rows = int(matches["tournament"].map(is_friendly_tournament).sum()) if available and "tournament" in matches.columns else 0
     status = {
         "dataset_slug": INTERNATIONAL_DATASET_SLUG,
         "local_path": str(INTERNATIONAL_ROOT),
@@ -141,6 +143,10 @@ def international_results_status() -> Dict[str, Any]:
         "exists": bool(expected_exists),
         "available": available,
         "rows": int(matches.shape[0]),
+        "all_matches_rows": int(matches.shape[0]) if available else 0,
+        "worldcup_rows": worldcup_rows,
+        "official_rows": int(matches.shape[0] - friendly_rows) if available else 0,
+        "friendly_rows": friendly_rows,
         "teams": int(len(teams)),
     }
     if not available:
@@ -754,6 +760,13 @@ def tournament_weight(tournament: str) -> float:
     )):
         return 1.3
     return 0.95
+
+
+def is_worldcup_tournament(tournament: str) -> bool:
+    text = normalize_key(tournament)
+    if "world cup" not in text:
+        return False
+    return not any(token in text for token in ("qualification", "qualifier", "qualifiers"))
 
 
 def is_friendly_tournament(tournament: str) -> bool:

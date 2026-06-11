@@ -21,10 +21,13 @@ from src.models.classifiers.boosting import catboost_device_params, lightgbm_dev
 from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
 from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, group_letter, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
 from src.worldcup.international_provider import (
+    INTERNATIONAL_MATCHES_FILE,
     contextual_poisson_for_match,
     international_results_status,
+    is_worldcup_tournament,
     load_international_matches,
     recent15_feature_table,
+    tournament_weight,
 )
 from src.worldcup.market_provider import (
     load_market_data,
@@ -94,6 +97,15 @@ MATCH_ROW_COLUMNS = [
     "OverUnder35",
     "Source",
 ]
+MATCH_METADATA_COLUMNS = [
+    "is_worldcup_match",
+    "tournament",
+    "stage",
+    "group",
+    "knockout",
+    "label_source",
+    "sample_weight",
+]
 TARGET_LABELS = ["H", "D", "A"]
 TEAM_TARGET_COLUMNS = ["quarter_finalist", "semi_finalist", "finalist", "winner"]
 MODEL_PARAM_KEYS = [
@@ -122,6 +134,23 @@ WALK_FORWARD_ROOT = Path("storage") / "worldcup" / "walk_forward"
 WALK_FORWARD_MATCHES_FILE = WALK_FORWARD_ROOT / "matches.csv"
 WALK_FORWARD_PLAYERS_FILE = WALK_FORWARD_ROOT / "player_match_stats.csv"
 WALK_FORWARD_TEAM_FEATURES_FILE = WALK_FORWARD_ROOT / "team_match_features.csv"
+FUTURE_LABEL_EXCLUDED_YEAR = 2026
+WORLDCUP_XGBOOST_DEFAULTS = {
+    "n_estimators": 450,
+    "max_depth": 3,
+    "min_child_weight": 3,
+    "learning_rate": 0.045,
+    "lambda_regularization": 3.0,
+    "alpha_regularization": 0.25,
+}
+SAMPLE_WEIGHT_POLICY = {
+    "worldcup": 1.65,
+    "continental_or_world_official": 1.35,
+    "qualifier": 1.25,
+    "nations_league": 1.1,
+    "other_official": 1.0,
+    "friendly": 0.6,
+}
 
 
 class WorldCupTrainingError(RuntimeError):
@@ -214,7 +243,7 @@ def training_options() -> Dict[str, Any]:
         models.append({
             "key": key,
             "label": WORLD_CUP_MODEL_LABELS.get(key, spec.label),
-            "defaults": spec.defaults,
+            "defaults": worldcup_model_defaults(key),
             "tunables": tunables,
             "supports_cuda": key in {"xgboost", "catboost", "lightgbm"},
         })
@@ -272,8 +301,15 @@ def default_training_payload() -> Dict[str, Any]:
         "optuna_pruner": "none",
         "objective": "F1",
         "tune_params": "all",
-        **MODEL_SPECS["xgboost"].defaults,
+        **worldcup_model_defaults("xgboost"),
     }
+
+
+def worldcup_model_defaults(model_key: str) -> Dict[str, Any]:
+    defaults = dict(MODEL_SPECS[model_key].defaults)
+    if model_key == "xgboost":
+        defaults.update(WORLDCUP_XGBOOST_DEFAULTS)
+    return defaults
 
 
 def download_kaggle_dataset(force: bool = False) -> Dict[str, Any]:
@@ -332,6 +368,10 @@ def dataset_status() -> Dict[str, Any]:
         "prepared_over_under_ready": bool(prepared.get("over_under_ready", False)),
         "prepared_goals_distribution_ready": bool(prepared.get("goals_distribution_ready", prepared.get("over_under_ready", False))),
         "prepared_warnings": prepared.get("warnings", []),
+        "all_matches_rows": int(prepared.get("all_matches_rows", 0)),
+        "worldcup_rows": int(prepared.get("worldcup_rows", 0)),
+        "class_distribution": prepared.get("class_distribution", {}),
+        "sample_weight_policy": prepared.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "market_rows": int(prepared.get("market_rows", 0)),
         "qualifier_feature_rows": int(prepared.get("qualifier_feature_rows", 0)),
         "market_status": prepared.get("market_status", {}),
@@ -435,12 +475,14 @@ def train_single_hybrid_model(
         raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar distribucion de goles.")
     eval_size = float(payload.get("eval_size", 0.25) or 0.25)
     train_rows = sort_match_rows(train_rows)
+    fit_train_rows = train_rows
     if test_rows.empty:
         eval_strategy = "holdout_temporal"
         split_train_rows, split_eval_rows = safe_temporal_row_split(
             train_rows,
             test_size=eval_size,
         )
+        fit_train_rows = split_train_rows
         x_train, y_train, feature_columns = build_training_matrix(
             split_train_rows,
             history_df=history_df,
@@ -480,6 +522,7 @@ def train_single_hybrid_model(
     else:
         eval_strategy = "final_worldcup_test"
         test_rows = sort_match_rows(test_rows)
+        fit_train_rows = train_rows
         x_train, y_train, feature_columns = build_training_matrix(
             train_rows,
             history_df=history_df,
@@ -519,12 +562,14 @@ def train_single_hybrid_model(
 
     if x_train.empty or pd.Series(y_train).dropna().empty:
         raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
+    train_sample_weight = align_sample_weights(sample_weights_for_rows(fit_train_rows, effective_target), len(y_train))
     y_train_encoded, label_classes = encode_target_labels(y_train, effective_target)
     y_eval_encoded = encode_existing_labels(y_eval, label_classes)
     tuned = tune_model_if_requested(
         train_config,
         x_train,
         y_train_encoded,
+        sample_weight=train_sample_weight,
         progress_callback=progress_callback,
         market_label=label,
     )
@@ -540,12 +585,14 @@ def train_single_hybrid_model(
         requested_device=train_config["device"],
         seed=train_config["seed"],
         num_classes=len(label_classes),
+        sample_weight=train_sample_weight,
     )
     clf = fit_result["classifier"]
     y_train_pred = classifier_predict(clf, x_train)
     y_eval_pred = classifier_predict(clf, x_eval)
     emit_training_progress(progress_callback, "metrics", 5, 5, f"Calculando métricas {label}", market=label, model_id=model_id)
     metrics = classification_metrics_from_predictions(y_train_encoded, y_train_pred, y_eval_encoded, y_eval_pred)
+    metrics["split_support"] = split_support_payload(y_train, y_eval, effective_target)
     confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes, target=effective_target)
     derived_total_markets = derived_total_market_metrics(
         y_train=y_train,
@@ -580,6 +627,11 @@ def train_single_hybrid_model(
         "api_football_stat_rows": int(normalized.get("api_football_stat_rows", 0) or 0),
         "api_football_market_rows": int(normalized.get("api_football_market_rows", 0) or 0),
         "international_recent": normalized.get("international_recent", international_results_status()),
+        "all_matches_rows": int(normalized.get("all_matches_rows", 0) or 0),
+        "worldcup_rows": int(normalized.get("worldcup_rows", 0) or 0),
+        "class_distribution": normalized.get("class_distribution", {}),
+        "sample_weight_policy": normalized.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
+        "sample_weight_summary": sample_weight_summary(train_sample_weight),
         "dc_rho": dc_rho,
         "kaggle_files": [str(path) for path in files],
         "history_source": normalized.get("history_source", history_source),
@@ -625,7 +677,7 @@ def train_single_hybrid_model(
         "feature_inventory": record["feature_inventory"],
         "train_rows": int(len(y_train)),
         "eval_rows": int(len(y_eval)),
-        "source": KAGGLE_DATASET_SLUG,
+        "source": normalized.get("label_source", KAGGLE_DATASET_SLUG),
         "mode": normalized["training_mode"],
         "eval_strategy": eval_strategy,
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
@@ -641,6 +693,10 @@ def train_single_hybrid_model(
         "walk_forward": walk_forward_summary,
         "final_test_year": normalized.get("final_test_year", ""),
         "split_policy": normalized.get("split_policy", ""),
+        "all_matches_rows": int(normalized.get("all_matches_rows", 0) or 0),
+        "worldcup_rows": int(normalized.get("worldcup_rows", 0) or 0),
+        "class_distribution": normalized.get("class_distribution", {}),
+        "sample_weight_summary": record["sample_weight_summary"],
     }
 
 
@@ -738,6 +794,11 @@ def train_dual_market_model(
         "api_football_stat_rows": int(result_record.get("api_football_stat_rows", 0) or 0),
         "api_football_market_rows": int(result_record.get("api_football_market_rows", 0) or 0),
         "international_recent": result_record.get("international_recent", international_results_status()),
+        "all_matches_rows": int(result_record.get("all_matches_rows", normalized.get("all_matches_rows", 0)) or 0),
+        "worldcup_rows": int(result_record.get("worldcup_rows", normalized.get("worldcup_rows", 0)) or 0),
+        "class_distribution": result_record.get("class_distribution", normalized.get("class_distribution", {})),
+        "sample_weight_policy": result_record.get("sample_weight_policy", normalized.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY)),
+        "sample_weight_summary": result_record.get("sample_weight_summary", {}),
         "dc_rho": float(result_record.get("dc_rho", 0.0) or 0.0),
         "kaggle_files": [str(path) for path in files],
         "history_source": result_record.get("history_source", ""),
@@ -765,6 +826,7 @@ def train_dual_market_model(
         "derived_total_markets": derived_total_markets,
         "markets": market_results,
         "market_models": market_models,
+        "over_under_preferred_sources": preferred_over_under_sources(market_results, goals_record),
         "trained_at": trained_at,
         "walk_forward_mode": result_record.get("walk_forward_mode", "none"),
         "walk_forward_summary": result_record.get("walk_forward_summary", {}),
@@ -783,7 +845,7 @@ def train_dual_market_model(
         "feature_inventory": bundle_record["feature_inventory"],
         "train_rows": int(result_result.get("train_rows", 0)),
         "eval_rows": int(result_result.get("eval_rows", 0)),
-        "source": KAGGLE_DATASET_SLUG,
+        "source": normalized.get("label_source", KAGGLE_DATASET_SLUG),
         "mode": normalized["training_mode"],
         "eval_strategy": bundle_record["eval_strategy"],
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
@@ -801,6 +863,10 @@ def train_dual_market_model(
         "walk_forward": bundle_record["walk_forward_summary"],
         "final_test_year": bundle_record["final_test_year"],
         "split_policy": bundle_record["split_policy"],
+        "all_matches_rows": bundle_record["all_matches_rows"],
+        "worldcup_rows": bundle_record["worldcup_rows"],
+        "class_distribution": bundle_record["class_distribution"],
+        "sample_weight_summary": bundle_record["sample_weight_summary"],
     }
 
 
@@ -964,7 +1030,9 @@ def build_prepared_dataset(
     qualifier_matches = market_bundle.get("qualifiers", pd.DataFrame()).copy()
     api_football_bundle = load_api_football_data(force_download=bool(refresh_history), allow_download=bool(refresh_history))
     api_market_rows = api_football_bundle.get("market_rows", pd.DataFrame()).copy()
+    international_matches = load_international_matches(required=False)
     international_status = international_results_status()
+    all_matches_label_rows = international_match_rows(international_matches)
     if not api_market_rows.empty:
         market_data = pd.concat([market_data, api_market_rows], ignore_index=True) if not market_data.empty else api_market_rows
     combined_has_1x2 = bool(not market_data.empty and market_data[["market_odds_home", "market_odds_draw", "market_odds_away"]].apply(pd.to_numeric, errors="coerce").notna().all(axis=1).any()) if {"market_odds_home", "market_odds_draw", "market_odds_away"}.issubset(market_data.columns) else False
@@ -977,18 +1045,25 @@ def build_prepared_dataset(
     raw_mode = normalized["training_mode"]
     team_features = normalized["team_features"].copy()
 
-    if raw_train.empty:
+    if not all_matches_label_rows.empty:
+        labeled_rows = deduplicate_labeled_matches(pd.concat([all_matches_label_rows, history_rows], ignore_index=True))
+        label_source = "all_matches.csv + historical_worldcup"
+        warnings.append("all_matches.csv se usa como corpus principal de labels; los Mundiales historicos se conservan como metadata y benchmark.")
+        if international_status.get("warning"):
+            warnings.append(str(international_status.get("warning")))
+    elif raw_train.empty:
         if history_rows.empty:
             raise WorldCupTrainingError("El ETL no encontro partidos con goles reales para construir el dataset de entrenamiento.")
         labeled_rows = history_rows
         label_source = "historical_worldcup"
-        warnings.append("El Kaggle actual no trae filas de partido entrenables; el ETL usa resultados historicos abiertos del Mundial para 1X2 y U/O 0.5, 1.5, 2.5 y 3.5.")
+        warnings.append("all_matches.csv no esta disponible o no es valido; el ETL usa resultados historicos abiertos del Mundial para 1X2 y U/O 0.5, 1.5, 2.5 y 3.5.")
     elif has_over_under_target(raw_train):
         labeled_parts = [raw_train]
         if has_over_under_target(raw_test):
             labeled_parts.append(raw_test)
-        labeled_rows = pd.concat(labeled_parts, ignore_index=True)
+        labeled_rows = deduplicate_labeled_matches(pd.concat([*labeled_parts, history_rows], ignore_index=True))
         label_source = "kaggle_match_result"
+        warnings.append("all_matches.csv no esta disponible o no es valido; se conserva fallback Kaggle/historico.")
         if raw_test.empty or not has_over_under_target(raw_test):
             warnings.append("El test Kaggle no trae goles suficientes para U/O multi-linea; el ETL separara el ultimo Mundial etiquetado como test final si hay fechas.")
     else:
@@ -997,13 +1072,16 @@ def build_prepared_dataset(
         labeled_parts = [raw_train, history_rows]
         if has_over_under_target(raw_test):
             labeled_parts.append(raw_test)
-        labeled_rows = pd.concat(labeled_parts, ignore_index=True)
+        labeled_rows = deduplicate_labeled_matches(pd.concat(labeled_parts, ignore_index=True))
         label_source = "kaggle_match_result + historical_worldcup"
-        warnings.append("El Kaggle actual no alcanza para U/O multi-linea; el ETL complemento las etiquetas de partido con el historico abierto del Mundial.")
+        warnings.append("all_matches.csv no esta disponible o no es valido; el ETL complemento Kaggle con el historico abierto del Mundial.")
         if raw_test.empty or not has_over_under_target(raw_test):
             warnings.append("El test Kaggle no trae goles suficientes; el ultimo Mundial etiquetado se usara como test final si hay fechas.")
 
-    labeled_rows = sanitize_match_rows(labeled_rows)
+    labeled_rows = deduplicate_labeled_matches(sanitize_match_rows(labeled_rows))
+    labeled_rows, future_label_rows = drop_future_label_rows(labeled_rows)
+    if future_label_rows:
+        warnings.append(f"{future_label_rows} partidos con Year >= {FUTURE_LABEL_EXCLUDED_YEAR} quedaron fuera de labels por politica anti-leakage.")
     train_df, test_df, final_test_year, split_warning = split_latest_worldcup_test(labeled_rows)
     if split_warning:
         warnings.append(split_warning)
@@ -1017,9 +1095,12 @@ def build_prepared_dataset(
     prepared_at = datetime.now(timezone.utc).isoformat()
     preview_source = train_df if not train_df.empty else test_df if not test_df.empty else team_features
     dc_rho = estimate_dixon_coles_rho(history_df)
+    class_distribution = split_class_distribution(train_df, test_df)
+    all_matches_rows_count = int(all_matches_label_rows.shape[0])
+    worldcup_rows_count = int(labeled_rows["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in labeled_rows.columns else 0
     return {
         "prepared_at": prepared_at,
-        "source_files": [str(path) for path in files],
+        "source_files": prepared_source_files(files, international_status),
         "source_mode": raw_mode,
         "training_mode": "match_result",
         "train": train_df,
@@ -1059,6 +1140,10 @@ def build_prepared_dataset(
         "api_football_stat_rows": int(api_football_bundle.get("team_stats", pd.DataFrame()).shape[0]),
         "api_football_market_rows": int(api_market_rows.shape[0]),
         "international_recent": international_status,
+        "all_matches_rows": all_matches_rows_count,
+        "worldcup_rows": worldcup_rows_count,
+        "class_distribution": class_distribution,
+        "sample_weight_policy": SAMPLE_WEIGHT_POLICY,
         "dc_rho": float(dc_rho),
         "target_column": "Label + GoalsDistribution + OverUnder05/15/25/35",
         "team_columns": normalized["team_columns"],
@@ -1077,28 +1162,55 @@ def build_prepared_dataset(
 
 def split_latest_worldcup_test(rows: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, str, str]:
     if rows.empty:
-        return rows.copy(), pd.DataFrame(columns=MATCH_ROW_COLUMNS), "", ""
+        return rows.copy(), pd.DataFrame(columns=[*MATCH_ROW_COLUMNS, *MATCH_METADATA_COLUMNS]), "", ""
     working = sort_match_rows(rows)
     years = pd.to_numeric(working.get("Year"), errors="coerce")
-    valid_years = sorted({int(year) for year in years.dropna().tolist()})
+    if "is_worldcup_match" in working.columns:
+        worldcup_mask = working["is_worldcup_match"].map(coerce_bool_value)
+    else:
+        worldcup_mask = working.get("tournament", pd.Series(index=working.index, dtype=object)).map(is_worldcup_tournament)
+    valid_years = sorted({int(year) for year in years[worldcup_mask].dropna().tolist() if int(year) < FUTURE_LABEL_EXCLUDED_YEAR})
     if len(valid_years) < 2:
-        return working.reset_index(drop=True), pd.DataFrame(columns=working.columns), "", "No hay al menos dos Mundiales fechados; se usara holdout temporal interno desde train."
+        return working.reset_index(drop=True), pd.DataFrame(columns=working.columns), "", "No hay al menos dos Mundiales etiquetados; se usara holdout temporal interno desde train."
     final_year = int(valid_years[-1])
-    train = working[years < final_year].copy()
-    test = working[years == final_year].copy()
+    test_mask = worldcup_mask & years.eq(final_year)
+    test = working[test_mask].copy()
+    test_dates = pd.to_datetime(test.get("Date"), errors="coerce")
+    first_test_date = test_dates.min() if not test.empty else pd.NaT
+    row_dates = pd.to_datetime(working.get("Date"), errors="coerce")
+    if pd.notna(first_test_date):
+        train_mask = (~test_mask) & (row_dates.notna() & row_dates.lt(first_test_date))
+        post_cutoff = int(((~test_mask) & row_dates.notna() & row_dates.ge(first_test_date)).sum())
+    else:
+        train_mask = (~test_mask) & years.lt(final_year)
+        post_cutoff = int(((~test_mask) & years.ge(final_year)).sum())
+    train = working[train_mask].copy()
     if train.empty or test.empty:
         return working.reset_index(drop=True), pd.DataFrame(columns=working.columns), "", "No se pudo aislar el ultimo Mundial como test final; se usara holdout temporal interno desde train."
-    return train.reset_index(drop=True), test.reset_index(drop=True), str(final_year), ""
+    warning = ""
+    if post_cutoff:
+        warning = f"{post_cutoff} partidos posteriores al inicio del Mundial {final_year} quedaron fuera de train/eval y solo sirven como contexto temporal."
+    return train.reset_index(drop=True), test.reset_index(drop=True), str(final_year), warning
 
 
 def sanitize_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
     if rows.empty:
-        return pd.DataFrame(columns=MATCH_ROW_COLUMNS)
+        return pd.DataFrame(columns=[*MATCH_ROW_COLUMNS, *MATCH_METADATA_COLUMNS])
     working = rows.copy()
     required = ["Home", "Away", "Label", "Source"]
     for column in required:
         if column not in working.columns:
             working[column] = ""
+    for column in MATCH_METADATA_COLUMNS:
+        if column not in working.columns:
+            if column == "is_worldcup_match":
+                working[column] = False
+            elif column == "sample_weight":
+                working[column] = 1.0
+            elif column == "knockout":
+                working[column] = False
+            else:
+                working[column] = ""
     if "FixtureId" not in working.columns:
         working["FixtureId"] = ""
     if "HG" not in working.columns:
@@ -1129,6 +1241,21 @@ def sanitize_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
     inferred_year = working["Date"].dt.year
     working["Year"] = pd.to_numeric(working["Year"], errors="coerce").fillna(inferred_year)
     working["FixtureId"] = working["FixtureId"].astype(str)
+    working["tournament"] = working["tournament"].astype(str)
+    working["stage"] = working["stage"].astype(str)
+    working["group"] = working["group"].astype(str)
+    working["label_source"] = working["label_source"].astype(str)
+    working["is_worldcup_match"] = working["is_worldcup_match"].map(coerce_bool_value)
+    inferred_worldcup = working["tournament"].map(is_worldcup_tournament)
+    working["is_worldcup_match"] = working["is_worldcup_match"] | inferred_worldcup
+    working["knockout"] = working["knockout"].map(coerce_bool_value)
+    working["sample_weight"] = pd.to_numeric(working["sample_weight"], errors="coerce")
+    missing_weight = working["sample_weight"].isna()
+    if missing_weight.any():
+        working.loc[missing_weight, "sample_weight"] = working.loc[missing_weight].apply(
+            lambda item: sample_weight_for_tournament(item.get("tournament"), is_worldcup=bool(item.get("is_worldcup_match"))),
+            axis=1,
+        )
     working = working[
         working["Home"].astype(str).str.len().gt(1) &
         working["Away"].astype(str).str.len().gt(1) &
@@ -1137,7 +1264,8 @@ def sanitize_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
     for column in MATCH_ROW_COLUMNS:
         if column not in working.columns:
             working[column] = np.nan
-    return sort_match_rows(working[MATCH_ROW_COLUMNS + [column for column in working.columns if column not in MATCH_ROW_COLUMNS]]).reset_index(drop=True)
+    ordered_columns = [*MATCH_ROW_COLUMNS, *MATCH_METADATA_COLUMNS]
+    return sort_match_rows(working[ordered_columns + [column for column in working.columns if column not in ordered_columns]]).reset_index(drop=True)
 
 
 def sort_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
@@ -1152,7 +1280,7 @@ def sort_match_rows(rows: pd.DataFrame) -> pd.DataFrame:
 
 def history_match_rows(history_df: pd.DataFrame, source: str) -> pd.DataFrame:
     if history_df.empty:
-        return pd.DataFrame(columns=MATCH_ROW_COLUMNS)
+        return pd.DataFrame(columns=[*MATCH_ROW_COLUMNS, *MATCH_METADATA_COLUMNS])
     working = history_df.copy()
     working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
     rows: List[Dict[str, Any]] = []
@@ -1166,6 +1294,9 @@ def history_match_rows(history_df: pd.DataFrame, source: str) -> pd.DataFrame:
             goals_away = float(row.get("G2", np.nan))
         except (TypeError, ValueError):
             continue
+        stage = str(row.get("Round", "") or "")
+        group = str(row.get("Group", "") or "")
+        tournament = "FIFA World Cup"
         rows.append({
             "FixtureId": str(row.get("FixtureId", row.get("No.", index))),
             "Date": row.get("Date"),
@@ -1177,9 +1308,130 @@ def history_match_rows(history_df: pd.DataFrame, source: str) -> pd.DataFrame:
             "AG": goals_away,
             **over_under_target_values(goals_home, goals_away),
             "Source": source,
-            "Date": row.get("Date"),
+            "is_worldcup_match": True,
+            "tournament": tournament,
+            "stage": stage,
+            "group": group,
+            "knockout": bool(stage and not group),
+            "label_source": "historical_worldcup",
+            "sample_weight": sample_weight_for_tournament(tournament, is_worldcup=True),
         })
     return sanitize_match_rows(pd.DataFrame(rows))
+
+
+def international_match_rows(matches: pd.DataFrame) -> pd.DataFrame:
+    if matches is None or matches.empty:
+        return pd.DataFrame(columns=[*MATCH_ROW_COLUMNS, *MATCH_METADATA_COLUMNS])
+    working = matches.copy()
+    working["date"] = pd.to_datetime(working.get("date"), errors="coerce")
+    working["home_score"] = pd.to_numeric(working.get("home_score"), errors="coerce")
+    working["away_score"] = pd.to_numeric(working.get("away_score"), errors="coerce")
+    working = working[
+        working["date"].notna()
+        & working.get("home_team", pd.Series(index=working.index, dtype=object)).astype(str).str.len().gt(1)
+        & working.get("away_team", pd.Series(index=working.index, dtype=object)).astype(str).str.len().gt(1)
+        & working["home_score"].notna()
+        & working["away_score"].notna()
+    ].copy()
+    if working.empty:
+        return pd.DataFrame(columns=[*MATCH_ROW_COLUMNS, *MATCH_METADATA_COLUMNS])
+
+    rows: List[Dict[str, Any]] = []
+    for index, row in working.iterrows():
+        goals_home = float(row.get("home_score"))
+        goals_away = float(row.get("away_score"))
+        tournament = str(row.get("tournament", "") or "")
+        worldcup = is_worldcup_tournament(tournament)
+        match_date = pd.Timestamp(row.get("date"))
+        rows.append({
+            "FixtureId": str(row.get("fixture_id", index)),
+            "Date": match_date,
+            "Year": int(match_date.year),
+            "Home": clean_team_name(row.get("home_team")),
+            "Away": clean_team_name(row.get("away_team")),
+            "Label": label_from_goals(goals_home, goals_away),
+            "HG": goals_home,
+            "AG": goals_away,
+            **over_under_target_values(goals_home, goals_away),
+            "Source": "all_matches.csv",
+            "is_worldcup_match": bool(worldcup),
+            "tournament": tournament,
+            "stage": "",
+            "group": "",
+            "knockout": False,
+            "label_source": "all_matches.csv",
+            "sample_weight": sample_weight_for_tournament(tournament, is_worldcup=worldcup),
+        })
+    return sanitize_match_rows(pd.DataFrame(rows))
+
+
+def deduplicate_labeled_matches(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return sanitize_match_rows(rows)
+    working = sanitize_match_rows(rows)
+    if working.empty:
+        return working
+    working["_date_key"] = pd.to_datetime(working["Date"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    working["_home_key"] = working["Home"].astype(str).str.lower().str.strip()
+    working["_away_key"] = working["Away"].astype(str).str.lower().str.strip()
+    working["_hg_key"] = pd.to_numeric(working["HG"], errors="coerce").round(3).astype(str)
+    working["_ag_key"] = pd.to_numeric(working["AG"], errors="coerce").round(3).astype(str)
+    worldcup_mask = working["is_worldcup_match"].astype(bool)
+    historical_worldcup_mask = worldcup_mask & (
+        working.get("label_source", "").astype(str).str.contains("historical_worldcup", case=False, na=False)
+        | working.get("Source", "").astype(str).str.contains("worldcup", case=False, na=False)
+    )
+    working["_source_priority"] = np.select(
+        [historical_worldcup_mask, worldcup_mask],
+        [0, 1],
+        default=2,
+    )
+    working["_row_order"] = np.arange(len(working), dtype=int)
+    working = working.sort_values(
+        ["_date_key", "_home_key", "_away_key", "_hg_key", "_ag_key", "_source_priority", "_row_order"],
+        kind="stable",
+    )
+    working = working.drop_duplicates(["_date_key", "_home_key", "_away_key", "_hg_key", "_ag_key"], keep="first")
+    return sort_match_rows(working.drop(columns=["_date_key", "_home_key", "_away_key", "_hg_key", "_ag_key", "_source_priority", "_row_order"]))
+
+
+def drop_future_label_rows(rows: pd.DataFrame, cutoff_year: int = FUTURE_LABEL_EXCLUDED_YEAR) -> Tuple[pd.DataFrame, int]:
+    if rows.empty or "Year" not in rows.columns:
+        return rows.copy(), 0
+    years = pd.to_numeric(rows["Year"], errors="coerce")
+    keep = years.isna() | years.lt(int(cutoff_year))
+    removed = int((~keep).sum())
+    return rows[keep].copy().reset_index(drop=True), removed
+
+
+def sample_weight_for_tournament(tournament: Any, is_worldcup: bool = False) -> float:
+    text = str(tournament or "")
+    normalized = normalize_text_key(text)
+    if is_worldcup:
+        return SAMPLE_WEIGHT_POLICY["worldcup"]
+    if "friendly" in normalized:
+        return SAMPLE_WEIGHT_POLICY["friendly"]
+    if any(token in normalized for token in ("qualification", "qualifier", "qualifiers")):
+        return SAMPLE_WEIGHT_POLICY["qualifier"]
+    if "nations league" in normalized:
+        return SAMPLE_WEIGHT_POLICY["nations_league"]
+    weighted = tournament_weight(text)
+    if weighted >= 1.25:
+        return SAMPLE_WEIGHT_POLICY["continental_or_world_official"]
+    if weighted >= 1.0:
+        return SAMPLE_WEIGHT_POLICY["other_official"]
+    return float(weighted)
+
+
+def normalize_text_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower()).strip()
+
+
+def coerce_bool_value(value: Any) -> bool:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y", "si", "sí"}
 
 
 def save_prepared_dataset(dataset: Dict[str, Any]) -> None:
@@ -1206,6 +1458,45 @@ def load_prepared_dataset(required: bool = False) -> Optional[Dict[str, Any]]:
     return dataset
 
 
+def prepared_source_files(files: Iterable[Path], international_status: Optional[Dict[str, Any]] = None) -> List[str]:
+    paths = [str(path) for path in files]
+    status = international_status or {}
+    source_path = str(status.get("source_path") or "")
+    if status.get("available") and source_path:
+        paths.append(source_path)
+    elif INTERNATIONAL_MATCHES_FILE.exists():
+        paths.append(str(INTERNATIONAL_MATCHES_FILE))
+    return unique_strings(paths)
+
+
+def split_class_distribution(train_df: pd.DataFrame, test_df: pd.DataFrame) -> Dict[str, Any]:
+    return {
+        "train": class_distribution_for_rows(train_df),
+        "test": class_distribution_for_rows(test_df),
+    }
+
+
+def class_distribution_for_rows(rows: pd.DataFrame) -> Dict[str, Any]:
+    output: Dict[str, Any] = {"rows": int(rows.shape[0]) if isinstance(rows, pd.DataFrame) else 0, "markets": {}}
+    if rows is None or rows.empty:
+        return output
+    if "Label" in rows.columns:
+        output["markets"]["result"] = value_counts_payload(rows["Label"])
+    for target in OVER_UNDER_MARKET_TARGETS:
+        column = over_under_column_for_target(target)
+        if column in rows.columns:
+            output["markets"][target] = value_counts_payload(pd.to_numeric(rows[column], errors="coerce").dropna().astype(int))
+    if {"HG", "AG"}.issubset(rows.columns):
+        output["markets"][GOALS_DISTRIBUTION_TARGET] = value_counts_payload(total_goals_buckets(rows))
+    return output
+
+
+def value_counts_payload(values: Iterable[Any]) -> Dict[str, int]:
+    series = pd.Series(values).dropna()
+    counts = series.astype(str).value_counts(dropna=False).sort_index()
+    return {str(key): int(value) for key, value in counts.items()}
+
+
 def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Dict[str, Any]:
     dataset = load_prepared_dataset(required=False)
     if not dataset:
@@ -1221,12 +1512,17 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
             "split_policy": "",
             "over_under_ready": False,
             "goals_distribution_ready": False,
+            "all_matches_rows": 0,
+            "worldcup_rows": 0,
+            "class_distribution": {},
+            "sample_weight_policy": SAMPLE_WEIGHT_POLICY,
             "warnings": [],
         }
-    source_files = {str(path) for path in files}
+    current_international_status = international_results_status()
+    source_files = set(prepared_source_files(files, current_international_status))
     artifact_sources = set(dataset.get("source_files", []))
     artifact_time = PREPARED_DATASET_FILE.stat().st_mtime if PREPARED_DATASET_FILE.exists() else 0.0
-    source_times = [path.stat().st_mtime for path in files if path.exists()]
+    source_times = [Path(path).stat().st_mtime for path in source_files if Path(path).exists()]
     stale = bool(source_times and max(source_times) > artifact_time) or bool(source_files != artifact_sources)
     return {
         "ready": True,
@@ -1249,7 +1545,11 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "api_football_fixture_rows": int(dataset.get("api_football_fixture_rows", 0)),
         "api_football_stat_rows": int(dataset.get("api_football_stat_rows", 0)),
         "api_football_market_rows": int(dataset.get("api_football_market_rows", 0)),
-        "international_recent": dataset.get("international_recent", international_results_status()),
+        "international_recent": current_international_status,
+        "all_matches_rows": int(dataset.get("all_matches_rows", 0)),
+        "worldcup_rows": int(dataset.get("worldcup_rows", 0)),
+        "class_distribution": dataset.get("class_distribution", {}),
+        "sample_weight_policy": dataset.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "warnings": dataset.get("warnings", []),
     }
 
@@ -1278,6 +1578,10 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "api_football_stat_rows": int(dataset.get("api_football_stat_rows", 0)),
         "api_football_market_rows": int(dataset.get("api_football_market_rows", 0)),
         "international_recent": dataset.get("international_recent", international_results_status()),
+        "all_matches_rows": int(dataset.get("all_matches_rows", 0)),
+        "worldcup_rows": int(dataset.get("worldcup_rows", 0)),
+        "class_distribution": dataset.get("class_distribution", {}),
+        "sample_weight_policy": dataset.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "dc_rho": float(dataset.get("dc_rho", 0.0) or 0.0),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
         "goals_distribution_ready": bool(dataset.get("goals_distribution_ready", dataset.get("over_under_ready", False))),
@@ -1452,10 +1756,10 @@ def history_before_row(history_df: pd.DataFrame, row_date: Optional[pd.Timestamp
     working = history_df.copy()
     working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
     working = working[working["Date"].notna()].copy()
-    if row_year:
-        return working[working["Date"].dt.year < int(row_year)].copy()
     if row_date is not None:
         return working[working["Date"] < row_date].copy()
+    if row_year:
+        return working[working["Date"].dt.year < int(row_year)].copy()
     return pd.DataFrame(columns=working.columns)
 
 
@@ -1491,6 +1795,73 @@ def team_features_asof(features: pd.DataFrame, row_year: Optional[int]) -> pd.Da
     return latest.reset_index(drop=True)
 
 
+def rows_for_training_target(rows: pd.DataFrame, target: str) -> pd.DataFrame:
+    working = sort_match_rows(rows)
+    if is_over_under_target(target):
+        target_column = over_under_column_for_target(target)
+        return working[working[target_column].notna()].copy() if target_column in working.columns else working.iloc[0:0].copy()
+    if target == GOALS_DISTRIBUTION_TARGET:
+        return working[working["HG"].notna() & working["AG"].notna()].copy()
+    return working.copy()
+
+
+def sample_weights_for_rows(rows: pd.DataFrame, target: str = "result") -> pd.Series:
+    working = rows_for_training_target(rows, target)
+    if working.empty:
+        return pd.Series(dtype=float)
+    if "sample_weight" in working.columns:
+        weights = pd.to_numeric(working["sample_weight"], errors="coerce")
+    else:
+        weights = pd.Series(np.nan, index=working.index, dtype=float)
+    missing = weights.isna()
+    if missing.any():
+        weights.loc[missing] = working.loc[missing].apply(
+            lambda item: sample_weight_for_tournament(item.get("tournament"), is_worldcup=bool(item.get("is_worldcup_match", False))),
+            axis=1,
+        )
+    return weights.astype(float).clip(lower=0.05).reset_index(drop=True)
+
+
+def align_sample_weights(weights: pd.Series, expected_length: int) -> pd.Series:
+    output = pd.to_numeric(pd.Series(weights).reset_index(drop=True), errors="coerce").fillna(1.0).astype(float)
+    expected_length = int(expected_length)
+    if len(output) > expected_length:
+        output = output.iloc[:expected_length].copy()
+    elif len(output) < expected_length:
+        output = pd.concat([output, pd.Series([1.0] * (expected_length - len(output)))], ignore_index=True)
+    return output.clip(lower=0.05).reset_index(drop=True)
+
+
+def sample_weight_summary(weights: pd.Series) -> Dict[str, Any]:
+    values = pd.to_numeric(pd.Series(weights), errors="coerce").dropna()
+    if values.empty:
+        return {"enabled": False, "rows": 0}
+    return {
+        "enabled": True,
+        "rows": int(values.shape[0]),
+        "min": round(float(values.min()), 4),
+        "max": round(float(values.max()), 4),
+        "mean": round(float(values.mean()), 4),
+        "policy": SAMPLE_WEIGHT_POLICY,
+    }
+
+
+def split_support_payload(y_train: Iterable[Any], y_eval: Iterable[Any], target: str) -> Dict[str, Any]:
+    return {
+        "target": str(target or "result"),
+        "train": target_support_payload(y_train),
+        "eval": target_support_payload(y_eval),
+    }
+
+
+def target_support_payload(values: Iterable[Any]) -> Dict[str, Any]:
+    series = pd.Series(values).dropna()
+    return {
+        "rows": int(series.shape[0]),
+        "class_distribution": value_counts_payload(series),
+    }
+
+
 def build_training_matrix(
         rows: pd.DataFrame,
         base_model: Optional[WorldCupModel] = None,
@@ -1513,12 +1884,7 @@ def build_training_matrix(
         host_advantage: float = 45.0,
         max_goals: int = 10,
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
-    working = sort_match_rows(rows)
-    if is_over_under_target(target):
-        target_column = over_under_column_for_target(target)
-        working = working[working[target_column].notna()] if target_column in working.columns else working.iloc[0:0]
-    elif target == GOALS_DISTRIBUTION_TARGET:
-        working = working[working["HG"].notna() & working["AG"].notna()]
+    working = rows_for_training_target(rows, target)
     if team_features is None:
         team_features = pd.DataFrame()
     if market_rows is None:
@@ -1548,7 +1914,7 @@ def build_training_matrix(
             team_features_cache[row_year] = team_features_asof(team_features, row_year)
         if history_df is not None:
             frozen = row_year in frozen_years
-            cache_key = ("year", str(int(row_year))) if row_year else ("date", reference_date)
+            cache_key = ("date", reference_date) if row_date is not None else ("year", str(int(row_year))) if row_year else ("date", reference_date)
             if cache_key not in snapshot_cache:
                 history_cutoff = history_before_row(history_df, row_date=row_date, row_year=row_year, freeze_year=frozen)
                 snapshot_model = WorldCupModel.from_history(
@@ -2377,8 +2743,7 @@ def is_test_or_eval_file(path: Path) -> bool:
 
 def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     model_key = normalize_model_key(str(payload.get("model_type") or default_training_payload()["model_type"]))
-    spec = MODEL_SPECS[model_key]
-    params = dict(spec.defaults)
+    params = worldcup_model_defaults(model_key)
     for key in MODEL_PARAM_KEYS:
         if key in params and payload.get(key) not in {None, ""}:
             params[key] = coerce_param(payload.get(key), params[key])
@@ -2603,6 +2968,8 @@ def completed_worldcup_training_rows(tournament: Dict[str, Any]) -> pd.DataFrame
         working[f"OverUnder{suffix}"] = ((working["HG"] + working["AG"]) > line).astype(int)
     return pd.DataFrame({
         "FixtureId": working["No."].astype(str),
+        "Date": pd.to_datetime(working["Fecha"], errors="coerce"),
+        "Year": 2026,
         "Home": working["Equipo 1"].map(clean_team_name),
         "Away": working["Equipo 2"].map(clean_team_name),
         "HG": working["HG"].astype(float),
@@ -2613,6 +2980,13 @@ def completed_worldcup_training_rows(tournament: Dict[str, Any]) -> pd.DataFrame
         "OverUnder25": working["OverUnder25"].astype(int),
         "OverUnder35": working["OverUnder35"].astype(int),
         "Source": "worldcup_2026_walk_forward",
+        "is_worldcup_match": True,
+        "tournament": "FIFA World Cup",
+        "stage": working["Ronda"].astype(str),
+        "group": working["Grupo"].astype(str),
+        "knockout": working["Grupo"].astype(str).str.len().eq(0),
+        "label_source": "worldcup_2026_walk_forward",
+        "sample_weight": SAMPLE_WEIGHT_POLICY["worldcup"],
     })
 
 
@@ -2653,6 +3027,10 @@ def supplemental_training_rows(
     completed = completed_worldcup_training_rows(tournament)
     if completed.empty:
         empty["warnings"] = ["No hay partidos 2026 con marcador oficial disponible para incorporar al reentreno."]
+        return empty
+    completed, removed_future = drop_future_label_rows(sanitize_match_rows(completed))
+    if removed_future:
+        empty["warnings"] = [f"{removed_future} partidos 2026 con marcador quedaron fuera del reentreno por politica anti-leakage."]
         return empty
     warnings: List[str] = []
     if normalized_mode == "result_plus_players":
@@ -2781,6 +3159,15 @@ def safe_train_eval_split(x: pd.DataFrame, y: pd.Series, test_size: float, rando
     return x_train, x_eval, y_train, y_eval
 
 
+def split_weights_like_safe_train_eval(sample_weight: Optional[pd.Series], total_length: int, fit_length: int) -> Optional[pd.Series]:
+    if sample_weight is None:
+        return None
+    weights = align_sample_weights(pd.Series(sample_weight), total_length)
+    if int(fit_length) >= int(total_length):
+        return weights
+    return weights.iloc[:int(fit_length)].reset_index(drop=True)
+
+
 def encode_labels(y: pd.Series) -> Tuple[pd.Series, List[Any]]:
     values = pd.Series(y).reset_index(drop=True)
     if values.astype(str).isin(TARGET_LABELS).all():
@@ -2820,6 +3207,7 @@ def fit_configured_classifier(
         requested_device: str,
         seed: int,
         num_classes: int,
+        sample_weight: Optional[pd.Series] = None,
 ) -> Dict[str, Any]:
     y_values = pd.Series(y_train).dropna()
     if y_values.nunique() < 2:
@@ -2841,9 +3229,9 @@ def fit_configured_classifier(
             seed=seed,
             num_classes=num_classes,
         )
-        classifier.fit(x_train, y_train)
+        fit_warnings = fit_classifier(classifier, x_train, y_train, sample_weight=sample_weight)
         finalize_classifier_for_inference(classifier, model_key=model_key, trained_device=device)
-        return {"classifier": classifier, "device": device, "warnings": device_warnings}
+        return {"classifier": classifier, "device": device, "warnings": [*device_warnings, *fit_warnings]}
     except Exception as exc:
         if device == "cuda":
             if requested_device == "cuda":
@@ -2859,14 +3247,28 @@ def fit_configured_classifier(
                 seed=seed,
                 num_classes=num_classes,
             )
-            fallback.fit(x_train, y_train)
+            fit_warnings = fit_classifier(fallback, x_train, y_train, sample_weight=sample_weight)
             finalize_classifier_for_inference(fallback, model_key=model_key, trained_device="cpu")
             return {
                 "classifier": fallback,
                 "device": "cpu",
-                "warnings": [*device_warnings, f"CUDA fallo durante fit ({exc.__class__.__name__}); se reintento en CPU."],
+                "warnings": [*device_warnings, *fit_warnings, f"CUDA fallo durante fit ({exc.__class__.__name__}); se reintento en CPU."],
             }
         raise
+
+
+def fit_classifier(classifier, x_train: pd.DataFrame, y_train: pd.Series, sample_weight: Optional[pd.Series] = None) -> List[str]:
+    weights = pd.to_numeric(pd.Series(sample_weight), errors="coerce").fillna(1.0).astype(float) if sample_weight is not None else pd.Series(dtype=float)
+    if sample_weight is None or weights.empty:
+        classifier.fit(x_train, y_train)
+        return []
+    weights = align_sample_weights(weights, len(pd.Series(y_train)))
+    try:
+        classifier.fit(x_train, y_train, sample_weight=weights.to_numpy(dtype=float))
+        return []
+    except TypeError:
+        classifier.fit(x_train, y_train)
+        return ["El clasificador seleccionado no acepta sample_weight; se entreno sin ponderacion de filas."]
 
 
 def finalize_classifier_for_inference(classifier, model_key: str, trained_device: str) -> None:
@@ -2988,6 +3390,7 @@ def tune_model_if_requested(
         config: Dict[str, Any],
         x_train: pd.DataFrame,
         y_train: pd.Series,
+        sample_weight: Optional[pd.Series] = None,
         progress_callback=None,
         market_label: str = "",
 ) -> Dict[str, Any]:
@@ -3007,6 +3410,7 @@ def tune_model_if_requested(
         test_size=0.25,
         random_state=config["seed"],
     )
+    weight_fit = split_weights_like_safe_train_eval(sample_weight, len(y_train), len(y_fit)) if sample_weight is not None else None
     objective_name = normalize_metric_name(config["objective"])
 
     def objective(trial):
@@ -3023,6 +3427,7 @@ def tune_model_if_requested(
                 requested_device=config["device"],
                 seed=config["seed"],
                 num_classes=int(pd.Series(y_train).nunique()),
+                sample_weight=weight_fit,
             )
             pred = classifier_predict(fit_result["classifier"], x_eval)
             return metric_score(y_eval, pred, objective_name)
@@ -3288,6 +3693,7 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
     goal_distribution_ml: Dict[str, float] = {}
     goal_distribution_totals: Dict[str, float] = {}
     market_model_names: Dict[str, str] = {}
+    preferred_sources = record.get("over_under_preferred_sources") or {}
 
     result_id = market_models.get("result")
     if result_id:
@@ -3334,7 +3740,8 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
                 market_model_names[GOALS_DISTRIBUTION_TARGET] = goals_output.get("model_name", "")
             notes.extend(goals_output.get("notes", []))
             for target in OVER_UNDER_MARKET_TARGETS:
-                if target in over_under_line_sources:
+                preferred_kind = (preferred_sources.get(target) or {}).get("kind")
+                if target in over_under_line_sources and preferred_kind != "goal_distribution_ml":
                     continue
                 line = OVER_UNDER_TARGET_LINES[target]
                 suffix = total_line_suffix(line)
@@ -3670,6 +4077,36 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
     }
 
 
+def preferred_over_under_sources(markets: Dict[str, Dict[str, Any]], goals_record: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    derived = goals_record.get("derived_total_markets", {}) if goals_record else {}
+    output: Dict[str, Dict[str, Any]] = {}
+    for target in OVER_UNDER_MARKET_TARGETS:
+        binary = markets.get(target, {})
+        binary_score = eval_f1_from_metrics(binary.get("metrics", {}))
+        derived_score = eval_f1_from_metrics((derived.get(target, {}) or {}).get("metrics", {}))
+        if derived_score is not None and (binary_score is None or derived_score > binary_score):
+            output[target] = {
+                "kind": "goal_distribution_ml",
+                "binary_eval_f1": binary_score,
+                "goal_distribution_eval_f1": derived_score,
+            }
+        else:
+            output[target] = {
+                "kind": "binary_ml",
+                "binary_eval_f1": binary_score,
+                "goal_distribution_eval_f1": derived_score,
+            }
+    return output
+
+
+def eval_f1_from_metrics(metrics: Dict[str, Any]) -> Optional[float]:
+    try:
+        value = (metrics.get("eval") or {}).get("F1")
+        return float(value) if value is not None else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def goal_line_training_summary(record: Dict[str, Any], result: Dict[str, Any], line_suffix: str = "25") -> Dict[str, Any]:
     derived_key = f"over_under_{line_suffix}"
     derived = (record.get("derived_total_markets") or {}).get(derived_key, {})
@@ -3912,8 +4349,11 @@ def etl_steps(
     api_stat_rows = int(prepared.get("api_football_stat_rows", normalized.get("api_football_stat_rows", 0)) or 0)
     api_market_rows = int(prepared.get("api_football_market_rows", normalized.get("api_football_market_rows", 0)) or 0)
     international_status = prepared.get("international_recent") or normalized.get("international_recent") or international_results_status()
+    all_matches_rows = int(prepared.get("all_matches_rows", normalized.get("all_matches_rows", international_status.get("all_matches_rows", 0))) or 0)
+    worldcup_rows = int(prepared.get("worldcup_rows", normalized.get("worldcup_rows", international_status.get("worldcup_rows", 0))) or 0)
+    final_test_year = str(prepared.get("final_test_year") or normalized.get("final_test_year") or "")
     international_detail = (
-        f"all_matches.csv disponible para Poisson ultimos 15 y features opcionales ({international_status.get('rows', 0)} filas)."
+        f"all_matches.csv disponible como corpus principal/contexto ({all_matches_rows or international_status.get('rows', 0)} labels normalizados, {worldcup_rows} filas Mundial, test final {final_test_year or 'pendiente'})."
         if international_status.get("available")
         else f"All matches faltante: {international_status.get('reason') or 'sin CSV valido'} Ruta esperada: {international_status.get('file_path') or 'storage/worldcup/international/all_matches.csv'}."
     )
@@ -3936,7 +4376,7 @@ def etl_steps(
             "name": "Lectura y normalizacion",
             "status": "ok" if train_rows else "pending",
             "count": train_rows,
-            "detail": f"Modo activo: {normalized.get('training_mode') or 'sin modo'}; fuente labels: {prepared_label_source or normalized.get('training_mode') or 'sin modo'}.",
+            "detail": f"Modo activo: {normalized.get('training_mode') or 'sin modo'}; fuente labels: {prepared_label_source or normalized.get('training_mode') or 'sin modo'}; train={train_rows}, eval={test_rows}.",
         },
         {
             "name": "Split evaluacion",
@@ -3971,7 +4411,7 @@ def etl_steps(
         {
             "name": "All matches recientes",
             "status": "ok" if international_status.get("available") else "info",
-            "count": int(international_status.get("rows", 0) or 0),
+            "count": all_matches_rows or int(international_status.get("rows", 0) or 0),
             "detail": international_detail,
         },
         {
@@ -3990,7 +4430,7 @@ def etl_steps(
             "name": "Anti-leakage",
             "status": "ok" if train_rows else "pending",
             "count": 0,
-            "detail": "No se usan resultados del Mundial 2026 como target.",
+            "detail": "Features historicas/recent15 se cortan antes de la fecha del partido; el Mundial final queda solo en eval y no se usan resultados 2026 como labels.",
         },
     ]
 
@@ -4104,12 +4544,18 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "api_football_stat_rows": int(record.get("api_football_stat_rows", 0) or 0),
         "api_football_market_rows": int(record.get("api_football_market_rows", 0) or 0),
         "international_recent": record.get("international_recent", international_results_status()),
+        "all_matches_rows": int(record.get("all_matches_rows", 0) or 0),
+        "worldcup_rows": int(record.get("worldcup_rows", 0) or 0),
+        "class_distribution": record.get("class_distribution", {}),
+        "sample_weight_policy": record.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
+        "sample_weight_summary": record.get("sample_weight_summary", {}),
         "dc_rho": float(record.get("dc_rho", 0.0) or 0.0),
         "final_test_year": record.get("final_test_year", ""),
         "split_policy": record.get("split_policy", ""),
         "hidden_from_catalog": bool(record.get("hidden_from_catalog", False)),
         "markets": record.get("markets", {}),
         "market_models": record.get("market_models", {}),
+        "over_under_preferred_sources": record.get("over_under_preferred_sources", {}),
         "walk_forward_mode": record.get("walk_forward_mode", "none"),
         "walk_forward_summary": record.get("walk_forward_summary", {}),
     }
