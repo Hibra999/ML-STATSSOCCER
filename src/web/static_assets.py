@@ -9,7 +9,8 @@ class PublicStorageAssets(StaticFiles):
     _allowed_roots = {"graphics"}
 
     def lookup_path(self, path: str):
-        parts = PurePosixPath(path).parts
+        public_path = str(path or "").lstrip("/")
+        parts = PurePosixPath(public_path).parts
         if not parts or parts[0] not in self._allowed_roots:
             return "", None
-        return super().lookup_path(path)
+        return super().lookup_path(public_path)
