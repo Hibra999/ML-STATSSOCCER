@@ -150,7 +150,6 @@ def match_probabilities_dataframe(matches: List[Dict[str, Any]], model: WorldCup
             "Under 2.5 %": _pct(probabilities["under25"]),
             "Over 3.5 %": _pct(probabilities.get("over35", 0.0)),
             "Under 3.5 %": _pct(probabilities.get("under35", 0.0)),
-            "Marcador modal": f"{probabilities['modal_g1']}-{probabilities['modal_g2']}",
             "Sede": match.get("ground", ""),
         })
     return pd.DataFrame(rows)

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260611-v1">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260611-v2">
 </head>
 <body>
   <header class="topbar">
@@ -107,7 +107,7 @@
       <div class="prediction-dock clean-dock">
         <div>
           <h3>Próximos N partidos</h3>
-          <small>1X2, Over/Under 2.5 y marcador modal por fixture</small>
+          <small>1X2 y U/O 0.5-3.5 por fixture, sin distribución de goles</small>
         </div>
         <label>N partidos<input id="upcoming-predict-limit" type="number" min="1" max="72" step="1" value="8"></label>
         <select id="upcoming-model-select"></select>
@@ -154,7 +154,7 @@
         </article>
 
         <article class="visual-panel training-band">
-          <header><h3>3. Configuración y entrenamiento</h3><small>Siempre 1X2 + U/O 0.5, 1.5, 2.5 y 3.5 con el boosting elegido</small></header>
+          <header><h3>3. Configuración y entrenamiento</h3><small>Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson</small></header>
           <div id="training-manual-params" class="control-grid training-main-grid tuning-lockable">
             <label>Nombre modelo<input id="worldcup-model-id" placeholder="mundial-xgb-hibrido"></label>
             <label>Algoritmo boosting<select id="worldcup-model-type"></select></label>
@@ -235,7 +235,6 @@
             <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
             <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
             <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
-            <label>Max goles<input id="sim-max-goals" type="number" min="6" max="14" step="1" value="10"></label>
             <label>Peso 11<input id="sim-lineup-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
             <label>Peso features<input id="sim-player-feature-weight" type="number" min="0" max="2" step="0.05" value="1"></label>
             <label>Peso ML híbrido<input id="sim-ml-weight" type="number" min="0" max="1" step="0.05" value="0.5"></label>
@@ -243,6 +242,7 @@
             <label class="check"><input id="sim-use-player-features" type="checkbox"> Features XI</label>
             <label class="check"><input id="sim-use-ml-model" type="checkbox"> ML híbrido</label>
           </div>
+          <input id="sim-max-goals" type="hidden" value="10">
           <div class="actions-row">
             <button id="simulate-btn" class="primary" type="button">Simular torneo</button>
           </div>
@@ -290,6 +290,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260609-9"></script>
+  <script src="/static/mundial.js?v=20260611-v2"></script>
 </body>
 </html>

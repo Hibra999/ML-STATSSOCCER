@@ -1237,22 +1237,21 @@ h3 { font-size: 16px; }
 }
 .upcoming-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(230px, 1fr));
+  grid-template-columns: repeat(3, minmax(300px, 1fr));
   gap: 12px;
 }
 .upcoming-card {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
-  min-height: 230px;
-  padding: 14px;
+  min-height: 250px;
+  padding: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
   box-shadow: 0 8px 22px rgba(18, 31, 43, 0.05);
 }
-.upcoming-card header,
-.prob-strip {
+.upcoming-card header {
   display: flex;
   justify-content: space-between;
   gap: 8px;
@@ -1293,23 +1292,84 @@ h3 { font-size: 16px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.prob-strip {
-  padding: 8px;
-  border-radius: 8px;
-  background: #f2f6f7;
-}
-.prob-strip span {
+.prediction-pick {
   display: grid;
-  gap: 2px;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #cce4da;
+  border-radius: 8px;
+  background: #eef7f3;
+}
+.prediction-pick span {
   color: var(--muted);
   font-size: 12px;
 }
-.prob-strip b {
-  color: var(--ink);
-  font-size: 15px;
+.prediction-pick strong {
+  color: var(--green);
+  font-size: 18px;
 }
-.prob-strip.muted {
+.outcome-list {
+  display: grid;
+  gap: 8px;
+}
+.outcome-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 56px;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+}
+.outcome-row span {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: #f2f6f7;
+  font-weight: 800;
+}
+.outcome-row div {
+  height: 10px;
+  border-radius: 999px;
+  background: #edf2f4;
+  overflow: hidden;
+}
+.outcome-row i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+}
+.outcome-row b {
+  color: var(--ink);
+  text-align: right;
+}
+.outcome-row.active span {
+  background: var(--green);
+  color: #fff;
+}
+.totals-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.total-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
   background: #f8fafb;
+  color: var(--muted);
+  font-size: 12px;
+}
+.total-row span {
+  font-weight: 800;
+}
+.total-row b {
+  color: var(--ink);
+  font-size: 13px;
 }
 .source-strip {
   display: grid;
@@ -1568,5 +1628,9 @@ th {
   .player-token strong,
   .player-token small {
     max-width: 96px;
+  }
+  .totals-list,
+  .source-strip {
+    grid-template-columns: 1fr;
   }
 }

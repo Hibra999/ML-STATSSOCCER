@@ -234,7 +234,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "training-etl-flow" in html_source
     assert "training-confusion-matrix" in html_source
     assert "training-tuning-flow" in html_source
-    assert "Siempre 1X2 + U/O 0.5, 1.5, 2.5 y 3.5" in html_source
+    assert "Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson" in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-predictions" in html_source
     assert "hero-countdown" in html_source
@@ -248,6 +248,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "market_sources" in app_source
     assert "marketBadgeText" in app_source
     assert "source-strip" in app_source
+    assert "prediction-pick" in app_source
+    assert "outcome-row" in app_source
+    assert "totals-list" in app_source
     assert "predict-match-btn" not in html_source
     assert "worldcup-target" not in html_source
     assert "lineup-features-table" in html_source
@@ -447,6 +450,7 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert options["defaults"]["training_target"] == "result"
     assert options["defaults"]["market_mode"] == "dual_markets"
     assert [target["key"] for target in options["targets"]] == ["dual_markets"]
+    assert options["targets"][0]["label"] == "1X2 + U/O Poisson"
     assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
 
 
@@ -638,7 +642,10 @@ def test_worldcup_simulation_returns_advancement_probabilities():
     assert result["advancement"].shape[0] == 48
     assert result["matches"].shape[0] == 72
     assert "Pasa grupo %" in result["advancement"].columns
+    assert "P E1 %" in result["matches"].columns
     assert "Over 2.5 %" in result["matches"].columns
+    assert "Under 2.5 %" in result["matches"].columns
+    assert "Marcador modal" not in result["matches"].columns
     assert result["advancement"]["Campeon %"].sum() == pytest.approx(100, abs=0.01)
 
 
@@ -955,13 +962,15 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert result["model"]["hardware"]["actual_device"] in {"cpu", "cuda"}
     assert result["eval_rows"] == 2
     assert prediction["fixture"]["home"] == "Mexico"
-    assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
+    assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over05", "under05", "over15", "under15", "over25", "under25", "over35", "under35"}
     assert prediction["model_probs"]["ml_weight"] == 0.5
     assert prediction["model_probs"]["model_id"] == "mex-test"
     assert prediction["market_sources"]["result"]["source"] == "ML + Poisson"
-    assert prediction["market_sources"]["over_under_25"]["source"] == "ML + Poisson"
-    assert prediction["market_sources"]["over_under_25"]["uses_ml"] is True
+    assert prediction["market_sources"]["over_under_25"]["source"] == "Poisson"
+    assert prediction["market_sources"]["over_under_25"]["uses_ml"] is False
     assert set(prediction["model_probs"]) >= {"poisson", "poisson_totals", "ml", "over_under_ml"}
+    assert prediction["model_probs"]["over_under_ml"] == {}
+    assert "goal_distribution_ml" not in prediction["model_probs"]
     assert catalog["active_model_id"] == "mex-test"
     assert any(item["model_id"] == "mex-test" for item in catalog["models"])
 
@@ -974,18 +983,14 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
 
     assert dual_result["model"]["bundle"] is True
     assert dual_result["model"]["market_mode"] == "dual_markets"
-    assert set(dual_result["model"]["market_models"]) == {"result", "over_under_25"}
-    assert {"over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"}.issubset(dual_result["model"]["markets"])
+    assert set(dual_result["model"]["market_models"]) == {"result"}
+    assert set(dual_result["model"]["markets"]) == {"result"}
     assert dual_result["model"]["markets"]["result"]["confusion_matrix"]["matrix"]
-    assert dual_result["model"]["markets"]["over_under_05"]["confusion_matrix"]["labels"] == ["Under 0.5", "Over 0.5"]
-    assert dual_result["model"]["markets"]["over_under_15"]["confusion_matrix"]["labels"] == ["Under 1.5", "Over 1.5"]
-    assert dual_result["model"]["markets"]["over_under_25"]["confusion_matrix"]["matrix"]
-    assert dual_result["model"]["markets"]["over_under_35"]["confusion_matrix"]["labels"] == ["Under 3.5", "Over 3.5"]
     assert dual_prediction["model_probs"]["model_id"] == "mex-dual"
     assert dual_prediction["model_probs"]["ml"]
-    assert dual_prediction["model_probs"]["over_under_ml"]
+    assert dual_prediction["model_probs"]["over_under_ml"] == {}
     assert dual_prediction["market_sources"]["result"]["source"] == "ML + Poisson"
-    assert dual_prediction["market_sources"]["over_under_25"]["source"] == "ML + Poisson"
+    assert dual_prediction["market_sources"]["over_under_25"]["source"] == "Poisson"
     assert dual_catalog["active_model_id"] == "mex-dual"
     assert any(item["model_id"] == "mex-dual" and item["bundle"] for item in dual_catalog["models"])
     assert not any(str(item["model_id"]).endswith("__result") for item in dual_catalog["models"])
@@ -1011,7 +1016,7 @@ def test_worldcup_training_rejects_single_market_requests(tmp_path, monkeypatch)
     ]).to_csv(training.KAGGLE_ROOT / "train.csv", index=False)
     training.prepare_training_dataset(force=True)
 
-    with pytest.raises(training.WorldCupTrainingError, match="bundle dual"):
+    with pytest.raises(training.WorldCupTrainingError, match="modelo principal 1X2"):
         training.train_hybrid_model(
             fallback_tournament_2026(),
             payload={"seed": 7, "n_estimators": 5, "training_target": "over_under_25", "market_mode": "over_under_25"},
@@ -1066,16 +1071,14 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert result["model"]["target_column"] == "Label + GoalsDistribution + OverUnder05/15/25/35"
     assert result["model"]["eval_strategy"] == "final_worldcup_test"
     assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
-    assert result["model"]["markets"]["over_under_05"]["confusion_matrix"]["labels"] == ["Under 0.5", "Over 0.5"]
-    assert result["model"]["markets"]["over_under_15"]["confusion_matrix"]["labels"] == ["Under 1.5", "Over 1.5"]
-    assert result["model"]["markets"]["over_under_25"]["confusion_matrix"]["labels"] == ["Under 2.5", "Over 2.5"]
-    assert result["model"]["markets"]["over_under_35"]["confusion_matrix"]["labels"] == ["Under 3.5", "Over 3.5"]
+    assert set(result["model"]["markets"]) == {"result"}
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["steps"]
     assert result["model"]["model_label"] == "XGBoost"
     assert result["model"]["hardware"]["effective_n_jobs"] >= 1
     assert prediction["model_probs"]["ml"]
-    assert prediction["model_probs"]["over_under_ml"]
+    assert prediction["model_probs"]["over_under_ml"] == {}
+    assert "goal_distribution_ml" not in prediction["model_probs"]
 
 
 def test_worldcup_predict_upcoming_returns_future_predictions(tmp_path, monkeypatch):
@@ -1088,6 +1091,7 @@ def test_worldcup_predict_upcoming_returns_future_predictions(tmp_path, monkeypa
     assert len(result["predictions"]) == 3
     assert result["table"]["total"] == 3
     assert set(result["predictions"][0]["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
+    assert "Fuente O/U" in result["table"]["columns"]
 
 
 def test_mundial_overview_exposes_highlight_countdown_and_next_grid():
@@ -1295,7 +1299,7 @@ def test_worldcup_ngboost_dual_training_with_tuning_completes(tmp_path, monkeypa
     assert result["model"]["trained"] is True
     assert result["model"]["bundle"] is True
     assert result["model"]["markets"]["result"]["top_features"]
-    assert result["model"]["markets"]["over_under_25"]["top_features"]
+    assert set(result["model"]["markets"]) == {"result"}
 
 
 def test_mundial_lineup_payload_adds_visual_positions_and_photos():

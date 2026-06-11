@@ -34,7 +34,7 @@ const goalMarketLines = [
   { key: "over_under_35", label: "U/O 3.5", over: "over35", under: "under35" },
 ];
 
-const trainingMarketOrder = ["result", ...goalMarketLines.map((line) => line.key), "goals_distribution"];
+const trainingMarketOrder = ["result"];
 
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
@@ -360,7 +360,7 @@ function renderModelsCatalog(payload) {
   const activeId = (payload && payload.active_model_id) || state.activeModelId || "";
   state.models = models;
   state.activeModelId = activeId;
-  const options = models.map((model) => `<option value="${escapeAttr(model.model_id)}">${escapeHtml(model.model_name || model.model_id)}${model.bundle ? " - 1X2 + O/U" : ""}${model.active ? " - activo" : ""}</option>`).join("");
+  const options = models.map((model) => `<option value="${escapeAttr(model.model_id)}">${escapeHtml(model.model_name || model.model_id)}${model.bundle ? " - 1X2 + U/O" : ""}${model.active ? " - activo" : ""}</option>`).join("");
   const selectHtml = `<option value="">Sin modelo seleccionado</option>${options}`;
   ["model-active-select", "upcoming-model-select"].forEach((id) => {
     const select = document.getElementById(id);
@@ -429,7 +429,7 @@ function startNewWorldcupModel() {
   document.getElementById("training-model-state").innerHTML = [
     predictionCard("Modo", "Nuevo modelo"),
     predictionCard("Modelo", "Sin guardar"),
-    predictionCard("Mercados", "1X2 + U/O 0.5/1.5/2.5/3.5"),
+    predictionCard("Mercados", "1X2 + U/O Poisson"),
     predictionCard("Eval", "pendiente"),
   ].join("");
   document.getElementById("training-metric-cards").innerHTML = loadingHtml("Entrena el nuevo modelo");
@@ -840,7 +840,6 @@ function datasetSummaryHtml(payload) {
     : `${payload.eval_rows || 0} holdout`;
   const walkForward = payload.walk_forward || {};
   const refresh = payload.walk_forward_refresh || {};
-  const goalsReady = payload.prepared_goals_distribution_ready ?? payload.prepared_over_under_ready;
   return [
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
     datasetCard("ETL", etlStatusShort(payload), payload.prepared_label_source || "preparar artifact"),
@@ -849,9 +848,14 @@ function datasetSummaryHtml(payload) {
     datasetCard("Predicción 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
     datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} base / ${refresh.ready_with_players || 0} con jugadores`),
-    datasetCard("U/O goles", goalsReady ? "Listo" : "Pendiente", "0.5 / 1.5 / 2.5 / 3.5 con goles reales"),
-    datasetCard("Target", payload.target_column || "-", "label entrenable"),
+    datasetCard("Target", targetDisplayLabel(payload.target_column || "-"), "label entrenable"),
   ].join("");
+}
+
+function targetDisplayLabel(value) {
+  const text = String(value || "");
+  if (text.includes("GoalsDistribution") || text.includes("OverUnder")) return "Label 1X2";
+  return text || "-";
 }
 
 function etlStatusLabel(payload) {
@@ -880,10 +884,10 @@ function renderModelState(model, payload) {
 function modelMarketLabel(model) {
   if (!model) return "-";
   if (model.bundle || model.market_mode === "dual_markets" || model.requested_target === "dual_markets") {
-    return model.market_models && !model.market_models.over_under_25 ? "1X2 + U/O Poisson" : "1X2 + U/O 0.5/1.5/2.5/3.5";
+    return "1X2 + U/O Poisson";
   }
   const target = model.effective_target || model.requested_target || model.training_target || "";
-  if (target === "goals_distribution") return "Distribución goles";
+  if (target === "goals_distribution") return "Distribución goles (legacy)";
   if (target === "over_under_25") return "U/O 2.5";
   if (target === "team_strength") return "1X2 team-strength";
   if (target === "result") return "1X2";
@@ -899,7 +903,7 @@ function walkForwardModeLabel(mode) {
 function marketLabel(key) {
   const line = goalMarketLines.find((item) => item.key === key);
   if (line) return line.label;
-  if (key === "goals_distribution") return "Distribución goles";
+  if (key === "goals_distribution") return "Distribución goles (legacy)";
   if (key === "team_strength") return "1X2 team-strength";
   return "1X2";
 }
@@ -1214,7 +1218,7 @@ function metricsTableFromMarket(market) {
 
 function confusionTargetLabel(target) {
   if (String(target || "").startsWith("over_under_")) return "2 clases: Under / Over";
-  if (target === "goals_distribution") return "Buckets de goles totales";
+  if (target === "goals_distribution") return "Buckets de goles totales (legacy)";
   return "3 clases: 1 / X / 2";
 }
 
@@ -1301,6 +1305,18 @@ function renderUpcomingPredictions(result) {
     const sources = prediction.market_sources || {};
     const homeAsset = assetFor(fixture.home || "");
     const awayAsset = assetFor(fixture.away || "");
+    const outcomes = [
+      { key: "home", label: "1", team: fixture.home || "Local", value: probs.home ?? 0 },
+      { key: "draw", label: "X", team: "Empate", value: probs.draw ?? 0 },
+      { key: "away", label: "2", team: fixture.away || "Visitante", value: probs.away ?? 0 },
+    ];
+    const totals = [
+      { label: "0.5", over: probs.over05, under: probs.under05 },
+      { label: "1.5", over: probs.over15, under: probs.under15 },
+      { label: "2.5", over: probs.over25, under: probs.under25 },
+      { label: "3.5", over: probs.over35, under: probs.under35 },
+    ];
+    const favorite = [...outcomes].sort((a, b) => Number(b.value || 0) - Number(a.value || 0))[0] || outcomes[0];
     return `<article class="upcoming-card">
       <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
       <div class="upcoming-match">
@@ -1308,27 +1324,29 @@ function renderUpcomingPredictions(result) {
         <span>vs</span>
         <div class="upcoming-team away">${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
       </div>
-      <div class="prob-strip">
-        <span>1 <b>${escapeHtml(probs.home ?? "")}%</b></span>
-        <span>X <b>${escapeHtml(probs.draw ?? "")}%</b></span>
-        <span>2 <b>${escapeHtml(probs.away ?? "")}%</b></span>
+      <div class="prediction-pick">
+        <span>Favorito</span>
+        <strong>${escapeHtml(favorite.label)} · ${escapeHtml(favorite.team)}</strong>
       </div>
-      <div class="prob-strip muted">
-        <span>O0.5 <b>${escapeHtml(probs.over05 ?? "")}%</b></span>
-        <span>O1.5 <b>${escapeHtml(probs.over15 ?? "")}%</b></span>
-        <span>O2.5 <b>${escapeHtml(probs.over25 ?? "")}%</b></span>
-        <span>O3.5 <b>${escapeHtml(probs.over35 ?? "")}%</b></span>
+      <div class="outcome-list">
+        ${outcomes.map((item) => `
+          <div class="outcome-row ${escapeAttr(item.key === favorite.key ? "active" : "")}">
+            <span>${escapeHtml(item.label)}</span>
+            <div><i style="width:${escapeAttr(clampPercent(item.value))}%"></i></div>
+            <b>${escapeHtml(item.value)}%</b>
+          </div>`).join("")}
       </div>
-      <div class="prob-strip muted">
-        <span>U0.5 <b>${escapeHtml(probs.under05 ?? "")}%</b></span>
-        <span>U1.5 <b>${escapeHtml(probs.under15 ?? "")}%</b></span>
-        <span>U2.5 <b>${escapeHtml(probs.under25 ?? "")}%</b></span>
-        <span>U3.5 <b>${escapeHtml(probs.under35 ?? "")}%</b></span>
-        <span>Score <b>${escapeHtml(prediction.modal_score || "")}</b></span>
+      <div class="totals-list">
+        ${totals.map((line) => `
+          <div class="total-row">
+            <span>U/O ${escapeHtml(line.label)}</span>
+            <b>O ${escapeHtml(line.over ?? "-")}%</b>
+            <b>U ${escapeHtml(line.under ?? "-")}%</b>
+          </div>`).join("")}
       </div>
       <div class="source-strip">
         <span>${marketBadgeText(sources.result, "1X2: Poisson")}</span>
-        <span>${marketBadgeText(sources.over_under_25, "O/U: Poisson")}</span>
+        <span>${marketBadgeText(sources.over_under_25, "U/O: Poisson")}</span>
       </div>
       <small>${escapeHtml((prediction.notes || []).join(" - "))}</small>
     </article>`;

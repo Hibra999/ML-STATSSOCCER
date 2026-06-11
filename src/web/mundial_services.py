@@ -719,7 +719,6 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
         "Under 2.5 %": probs.get("under25", ""),
         "Over 3.5 %": probs.get("over35", ""),
         "Under 3.5 %": probs.get("under35", ""),
-        "Marcador": result.get("modal_score", ""),
         "Prediccion": result.get("prediction", ""),
         "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
         "Fuente 1X2": (sources.get("result") or {}).get("source", ""),
@@ -851,7 +850,7 @@ def procedure() -> Dict[str, Any]:
             },
             {
                 "name": "Predicciones futuras",
-                "detail": "Combina Elo/Poisson con el modelo Kaggle si esta entrenado, y reporta 1X2, marcador modal y Over/Under 2.5 para los proximos N partidos.",
+                "detail": "Combina Elo/Poisson con el modelo Kaggle si esta entrenado y reporta 1X2 junto con U/O 0.5, 1.5, 2.5 y 3.5 para los proximos N partidos.",
             },
         ],
         "sources": [
