@@ -11,6 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from src.web import mundial_services as services
 from src.web.config import ALLOWED_HOSTS, LOCAL_HOST
 from src.web.jobs import jobs
+from src.web.static_assets import PublicStorageAssets
 
 
 MUNDIAL_PORT = 5052
@@ -40,7 +41,7 @@ def create_mundial_app() -> FastAPI:
         return response
 
     app.mount("/static", StaticFiles(directory="src/web/static"), name="static")
-    app.mount("/assets", StaticFiles(directory="storage"), name="assets")
+    app.mount("/assets", PublicStorageAssets(directory="storage"), name="assets")
 
     @app.get("/")
     def index():

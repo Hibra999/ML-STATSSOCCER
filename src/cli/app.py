@@ -3,6 +3,7 @@ import json
 import math
 import os
 import warnings
+from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -102,6 +103,7 @@ ODD_RANGES = [
 
 RESULT_LABELS = np.array(["H", "D", "A"])
 OVER_UNDER_LABELS = np.array(["U", "O"])
+SPLIT_KEY_COLUMNS = ["Date", "Season", "Home", "Away"]
 
 EXPLAINER_BY_MODEL = {
     LogisticRegressor: LogisticRegressionExplainer,
@@ -582,7 +584,7 @@ def cmd_data_search(args):
     if args.exact:
         mask = search_df.astype(str).eq(query).any(axis=1)
     else:
-        mask = search_df.astype(str).apply(lambda col: col.str.contains(query, case=False, na=False)).any(axis=1)
+        mask = search_df.astype(str).apply(lambda col: col.str.contains(query, case=False, na=False, regex=False)).any(axis=1)
     result = df[mask]
     render_dataframe(result, title=f'Search "{query}" ({result.shape[0]} matches)', max_rows=args.limit, show_index=True)
 
@@ -646,14 +648,21 @@ def cmd_model_train(args):
     if args.trials < 1:
         raise CLIError("trials must be greater than or equal to 1.")
 
+    train_df, eval_df = train_test_split(df=df, test_size=float(args.eval_size))
     model_config = build_model_params(args=args, league_id=league.league_id, model_id=model_id, model_key=model_key)
-    model_config["train"] = {"eval_samples_size": float(args.eval_size), "results": {}}
+    model_config["train"] = {
+        "eval_samples_size": float(args.eval_size),
+        "split": _build_split_metadata(df=df, train_df=train_df, eval_df=eval_df, eval_size=float(args.eval_size)),
+        "results": {},
+    }
 
     render_mapping(
         "Training Plan",
         {
             "league": league.league_id,
             "rows": df.shape[0],
+            "train_rows": train_df.shape[0],
+            "eval_rows": eval_df.shape[0],
             "model_id": model_id,
             "model": spec.label,
             "target": target_label(model_config["target_type"]),
@@ -684,7 +693,7 @@ def cmd_model_train(args):
             model_cls=spec.model_cls,
             fixed_params=model_config,
             tunable_params=tunable_params,
-            df=df,
+            df=train_df,
             metric=args.objective,
             sampler=args.optuna_sampler,
             pruner=args.optuna_pruner,
@@ -700,23 +709,22 @@ def cmd_model_train(args):
 
     if args.cv:
         model = spec.model_cls(**model_config)
-        with _spinner("Running K-fold cross validation..."):
-            cv_df = trainer.cross_validation(model=model, df=df)
+        with _spinner("Running temporal cross validation on train split..."):
+            cv_df = trainer.cross_validation(model=model, df=train_df)
         cv_df["Model"] = model_id
         cv_df["Model Type"] = model.__class__
         model_config["train"]["results"]["cv"] = cv_df
-        render_dataframe(cv_df, "Cross Validation Results", max_rows=12)
+        render_dataframe(cv_df, "Temporal Cross Validation Results", max_rows=12)
 
     if args.sliding_cv:
         model = spec.model_cls(**model_config)
-        with _spinner("Running sliding cross validation..."):
-            sliding_df = trainer.sliding_cross_validation(model=model, df=df, test_ratio=float(args.eval_size))
+        with _spinner("Running sliding cross validation on train split..."):
+            sliding_df = trainer.sliding_cross_validation(model=model, df=train_df, test_ratio=float(args.eval_size))
         sliding_df["Model"] = model_id
         sliding_df["Model Type"] = model.__class__
         model_config["train"]["results"]["sliding-cv"] = sliding_df
         render_dataframe(sliding_df, "Sliding Cross Validation Results", max_rows=12)
 
-    train_df, eval_df = train_test_split(df=df, test_size=float(args.eval_size))
     model = spec.model_cls(**model_config)
     with _spinner("Fitting final model..."):
         model, fit_df = trainer.train(model=model, train_df=train_df, eval_df=eval_df, check_nan=True)
@@ -1164,7 +1172,57 @@ def _study_to_dataframe(study, metric: str) -> pd.DataFrame:
     return trials_df.sort_values(by=metric, ascending=False).round(3)
 
 
+def _build_split_metadata(df: pd.DataFrame, train_df: pd.DataFrame, eval_df: pd.DataFrame, eval_size: float) -> Dict[str, Any]:
+    key_columns = [column for column in SPLIT_KEY_COLUMNS if column in df.columns]
+    return {
+        "strategy": "temporal_holdout",
+        "eval_size": float(eval_size),
+        "row_count": int(df.shape[0]),
+        "train_count": int(train_df.shape[0]),
+        "eval_count": int(eval_df.shape[0]),
+        "key_columns": key_columns,
+        "train_keys": _split_keys(train_df, key_columns),
+        "eval_keys": _split_keys(eval_df, key_columns),
+        "train_date_min": _date_boundary(train_df, "min"),
+        "train_date_max": _date_boundary(train_df, "max"),
+        "eval_date_min": _date_boundary(eval_df, "min"),
+        "eval_date_max": _date_boundary(eval_df, "max"),
+    }
+
+
+def _split_keys(df: pd.DataFrame, key_columns: List[str]) -> List[Tuple[str, ...]]:
+    if not key_columns:
+        return []
+    return [tuple(_split_key_value(row[column]) for column in key_columns) for _, row in df[key_columns].iterrows()]
+
+
+def _split_key_value(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _date_boundary(df: pd.DataFrame, boundary: str) -> str:
+    if "Date" not in df or df.empty:
+        return ""
+    dates = df["Date"].dropna()
+    if dates.empty:
+        return ""
+    if boundary == "min":
+        return str(dates.min())
+    if boundary == "max":
+        return str(dates.max())
+    raise ValueError(f'Unknown date boundary "{boundary}".')
+
+
 def _dataset_masks(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, np.ndarray]:
+    split = config.get("train", {}).get("split", {})
+    persisted_masks = _dataset_masks_from_split(df=df, split=split)
+    if persisted_masks is not None:
+        return persisted_masks
+
     eval_samples_size = config.get("train", {}).get("eval_samples_size", 20.0)
     num_eval = int(math.floor(df.shape[0] * eval_samples_size / 100))
     num_train = df.shape[0] - num_eval
@@ -1173,6 +1231,36 @@ def _dataset_masks(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, np.nda
         "Train": np.array([False] * num_eval + [True] * num_train, dtype=bool),
         "Eval": np.array([True] * num_eval + [False] * num_train, dtype=bool),
     }
+
+
+def _dataset_masks_from_split(df: pd.DataFrame, split: Dict[str, Any]) -> Optional[Dict[str, np.ndarray]]:
+    key_columns = split.get("key_columns") or []
+    if not key_columns or any(column not in df.columns for column in key_columns):
+        return None
+
+    train_keys = split.get("train_keys") or []
+    eval_keys = split.get("eval_keys") or []
+    if not train_keys and not eval_keys:
+        return None
+
+    row_keys = _split_keys(df, key_columns)
+    return {
+        "All": np.array([True] * df.shape[0], dtype=bool),
+        "Train": _mask_for_keys(row_keys=row_keys, expected_keys=train_keys),
+        "Eval": _mask_for_keys(row_keys=row_keys, expected_keys=eval_keys),
+    }
+
+
+def _mask_for_keys(row_keys: List[Tuple[str, ...]], expected_keys: List[Tuple[str, ...]]) -> np.ndarray:
+    remaining = Counter(tuple(key) for key in expected_keys)
+    mask = []
+    for key in row_keys:
+        if remaining[key] > 0:
+            mask.append(True)
+            remaining[key] -= 1
+        else:
+            mask.append(False)
+    return np.array(mask, dtype=bool)
 
 
 def _compute_probability_percentiles(y_prob: np.ndarray, target_type: TargetType, p1: int, px: int, p2: int, pu: int, po: int) -> Dict[str, Tuple[int, float]]:

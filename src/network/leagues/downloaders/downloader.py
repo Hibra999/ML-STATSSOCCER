@@ -51,7 +51,7 @@ class FootballDataDownloader(ABC):
 
         df = self._download_dataframe(league=league, start_year=start_year)
 
-        if df.shape[0] == 0 or df is None:
+        if df is None or df.shape[0] == 0:
             return None
 
         # Preprocess the downloaded dataframe.
@@ -72,6 +72,8 @@ class FootballDataDownloader(ABC):
 
         # Format the downloaded dataframe columns.
         df = self._preprocess_dataframe(df=df, start_year=start_year)
+        if df is None or df.shape[0] == 0:
+            return None
 
         # Validate the dataframe.
         if df.columns.tolist() != self._expected_columns:
@@ -90,7 +92,7 @@ class FootballDataDownloader(ABC):
         df = df.sort_values(by=['Date', 'Home'], ascending=True)
         df = df.drop_duplicates()
 
-        if df.shape[0] == 0 or df is None:
+        if df is None or df.shape[0] == 0:
             return None
 
         # Add Result-U/O column.

@@ -12,6 +12,7 @@ from src.cli.common import CLIError
 from src.web import services
 from src.web.config import ALLOWED_HOSTS, LOCAL_HOST, LOCAL_PORT
 from src.web.jobs import jobs
+from src.web.static_assets import PublicStorageAssets
 
 
 class LocalOnlyMiddleware(BaseHTTPMiddleware):
@@ -39,7 +40,7 @@ def create_app() -> FastAPI:
 
     services.OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory="src/web/static"), name="static")
-    app.mount("/assets", StaticFiles(directory="storage"), name="assets")
+    app.mount("/assets", PublicStorageAssets(directory="storage"), name="assets")
     app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
     @app.get("/")

@@ -31,6 +31,7 @@ from src.analysis import (
 from src.cli.app import (
     EXPLAINER_BY_MODEL,
     _append_prediction_columns,
+    _build_split_metadata,
     _compute_probability_percentiles,
     _dataset_masks,
     _delete_stored_filter,
@@ -407,8 +408,13 @@ def train_model(league_id: str, payload: Dict[str, Any], progress_callback=None)
     if args.objective not in {"Accuracy", "F1", "Precision", "Recall"}:
         raise CLIError("El objetivo debe ser Accuracy, F1, Precision o Recall.")
 
+    train_df, eval_df = train_test_split(df=df, test_size=float(args.eval_size))
     model_config = build_model_params(args=args, league_id=league.league_id, model_id=model_id, model_key=model_key)
-    model_config["train"] = {"eval_samples_size": float(args.eval_size), "results": {}}
+    model_config["train"] = {
+        "eval_samples_size": float(args.eval_size),
+        "split": _build_split_metadata(df=df, train_df=train_df, eval_df=eval_df, eval_size=float(args.eval_size)),
+        "results": {},
+    }
 
     trainer = Trainer()
     tunable_params = tunable_params_for_args(args, spec)
@@ -426,7 +432,7 @@ def train_model(league_id: str, payload: Dict[str, Any], progress_callback=None)
             model_cls=spec.model_cls,
             fixed_params=model_config,
             tunable_params=tunable_params,
-            df=df,
+            df=train_df,
             metric=args.objective,
             sampler=args.optuna_sampler,
             pruner=args.optuna_pruner,
@@ -442,7 +448,7 @@ def train_model(league_id: str, payload: Dict[str, Any], progress_callback=None)
     if args.cv:
         emit_training_progress(progress_callback, "cv", 0, 1, "Validacion cruzada")
         model = spec.model_cls(**model_config)
-        cv_df = trainer.cross_validation(model=model, df=df)
+        cv_df = trainer.cross_validation(model=model, df=train_df)
         cv_df["Model"] = model_id
         cv_df["Model Type"] = model.__class__
         model_config["train"]["results"]["cv"] = cv_df
@@ -451,14 +457,13 @@ def train_model(league_id: str, payload: Dict[str, Any], progress_callback=None)
     if args.sliding_cv:
         emit_training_progress(progress_callback, "sliding-cv", 0, 1, "CV deslizante")
         model = spec.model_cls(**model_config)
-        sliding_df = trainer.sliding_cross_validation(model=model, df=df, test_ratio=float(args.eval_size))
+        sliding_df = trainer.sliding_cross_validation(model=model, df=train_df, test_ratio=float(args.eval_size))
         sliding_df["Model"] = model_id
         sliding_df["Model Type"] = model.__class__
         model_config["train"]["results"]["sliding-cv"] = sliding_df
         emit_training_progress(progress_callback, "sliding-cv", 1, 1, "CV deslizante completado")
 
     emit_training_progress(progress_callback, "fit", 0, 1, "Entrenamiento final")
-    train_df, eval_df = train_test_split(df=df, test_size=float(args.eval_size))
     model = spec.model_cls(**model_config)
     model, fit_df = trainer.train(model=model, train_df=train_df, eval_df=eval_df, check_nan=True)
     fit_df["Model"] = model_id
@@ -1061,7 +1066,7 @@ def filter_dataframe(
         if exact:
             mask = search_df.astype(str).eq(str(query)).any(axis=1)
         else:
-            mask = search_df.astype(str).apply(lambda col: col.str.contains(str(query), case=False, na=False)).any(axis=1)
+            mask = search_df.astype(str).apply(lambda col: col.str.contains(str(query), case=False, na=False, regex=False)).any(axis=1)
         df = df[mask].reset_index(drop=True)
     selected_columns = parse_columns(columns)
     if selected_columns:

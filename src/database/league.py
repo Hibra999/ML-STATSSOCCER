@@ -57,6 +57,8 @@ class LeagueDatabase:
         if df is not None:
             self.save_league(df=df, league=league)
 
+        if df is None:
+            return None
         return df.reset_index(drop=True)
 
     def league_exists(self, league_id: str) -> bool:

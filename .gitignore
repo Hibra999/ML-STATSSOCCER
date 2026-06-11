@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .env
 .venv/
 venv/
@@ -7,6 +8,11 @@ venv/
 .mlstatssoccer/agent_history
 outputs/
 exports/
+storage/network/*/data/
+storage/network/*/models/
+storage/network/*.pkl
+storage/worldcup/cache/*.pkl
+storage/worldcup/walk_forward/*.csv
 storage/worldcup/kaggle/
 storage/worldcup/models/
 storage/worldcup/sofascore/

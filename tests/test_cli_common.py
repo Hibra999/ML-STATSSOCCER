@@ -8,9 +8,12 @@ import pytest
 from src.cli import app as cli_app
 from src.cli.common import CLIError, parse_eval_odd_range, parse_odd_range, validate_identifier
 from src.cli.model_specs import MODEL_SPECS, build_model_params, normalize_model_key
+from src.models.trainer import Trainer
 from src.preprocessing.utils.target import TargetType, construct_targets
 from src.models.tuner import Tuner
 from src.models.classifiers.boosting import _filter_ngboost_categorical_warning, sanitize_probabilities
+from src.network.leagues.downloaders.downloader import FootballDataDownloader
+from src.network.leagues.league import League
 
 
 def test_parse_odd_range_accepts_min_max():
@@ -95,6 +98,90 @@ def test_tuner_builds_configurable_sampler_and_pruner():
     assert Tuner._build_sampler("tpe").__class__.__name__ == "TPESampler"
     assert Tuner._build_pruner("median").__class__.__name__ == "MedianPruner"
     assert Tuner._build_pruner("successive-halving").__class__.__name__ == "SuccessiveHalvingPruner"
+
+
+def test_temporal_cross_validation_trains_only_on_past_rows_and_clones_model():
+    class RecordingModel:
+        target_type = TargetType.RESULT
+        records = []
+
+        def __init__(self):
+            self.fitted = False
+
+        def fit(self, train_df, eval_df):
+            self.fitted = True
+            self.__class__.records.append({
+                "train_end": train_df["Date"].max(),
+                "eval_start": eval_df["Date"].min(),
+                "model_id": id(self),
+            })
+            return pd.DataFrame({
+                "Accuracy": [1.0, 1.0],
+                "F1": [1.0, 1.0],
+                "Precision": [1.0, 1.0],
+                "Recall": [1.0, 1.0],
+                "data": ["train", "eval"],
+            })
+
+    rows = []
+    labels = ["H", "D", "A"]
+    for index in range(12):
+        rows.append({
+            "Date": f"2024-01-{index + 1:02d}",
+            "Home": f"H{index}",
+            "Away": f"A{index}",
+            "Result": labels[index % 3],
+            "HG": 1,
+            "AG": 0,
+        })
+    df = pd.DataFrame(reversed(rows)).reset_index(drop=True)
+    model = RecordingModel()
+
+    metrics = Trainer().cross_validation(model=model, df=df, k_folds=3)
+
+    assert model.fitted is False
+    assert metrics["Fold"].nunique() == 3
+    assert len(RecordingModel.records) == 3
+    assert len({record["model_id"] for record in RecordingModel.records}) == 3
+    assert all(record["train_end"] < record["eval_start"] for record in RecordingModel.records)
+
+
+def test_dataset_masks_use_persisted_split_keys_after_dataset_updates():
+    df = pd.DataFrame([
+        {"Date": "2024-01-05", "Season": 2024, "Home": "H5", "Away": "A5"},
+        {"Date": "2024-01-04", "Season": 2024, "Home": "H4", "Away": "A4"},
+        {"Date": "2024-01-03", "Season": 2024, "Home": "H3", "Away": "A3"},
+        {"Date": "2024-01-02", "Season": 2024, "Home": "H2", "Away": "A2"},
+        {"Date": "2024-01-01", "Season": 2024, "Home": "H1", "Away": "A1"},
+    ])
+    train_df = df.iloc[2:].reset_index(drop=True)
+    eval_df = df.iloc[:2].reset_index(drop=True)
+    split = cli_app._build_split_metadata(df=df, train_df=train_df, eval_df=eval_df, eval_size=40.0)
+    updated_df = pd.concat([
+        pd.DataFrame([{"Date": "2024-01-06", "Season": 2024, "Home": "H6", "Away": "A6"}]),
+        df,
+    ], ignore_index=True)
+
+    masks = cli_app._dataset_masks(updated_df, {"train": {"eval_samples_size": 40.0, "split": split}})
+
+    assert masks["Eval"].tolist() == [False, True, True, False, False, False]
+    assert masks["Train"].tolist() == [False, False, False, True, True, True]
+
+
+def test_downloader_returns_none_without_touching_empty_download():
+    class EmptyDownloader(FootballDataDownloader):
+        def _get_additional_columns(self):
+            return []
+
+        def _download_dataframe(self, league, start_year):
+            return None
+
+        def _preprocess_dataframe(self, df, start_year):
+            raise AssertionError("preprocess should not run for a missing download")
+
+    league = League(country="Test", name="League", start_year=2024, category="main", url="", fixture="")
+
+    assert EmptyDownloader().download(league=league, start_year=2024) is None
 
 
 def test_sanitize_probabilities_clips_and_renormalizes():

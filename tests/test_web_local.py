@@ -78,6 +78,25 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/assets" in paths
 
 
+def test_public_storage_assets_only_serves_graphics():
+    from src.web.static_assets import PublicStorageAssets
+
+    assets = PublicStorageAssets(directory="storage")
+
+    assert assets.lookup_path("graphics/countries/Mexico.png")[0].endswith("storage/graphics/countries/Mexico.png")
+    assert assets.lookup_path("worldcup/cache/worldcup_training_prepared.pkl") == ("", None)
+
+
+def test_filter_dataframe_uses_literal_search():
+    from src.web import services
+
+    df = pd.DataFrame({"Team": ["A[", "AB"], "Country": ["MX", "US"]})
+
+    result = services.filter_dataframe(df=df, query="[", column=None, exact=False, hide_missing=False, columns=None)
+
+    assert result["Team"].tolist() == ["A["]
+
+
 def test_web_catalog_has_flags_and_defaults():
     from src.web import services
 
