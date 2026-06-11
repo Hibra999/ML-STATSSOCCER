@@ -81,8 +81,9 @@ from src.network.fixtures.utils import match_fixture_teams
 from src.preprocessing.selection import train_test_split
 from src.preprocessing.utils.inputs import construct_inputs_by_fixture
 from src.preprocessing.utils.target import TargetType, construct_targets
-OUTPUT_ROOT = Path("outputs") / "web"
-COUNTRY_FLAGS_ROOT = Path("storage") / "graphics" / "countries"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "web"
+COUNTRY_FLAGS_ROOT = PROJECT_ROOT / "storage" / "graphics" / "countries"
 SUPPORTED_BROWSERS = ("chrome", "firefox", "edge", "brave")
 DEFAULT_BROWSER_CONFIG = {
     "application": "chrome",

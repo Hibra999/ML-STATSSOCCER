@@ -267,6 +267,59 @@ def test_api_football_context_requires_prefetched_rows():
     assert features.iloc[0]["lineup_rows"] == 0.0
 
 
+def test_international_recent_provider_aliases_features_and_contextual_poisson(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", tmp_path)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", tmp_path / "all_matches.csv")
+    pd.DataFrame([
+        {"date": "2025-01-10", "home_team": "USA", "away_team": "Czech Republic", "home_score": 2, "away_score": 1, "tournament": "Friendly", "country": "USA", "neutral": False},
+        {"date": "2025-03-01", "home_team": "Mexico", "away_team": "South Africa", "home_score": 2, "away_score": 0, "tournament": "FIFA World Cup qualification", "country": "Mexico", "neutral": False},
+        {"date": "2025-06-01", "home_team": "South Africa", "away_team": "Bosnia & Herzegovina", "home_score": 1, "away_score": 1, "tournament": "Friendly", "country": "South Africa", "neutral": False},
+        {"date": "2025-10-01", "home_team": "South Africa", "away_team": "Mexico", "home_score": 1, "away_score": 3, "tournament": "CONCACAF Gold Cup", "country": "USA", "neutral": True},
+        {"date": "2026-07-01", "home_team": "Mexico", "away_team": "Canada", "home_score": 0, "away_score": 0, "tournament": "Friendly", "country": "Mexico", "neutral": False},
+    ]).to_csv(international_provider.INTERNATIONAL_MATCHES_FILE, index=False)
+
+    matches = international_provider.load_international_matches(required=True)
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "South Africa", "United States", "Czechia", "Bosnia and Herzegovina"])
+    features = international_provider.recent15_feature_table(
+        matches,
+        teams=["Mexico", "South Africa"],
+        before_date="2026-06-11",
+        base_model=model,
+    )
+    context = international_provider.contextual_poisson_for_match(
+        "Mexico",
+        "South Africa",
+        base_model=model,
+        before_date="2026-06-11",
+        max_goals=6,
+        matches=matches,
+    )
+    row = training.match_feature_row(
+        model,
+        pd.DataFrame(),
+        "Mexico",
+        "South Africa",
+        recent15_features=features,
+    )
+
+    assert set(matches["home_team"]) >= {"United States", "Mexico", "South Africa"}
+    assert "Czechia" in set(matches["away_team"])
+    assert "Bosnia and Herzegovina" in set(matches["away_team"])
+    assert features.loc[features["Team"] == "Mexico", "recent15_matches"].iloc[0] == pytest.approx(2.0)
+    assert features.loc[features["Team"] == "South Africa", "recent15_friendly_matches"].iloc[0] == pytest.approx(1.0)
+    assert row["recent15_context_available"] == 1.0
+    assert row["recent15_matches_home"] == pytest.approx(2.0)
+    assert "recent15_recent15_matches_home" not in row
+    assert context["available"] is True
+    assert context["context_lambda_home"] > 0
+    assert set(context["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
+    assert len(context["top_scores"]) == 5
+    assert len(context["score_matrix"]) == 7
+    assert len(context["recent_matches"]["home"]) == 2
+
+
 def test_match_feature_row_includes_market_dc_score_grid_shrinkage_history_h2h_and_context():
     history = pd.DataFrame([
         {"Date": "2010-06-11", "Team 1": "Mexico", "Team 2": "South Africa", "G1": 1, "G2": 1, "Round": "Group", "Group": "A"},

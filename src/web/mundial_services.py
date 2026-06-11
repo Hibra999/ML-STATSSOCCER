@@ -23,6 +23,7 @@ from src.worldcup import (
 )
 from src.worldcup.model import TOTAL_GOAL_LINES, total_line_suffix
 from src.worldcup.data import CACHE_ROOT, group_letter, groups_from_tournament
+from src.worldcup.international_provider import download_international_results, international_results_status
 from src.worldcup.lanus_provider import (
     LINEUPS_ROOT,
     PLAYER_STATS_ROOT,
@@ -59,7 +60,8 @@ from src.worldcup.training import (
 )
 
 
-COUNTRY_FLAGS_ROOT = Path("storage") / "graphics" / "countries"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+COUNTRY_FLAGS_ROOT = PROJECT_ROOT / "storage" / "graphics" / "countries"
 DEFAULT_CONFIG = {
     "iterations": 5000,
     "seed": 2026,
@@ -512,7 +514,15 @@ def player_features(refresh: bool = False) -> Dict[str, Any]:
 
 def training_download(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     payload = payload or {}
-    return download_kaggle_dataset(force=bool(payload.get("force", False)))
+    status = download_kaggle_dataset(force=bool(payload.get("force", False)))
+    try:
+        status["international_recent"] = download_international_results(force=bool(payload.get("force", False)))
+    except Exception as exc:
+        status["international_recent"] = {
+            **international_results_status(),
+            "warning": f"{exc.__class__.__name__}: {exc}",
+        }
+    return status
 
 
 def training_prepare(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -703,6 +713,8 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
     probs = result.get("probabilities", {})
     expected = result.get("expected_goals", {})
     sources = result.get("market_sources", {})
+    contextual = result.get("contextual_poisson", {}) or {}
+    context_top = (contextual.get("top_scores") or [{}])[0] if contextual.get("top_scores") else {}
     return {
         "No.": fixture.get("id", ""),
         "Fecha": fixture.get("date", ""),
@@ -721,6 +733,10 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
         "Under 3.5 %": probs.get("under35", ""),
         "Prediccion": result.get("prediction", ""),
         "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
+        "Poisson 15": "Si" if contextual.get("available") else "No",
+        "Lambda 15 Local": contextual.get("context_lambda_home", ""),
+        "Lambda 15 Visita": contextual.get("context_lambda_away", ""),
+        "Top score 15": context_top.get("score", ""),
         "Fuente 1X2": (sources.get("result") or {}).get("source", ""),
         "Fuente O/U": (sources.get("over_under_25") or {}).get("source", ""),
         "Fuente U/O 0.5": (sources.get("over_under_05") or {}).get("source", ""),

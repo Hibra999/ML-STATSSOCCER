@@ -840,6 +840,7 @@ function datasetSummaryHtml(payload) {
     : `${payload.eval_rows || 0} holdout`;
   const walkForward = payload.walk_forward || {};
   const refresh = payload.walk_forward_refresh || {};
+  const international = payload.international_recent || {};
   return [
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
     datasetCard("ETL", etlStatusShort(payload), payload.prepared_label_source || "preparar artifact"),
@@ -847,6 +848,7 @@ function datasetSummaryHtml(payload) {
     datasetCard("Evaluacion", evalValue, evalStrategyLabel(payload.eval_strategy)),
     datasetCard("Predicción 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
+    datasetCard("All matches", international.available ? international.rows || 0 : "Opcional", international.available ? "ultimos 15 activos" : "recent15 en cero"),
     datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} base / ${refresh.ready_with_players || 0} con jugadores`),
     datasetCard("Target", targetDisplayLabel(payload.target_column || "-"), "label entrenable"),
   ].join("");
@@ -1304,6 +1306,7 @@ function renderUpcomingPredictions(result) {
     const fixture = prediction.fixture || {};
     const probs = prediction.probabilities || {};
     const sources = prediction.market_sources || {};
+    const contextual = prediction.contextual_poisson || {};
     const homeAsset = assetFor(fixture.home || "");
     const awayAsset = assetFor(fixture.away || "");
     const outcomes = [
@@ -1345,6 +1348,7 @@ function renderUpcomingPredictions(result) {
             <b>U ${escapeHtml(line.under ?? "-")}%</b>
           </div>`).join("")}
       </div>
+      ${contextualPoissonHtml(contextual, fixture)}
       <div class="source-strip">
         <span>${marketBadgeText(sources.result, "1X2: Poisson")}</span>
         ${goalMarketLines.map((line) => `<span>${marketBadgeText(sources[line.key], `${line.label}: Poisson`)}</span>`).join("")}
@@ -1353,6 +1357,84 @@ function renderUpcomingPredictions(result) {
     </article>`;
   }).join("") || loadingHtml("Sin fixtures futuros");
   renderTable("upcoming-predictions-table", result.table);
+}
+
+function contextualPoissonHtml(contextual, fixture) {
+  const context = contextual || {};
+  const fixtureData = fixture || {};
+  if (!context.available) {
+    return `<section class="context-poisson unavailable">
+      <header><strong>Poisson ultimos 15</strong><small>${escapeHtml(context.reason || "all_matches.csv no disponible")}</small></header>
+    </section>`;
+  }
+  const probs = context.probabilities || {};
+  const topScores = context.top_scores || [];
+  const overUnder = context.over_under || {};
+  return `<section class="context-poisson">
+    <header>
+      <strong>Poisson ultimos 15</strong>
+      <small>λ ${escapeHtml(context.context_lambda_home ?? "-")} / ${escapeHtml(context.context_lambda_away ?? "-")}</small>
+    </header>
+    <div class="context-outcomes">
+      <span>1 <b>${escapeHtml(probs.home ?? "-")}%</b></span>
+      <span>X <b>${escapeHtml(probs.draw ?? "-")}%</b></span>
+      <span>2 <b>${escapeHtml(probs.away ?? "-")}%</b></span>
+    </div>
+    <div class="context-totals">
+      ${Object.entries(overUnder).map(([line, values]) => `
+        <span>${escapeHtml(line)} <b>O ${escapeHtml(values.over ?? "-")}%</b><b>U ${escapeHtml(values.under ?? "-")}%</b></span>
+      `).join("")}
+    </div>
+    <div class="top-scores">
+      ${topScores.map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(score.probability)}%</b></span>`).join("")}
+    </div>
+    ${scoreHeatmapHtml(context)}
+    <details class="recent15-drawer">
+      <summary>Ultimos 15 partidos</summary>
+      <div class="recent15-columns">
+        ${recentMatchesMiniTable((context.recent_matches || {}).home || [], fixtureData.home || "Local")}
+        ${recentMatchesMiniTable((context.recent_matches || {}).away || [], fixtureData.away || "Visitante")}
+      </div>
+    </details>
+  </section>`;
+}
+
+function scoreHeatmapHtml(contextual) {
+  const heatmap = (contextual && contextual.heatmap) || {};
+  const homeGoals = heatmap.home_goals || [];
+  const awayGoals = heatmap.away_goals || [];
+  const cells = heatmap.cells || [];
+  if (!homeGoals.length || !awayGoals.length || !cells.length) return "";
+  const cellMap = new Map(cells.map((cell) => [`${cell.home_goals}-${cell.away_goals}`, cell]));
+  const maxProb = Math.max(Number(heatmap.max_probability || 0), 0.001);
+  const header = `<span></span>${awayGoals.map((goal) => `<b>${escapeHtml(goal)}</b>`).join("")}`;
+  const rows = homeGoals.map((homeGoal) => `
+    <b>${escapeHtml(homeGoal)}</b>
+    ${awayGoals.map((awayGoal) => {
+      const cell = cellMap.get(`${homeGoal}-${awayGoal}`) || {};
+      const heat = Math.max(0.04, Math.min(1, Number(cell.probability || 0) / maxProb));
+      return `<span title="${escapeAttr(cell.score || "")}: ${escapeAttr(cell.probability ?? 0)}%" style="--heat:${escapeAttr(heat)}">${escapeHtml(cell.probability ?? "")}</span>`;
+    }).join("")}
+  `).join("");
+  return `<div class="score-heatmap" style="grid-template-columns: 24px repeat(${awayGoals.length}, minmax(28px, 1fr))">${header}${rows}</div>`;
+}
+
+function recentMatchesMiniTable(rows, team) {
+  const items = rows || [];
+  if (!items.length) return `<div class="recent15-table"><strong>${escapeHtml(team)}</strong><small>Sin partidos recientes</small></div>`;
+  return `<div class="recent15-table">
+    <strong>${escapeHtml(team)}</strong>
+    <table>
+      <thead><tr><th>Fecha</th><th>Rival</th><th>Marcador</th><th>Tipo</th></tr></thead>
+      <tbody>${items.map((row) => `
+        <tr>
+          <td>${escapeHtml(row.date || "")}</td>
+          <td>${escapeHtml(row.opponent || "")}</td>
+          <td>${escapeHtml(row.score || "")}</td>
+          <td>${escapeHtml(row.match_type || "")}</td>
+        </tr>`).join("")}</tbody>
+    </table>
+  </div>`;
 }
 
 function metricsTableFromModel(model) {

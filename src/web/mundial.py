@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import Body, FastAPI, Request
@@ -15,6 +16,9 @@ from src.web.static_assets import PublicStorageAssets
 
 
 MUNDIAL_PORT = 5052
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+STATIC_ROOT = PROJECT_ROOT / "src" / "web" / "static"
+STORAGE_ROOT = PROJECT_ROOT / "storage"
 
 
 class LocalOnlyMiddleware(BaseHTTPMiddleware):
@@ -40,12 +44,12 @@ def create_mundial_app() -> FastAPI:
             response.headers["Cache-Control"] = "no-store, max-age=0"
         return response
 
-    app.mount("/static", StaticFiles(directory="src/web/static"), name="static")
-    app.mount("/assets", PublicStorageAssets(directory="storage"), name="assets")
+    app.mount("/static", StaticFiles(directory=str(STATIC_ROOT)), name="static")
+    app.mount("/assets", PublicStorageAssets(directory=str(STORAGE_ROOT)), name="assets")
 
     @app.get("/")
     def index():
-        return FileResponse("src/web/static/mundial.html")
+        return FileResponse(STATIC_ROOT / "mundial.html")
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():

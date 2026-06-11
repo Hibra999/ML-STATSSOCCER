@@ -1388,6 +1388,134 @@ h3 { font-size: 16px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.context-poisson {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #d4e5df;
+  border-radius: 8px;
+  background: #f6fbf8;
+}
+.context-poisson.unavailable {
+  background: #f8fafb;
+}
+.context-poisson header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  color: var(--ink);
+  font-size: 12px;
+}
+.context-poisson header small {
+  color: var(--muted);
+}
+.context-outcomes,
+.context-totals,
+.top-scores {
+  display: grid;
+  gap: 6px;
+}
+.context-outcomes {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.context-outcomes span,
+.context-totals span,
+.top-scores span {
+  min-width: 0;
+  padding: 7px;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+}
+.context-outcomes b,
+.context-totals b,
+.top-scores b {
+  color: var(--ink);
+}
+.context-totals {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.context-totals span {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 5px;
+}
+.top-scores {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+.top-scores span {
+  display: grid;
+  justify-items: center;
+}
+.score-heatmap {
+  display: grid;
+  gap: 2px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font-size: 10px;
+}
+.score-heatmap span,
+.score-heatmap b {
+  display: grid;
+  place-items: center;
+  min-height: 24px;
+  border-radius: 4px;
+}
+.score-heatmap b {
+  color: var(--muted);
+}
+.score-heatmap span {
+  background: rgba(15, 122, 95, calc(0.08 + (var(--heat, 0) * 0.42)));
+  color: var(--ink);
+}
+.recent15-drawer {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.recent15-drawer summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+}
+.recent15-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 8px 8px;
+}
+.recent15-table {
+  min-width: 0;
+  overflow: auto;
+}
+.recent15-table strong,
+.recent15-table small {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 12px;
+}
+.recent15-table table {
+  width: 100%;
+  min-width: 0;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.recent15-table th,
+.recent15-table td {
+  padding: 5px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
 .champion-card {
   display: grid;
   gap: 10px;
@@ -1597,8 +1725,13 @@ th {
   .hero-next-grid,
   .model-loader,
   .model-row,
-  .feature-bar {
+  .feature-bar,
+  .recent15-columns,
+  .context-totals {
     grid-template-columns: 1fr;
+  }
+  .top-scores {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .match-team,
   .match-team.away {

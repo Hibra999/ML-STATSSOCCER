@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import Body, FastAPI, Request
@@ -13,6 +14,11 @@ from src.web import services
 from src.web.config import ALLOWED_HOSTS, LOCAL_HOST, LOCAL_PORT
 from src.web.jobs import jobs
 from src.web.static_assets import PublicStorageAssets
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+STATIC_ROOT = PROJECT_ROOT / "src" / "web" / "static"
+STORAGE_ROOT = PROJECT_ROOT / "storage"
 
 
 class LocalOnlyMiddleware(BaseHTTPMiddleware):
@@ -39,13 +45,13 @@ def create_app() -> FastAPI:
         return response
 
     services.OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    app.mount("/static", StaticFiles(directory="src/web/static"), name="static")
-    app.mount("/assets", PublicStorageAssets(directory="storage"), name="assets")
-    app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
+    app.mount("/static", StaticFiles(directory=str(STATIC_ROOT)), name="static")
+    app.mount("/assets", PublicStorageAssets(directory=str(STORAGE_ROOT)), name="assets")
+    app.mount("/outputs", StaticFiles(directory=str(services.OUTPUT_ROOT)), name="outputs")
 
     @app.get("/")
     def index():
-        return FileResponse("src/web/static/index.html")
+        return FileResponse(STATIC_ROOT / "index.html")
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():

@@ -20,6 +20,12 @@ from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_
 from src.models.classifiers.boosting import catboost_device_params, lightgbm_device_params, xgboost_cuda_params
 from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
 from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, group_letter, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
+from src.worldcup.international_provider import (
+    contextual_poisson_for_match,
+    international_results_status,
+    load_international_matches,
+    recent15_feature_table,
+)
 from src.worldcup.market_provider import (
     load_market_data,
     market_feature_row as build_market_feature_row,
@@ -306,6 +312,7 @@ def dataset_status() -> Dict[str, Any]:
     eval_strategy = evaluation_strategy(active_dataset)
     walk_forward = walk_forward_status()
     refresh_state = walk_forward_refresh_state()
+    international_status = international_results_status()
     return {
         "dataset_slug": KAGGLE_DATASET_SLUG,
         "local_path": str(KAGGLE_ROOT),
@@ -346,6 +353,7 @@ def dataset_status() -> Dict[str, Any]:
         "trainable": bool(active_dataset["trainable"]),
         "walk_forward": walk_forward,
         "walk_forward_refresh": refresh_state,
+        "international_recent": international_status,
         "model": model_meta,
         "preview": active_dataset["preview"],
     }
@@ -414,6 +422,7 @@ def train_single_hybrid_model(
     qualifier_rows = normalized.get("qualifier_matches", pd.DataFrame())
     api_football = normalized.get("api_football", {}) if isinstance(normalized.get("api_football", {}), dict) else {}
     dc_rho = float(normalized.get("dc_rho", 0.0) or 0.0)
+    international_matches = load_international_matches(required=False)
     fixture_feature_rows = read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
     target_warning = ""
     eval_strategy = "unavailable"
@@ -438,6 +447,7 @@ def train_single_hybrid_model(
             market_rows=market_rows,
             qualifier_rows=qualifier_rows,
             api_football=api_football,
+            international_matches=international_matches,
             fixture_feature_rows=fixture_feature_rows,
             dc_rho=dc_rho,
             history_weight=float(payload.get("history_weight", 1.0) or 1.0),
@@ -454,6 +464,7 @@ def train_single_hybrid_model(
             market_rows=market_rows,
             qualifier_rows=qualifier_rows,
             api_football=api_football,
+            international_matches=international_matches,
             fixture_feature_rows=fixture_feature_rows,
             dc_rho=dc_rho,
             feature_columns=feature_columns,
@@ -475,6 +486,7 @@ def train_single_hybrid_model(
             market_rows=market_rows,
             qualifier_rows=qualifier_rows,
             api_football=api_football,
+            international_matches=international_matches,
             fixture_feature_rows=fixture_feature_rows,
             dc_rho=dc_rho,
             history_weight=float(payload.get("history_weight", 1.0) or 1.0),
@@ -491,6 +503,7 @@ def train_single_hybrid_model(
             market_rows=market_rows,
             qualifier_rows=qualifier_rows,
             api_football=api_football,
+            international_matches=international_matches,
             fixture_feature_rows=fixture_feature_rows,
             dc_rho=dc_rho,
             feature_columns=feature_columns,
@@ -564,6 +577,7 @@ def train_single_hybrid_model(
         "api_football_fixture_rows": int(normalized.get("api_football_fixture_rows", 0) or 0),
         "api_football_stat_rows": int(normalized.get("api_football_stat_rows", 0) or 0),
         "api_football_market_rows": int(normalized.get("api_football_market_rows", 0) or 0),
+        "international_recent": normalized.get("international_recent", international_results_status()),
         "dc_rho": dc_rho,
         "kaggle_files": [str(path) for path in files],
         "history_source": normalized.get("history_source", history_source),
@@ -721,6 +735,7 @@ def train_dual_market_model(
         "api_football_fixture_rows": int(result_record.get("api_football_fixture_rows", 0) or 0),
         "api_football_stat_rows": int(result_record.get("api_football_stat_rows", 0) or 0),
         "api_football_market_rows": int(result_record.get("api_football_market_rows", 0) or 0),
+        "international_recent": result_record.get("international_recent", international_results_status()),
         "dc_rho": float(result_record.get("dc_rho", 0.0) or 0.0),
         "kaggle_files": [str(path) for path in files],
         "history_source": result_record.get("history_source", ""),
@@ -856,6 +871,13 @@ def predict_match_payload(
             key: round(value * 100.0, 2)
             for key, value in (ml_outputs.get("goal_distribution_ml") or {}).items()
         }
+    return_payload["contextual_poisson"] = contextual_poisson_for_match(
+        home_team,
+        away_team,
+        base_model=base_model,
+        before_date=fixture.get("Fecha", HISTORY_REFERENCE_DATE),
+        max_goals=base_model.max_goals,
+    )
     return return_payload
 
 
@@ -940,6 +962,7 @@ def build_prepared_dataset(
     qualifier_matches = market_bundle.get("qualifiers", pd.DataFrame()).copy()
     api_football_bundle = load_api_football_data(force_download=bool(refresh_history), allow_download=bool(refresh_history))
     api_market_rows = api_football_bundle.get("market_rows", pd.DataFrame()).copy()
+    international_status = international_results_status()
     if not api_market_rows.empty:
         market_data = pd.concat([market_data, api_market_rows], ignore_index=True) if not market_data.empty else api_market_rows
     combined_has_1x2 = bool(not market_data.empty and market_data[["market_odds_home", "market_odds_draw", "market_odds_away"]].apply(pd.to_numeric, errors="coerce").notna().all(axis=1).any()) if {"market_odds_home", "market_odds_draw", "market_odds_away"}.issubset(market_data.columns) else False
@@ -1033,6 +1056,7 @@ def build_prepared_dataset(
         "api_football_fixture_rows": int(api_football_bundle.get("fixtures", pd.DataFrame()).shape[0]),
         "api_football_stat_rows": int(api_football_bundle.get("team_stats", pd.DataFrame()).shape[0]),
         "api_football_market_rows": int(api_market_rows.shape[0]),
+        "international_recent": international_status,
         "dc_rho": float(dc_rho),
         "target_column": "Label + GoalsDistribution + OverUnder05/15/25/35",
         "team_columns": normalized["team_columns"],
@@ -1223,6 +1247,7 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "api_football_fixture_rows": int(dataset.get("api_football_fixture_rows", 0)),
         "api_football_stat_rows": int(dataset.get("api_football_stat_rows", 0)),
         "api_football_market_rows": int(dataset.get("api_football_market_rows", 0)),
+        "international_recent": dataset.get("international_recent", international_results_status()),
         "warnings": dataset.get("warnings", []),
     }
 
@@ -1250,6 +1275,7 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "api_football_fixture_rows": int(dataset.get("api_football_fixture_rows", 0)),
         "api_football_stat_rows": int(dataset.get("api_football_stat_rows", 0)),
         "api_football_market_rows": int(dataset.get("api_football_market_rows", 0)),
+        "international_recent": dataset.get("international_recent", international_results_status()),
         "dc_rho": float(dataset.get("dc_rho", 0.0) or 0.0),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
         "goals_distribution_ready": bool(dataset.get("goals_distribution_ready", dataset.get("over_under_ready", False))),
@@ -1472,6 +1498,7 @@ def build_training_matrix(
         market_rows: Optional[pd.DataFrame] = None,
         qualifier_rows: Optional[pd.DataFrame] = None,
         api_football: Optional[Dict[str, pd.DataFrame]] = None,
+        international_matches: Optional[pd.DataFrame] = None,
         fixture_feature_rows: Optional[pd.DataFrame] = None,
         feature_columns: Optional[List[str]] = None,
         target: str = "result",
@@ -1497,13 +1524,15 @@ def build_training_matrix(
     if qualifier_rows is None:
         qualifier_rows = pd.DataFrame()
     api_football = api_football or {}
+    if international_matches is None:
+        international_matches = load_international_matches(required=False)
     records = []
     static_model = base_model
     working_teams = list(teams or teams_from_rows(working))
     frozen_years = frozen_years or set()
     if static_model is None and history_df is None:
         static_model = WorldCupModel.from_history(pd.DataFrame(), teams=working_teams)
-    snapshot_cache: Dict[Tuple[str, ...], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
+    snapshot_cache: Dict[Tuple[str, ...], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     for _, row in working.iterrows():
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
@@ -1513,15 +1542,16 @@ def build_training_matrix(
             cache_key = ("year", str(int(row_year))) if row_year else ("date", reference_date)
             if cache_key not in snapshot_cache:
                 history_cutoff = history_before_row(history_df, row_date=row_date, row_year=row_year, freeze_year=frozen)
+                snapshot_model = WorldCupModel.from_history(
+                    history_cutoff,
+                    teams=working_teams,
+                    history_weight=history_weight,
+                    recency_weight=recency_weight,
+                    host_advantage=host_advantage,
+                    max_goals=max_goals,
+                )
                 snapshot_cache[cache_key] = (
-                    WorldCupModel.from_history(
-                        history_cutoff,
-                        teams=working_teams,
-                        history_weight=history_weight,
-                        recency_weight=recency_weight,
-                        host_advantage=host_advantage,
-                        max_goals=max_goals,
-                    ),
+                    snapshot_model,
                     build_history_feature_table(history_cutoff, reference_date=reference_date),
                     build_matchup_feature_table(history_cutoff, reference_date=reference_date),
                     qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=working_teams),
@@ -1532,8 +1562,14 @@ def build_training_matrix(
                         lineups=api_football.get("lineups", pd.DataFrame()),
                         injuries=api_football.get("injuries", pd.DataFrame()),
                     ),
+                    recent15_feature_table(
+                        international_matches,
+                        teams=working_teams,
+                        before_date=reference_date,
+                        base_model=snapshot_model,
+                    ),
                 )
-            row_model, row_history_features, row_matchup_features, row_qualifier_features, row_api_football_features = snapshot_cache[cache_key]
+            row_model, row_history_features, row_matchup_features, row_qualifier_features, row_api_football_features, row_recent15_features = snapshot_cache[cache_key]
         else:
             row_model = static_model
             row_history_features = history_team_features
@@ -1546,6 +1582,12 @@ def build_training_matrix(
                 lineups=api_football.get("lineups", pd.DataFrame()),
                 injuries=api_football.get("injuries", pd.DataFrame()),
             )
+            row_recent15_features = recent15_feature_table(
+                international_matches,
+                teams=working_teams,
+                before_date=reference_date,
+                base_model=row_model,
+            )
         records.append(
             match_feature_row(
                 row_model,
@@ -1557,6 +1599,7 @@ def build_training_matrix(
                 market_rows=market_rows,
                 qualifier_features=row_qualifier_features,
                 api_football_features=row_api_football_features,
+                recent15_features=row_recent15_features,
                 fixture_feature_rows=fixture_feature_rows,
                 fixture_id=row.get("FixtureId"),
                 match_date=row_date,
@@ -1589,6 +1632,7 @@ def match_feature_row(
         market_rows: Optional[pd.DataFrame] = None,
         qualifier_features: Optional[pd.DataFrame] = None,
         api_football_features: Optional[pd.DataFrame] = None,
+        recent15_features: Optional[pd.DataFrame] = None,
         fixture_feature_rows: Optional[pd.DataFrame] = None,
         fixture_id: Optional[Any] = None,
         match_date: Optional[Any] = None,
@@ -1632,6 +1676,7 @@ def match_feature_row(
         "host_flag_diff": float((1.0 if home in HOST_TEAMS else 0.0) - (1.0 if away in HOST_TEAMS else 0.0)),
         "rating_attack_interaction": float((p_home.rating - p_away.rating) * (p_home.attack - p_away.attack)),
         "rating_defense_interaction": float((p_home.rating - p_away.rating) * (p_home.defense - p_away.defense)),
+        "recent15_context_available": recent15_context_available(recent15_features if recent15_features is not None else pd.DataFrame(), home, away),
     }
     row.update(shrinkage_feature_row(p_home, p_away))
     row.update(score_grid_features(lambda_home, lambda_away, max_goals=base_model.max_goals, score_cap=4))
@@ -1651,6 +1696,7 @@ def match_feature_row(
     ))
     merge_qualifier_feature_block(row, qualifier_features if qualifier_features is not None else pd.DataFrame(), home, away)
     merge_team_feature_block(row, api_football_features if api_football_features is not None else pd.DataFrame(), home, away, prefix="api_football")
+    merge_recent15_feature_block(row, recent15_features if recent15_features is not None else pd.DataFrame(), home, away)
     row.update(fixture_context_features(fixture_context or {}, home=home, away=away, fixture_id=fixture_id, match_date=match_date, match_year=match_year))
     merge_team_feature_block(row, team_features, home, away, prefix="kaggle", limit=24)
     merge_team_feature_block(
@@ -1670,6 +1716,20 @@ def match_feature_row(
         prefix="xi",
     )
     return row
+
+
+def recent15_context_available(features: pd.DataFrame, home: str, away: str) -> float:
+    if features is None or features.empty or "Team" not in features.columns:
+        return 0.0
+    home_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(home)]
+    away_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(away)]
+    for scoped in (home_features, away_features):
+        if scoped.empty or "recent15_matches" not in scoped.columns:
+            continue
+        matches = pd.to_numeric(scoped["recent15_matches"], errors="coerce").fillna(0.0)
+        if float(matches.iloc[0]) > 0.0:
+            return 1.0
+    return 0.0
 
 
 def shrinkage_feature_row(p_home, p_away, prior_rating: float = 1500.0, prior_strength: float = 1.0, prior_matches: float = 6.0) -> Dict[str, float]:
@@ -1848,6 +1908,22 @@ def merge_team_feature_block(
         row[f"{prefix}_{safe}_home"] = home_value
         row[f"{prefix}_{safe}_away"] = away_value
         row[f"{prefix}_{safe}_diff"] = home_value - away_value
+
+
+def merge_recent15_feature_block(row: Dict[str, float], features: pd.DataFrame, home: str, away: str) -> None:
+    if features.empty or "Team" not in features.columns:
+        return
+    home_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(home)]
+    away_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(away)]
+    numeric_cols = [column for column in features.columns if column != "Team" and pd.api.types.is_numeric_dtype(features[column])]
+    for column in numeric_cols:
+        home_value = float(home_features[column].iloc[0]) if not home_features.empty else 0.0
+        away_value = float(away_features[column].iloc[0]) if not away_features.empty else 0.0
+        safe = normalize_column(column)
+        key = safe if safe.startswith("recent15_") else f"recent15_{safe}"
+        row[f"{key}_home"] = home_value
+        row[f"{key}_away"] = away_value
+        row[f"{key}_diff"] = home_value - away_value
 
 
 def merge_matchup_feature_block(
@@ -3250,6 +3326,12 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
         lineups=api_football.get("lineups", pd.DataFrame()),
         injuries=api_football.get("injuries", pd.DataFrame()),
     )
+    recent15_features = recent15_feature_table(
+        load_international_matches(required=False),
+        teams=[home, away],
+        before_date=HISTORY_REFERENCE_DATE,
+        base_model=base_model,
+    )
     fixture_feature_rows = read_fixture_feature_rows()
     x = pd.DataFrame([
         match_feature_row(
@@ -3262,6 +3344,7 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
             market_rows=market_rows,
             qualifier_features=qualifier_features,
             api_football_features=api_football_features,
+            recent15_features=recent15_features,
             fixture_feature_rows=fixture_feature_rows,
             fixture_id=fixture_id,
             match_date=None,
@@ -3751,6 +3834,7 @@ def etl_steps(
     api_fixture_rows = int(prepared.get("api_football_fixture_rows", normalized.get("api_football_fixture_rows", 0)) or 0)
     api_stat_rows = int(prepared.get("api_football_stat_rows", normalized.get("api_football_stat_rows", 0)) or 0)
     api_market_rows = int(prepared.get("api_football_market_rows", normalized.get("api_football_market_rows", 0)) or 0)
+    international_status = prepared.get("international_recent") or normalized.get("international_recent") or international_results_status()
     return [
         {
             "name": "Descarga Kaggle",
@@ -3799,6 +3883,12 @@ def etl_steps(
             "status": "ok" if api_stat_rows or api_market_rows else "info",
             "count": api_stat_rows,
             "detail": f"Status {api_status.get('status', 'missing')}; fixtures={api_fixture_rows}, stats={api_stat_rows}, odds={api_market_rows}. Siempre se cortan por fecha del partido.",
+        },
+        {
+            "name": "All matches recientes",
+            "status": "ok" if international_status.get("available") else "info",
+            "count": int(international_status.get("rows", 0) or 0),
+            "detail": "all_matches.csv disponible para Poisson ultimos 15 y features opcionales." if international_status.get("available") else "Auxiliar opcional no descargado; features recent15 quedan en 0.",
         },
         {
             "name": "Walk-forward XI",
@@ -3929,6 +4019,7 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "api_football_fixture_rows": int(record.get("api_football_fixture_rows", 0) or 0),
         "api_football_stat_rows": int(record.get("api_football_stat_rows", 0) or 0),
         "api_football_market_rows": int(record.get("api_football_market_rows", 0) or 0),
+        "international_recent": record.get("international_recent", international_results_status()),
         "dc_rho": float(record.get("dc_rho", 0.0) or 0.0),
         "final_test_year": record.get("final_test_year", ""),
         "split_policy": record.get("split_policy", ""),
@@ -3989,6 +4080,7 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "api_football_fixture_rows": 0,
         "api_football_stat_rows": 0,
         "api_football_market_rows": 0,
+        "international_recent": international_results_status(),
         "hidden_from_catalog": False,
         "markets": {},
         "market_models": {},
