@@ -66,6 +66,11 @@ TRAIN_TOTAL_GOAL_LINES = tuple(line for line in TOTAL_GOAL_LINES if line <= 3.5)
 TOTAL_GOAL_LINE_SUFFIXES = tuple(total_line_suffix(line) for line in TRAIN_TOTAL_GOAL_LINES)
 TOTAL_GOALS_CAP = 6
 GOALS_DISTRIBUTION_TARGET = "goals_distribution"
+OVER_UNDER_MARKET_TARGETS = tuple(f"over_under_{suffix}" for suffix in TOTAL_GOAL_LINE_SUFFIXES)
+OVER_UNDER_TARGET_LINES = {
+    f"over_under_{total_line_suffix(line)}": line
+    for line in TRAIN_TOTAL_GOAL_LINES
+}
 MATCH_ROW_COLUMNS = [
     "FixtureId",
     "Date",
@@ -115,6 +120,35 @@ class WorldCupTrainingError(RuntimeError):
     pass
 
 
+class ConstantProbabilityClassifier:
+    def __init__(self, constant_class: int = 0, classes: Optional[List[int]] = None):
+        self.constant_class = int(constant_class)
+        self.classes_ = np.asarray(classes if classes else [self.constant_class], dtype=int)
+
+    def fit(self, x, y):
+        values = pd.Series(y).dropna()
+        if values.empty:
+            self.constant_class = int(self.classes_[0])
+        else:
+            self.constant_class = int(values.mode().iloc[0])
+        if self.constant_class not in set(self.classes_.tolist()):
+            self.classes_ = np.asarray(sorted(set(self.classes_.tolist()) | {self.constant_class}), dtype=int)
+        return self
+
+    def predict(self, x):
+        return np.full(len(x), self.constant_class, dtype=int)
+
+    def predict_proba(self, x):
+        columns = len(self.classes_)
+        output = np.zeros((len(x), columns), dtype=float)
+        try:
+            index = list(self.classes_).index(self.constant_class)
+        except ValueError:
+            index = 0
+        output[:, index] = 1.0
+        return output
+
+
 def emit_training_progress(callback, stage: str, current: int, total: int, message: str, **extra) -> None:
     total = max(int(total or 1), 1)
     current = min(max(int(current or 0), 0), total)
@@ -152,8 +186,10 @@ def emit_training_progress(callback, stage: str, current: int, total: int, messa
 
 def market_label_for_progress(target: str) -> str:
     if target == GOALS_DISTRIBUTION_TARGET:
-        return "Distribucion goles / U/O multi-linea"
-    return "U/O 2.5" if target == "over_under_25" else "1X2"
+        return "Distribucion goles"
+    if is_over_under_target(target):
+        return goal_line_label_for_suffix(total_line_suffix(OVER_UNDER_TARGET_LINES[target]))
+    return "1X2"
 
 
 def training_options() -> Dict[str, Any]:
@@ -177,7 +213,7 @@ def training_options() -> Dict[str, Any]:
     return {
         "models": json_safe(models),
         "targets": [
-            {"key": "dual_markets", "label": "1X2 + U/O Poisson"},
+            {"key": "dual_markets", "label": "1X2 + U/O 0.5-3.5 ML"},
         ],
         "hardware": detect_hardware(),
         "defaults": default_training_payload(),
@@ -333,8 +369,8 @@ def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, A
     payload = payload or {}
     train_config = training_config(payload)
     if train_config["market_mode"] != "dual_markets":
-        raise WorldCupTrainingError("Mundial 2026 entrena el modelo principal 1X2; U/O 0.5-3.5 se deriva con Poisson.")
-    emit_training_progress(progress_callback, "preparing", 0, 6, "Preparando entrenamiento Mundial")
+        raise WorldCupTrainingError("Mundial 2026 entrena el bundle principal 1X2 + U/O 0.5-3.5.")
+    emit_training_progress(progress_callback, "preparing", 0, 8, "Preparando entrenamiento Mundial")
     return train_dual_market_model(
         tournament=tournament,
         payload=payload,
@@ -382,8 +418,8 @@ def train_single_hybrid_model(
     target_warning = ""
     eval_strategy = "unavailable"
     effective_target = train_config["training_target"]
-    if effective_target == "over_under_25" and not has_over_under_target(train_rows):
-        raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar U/O 2.5.")
+    if is_over_under_target(effective_target) and not has_over_under_target(train_rows, effective_target):
+        raise WorldCupTrainingError(f"El ETL preparado no contiene goles suficientes para entrenar {market_label_for_progress(effective_target)}.")
     if effective_target == GOALS_DISTRIBUTION_TARGET and not has_goals_distribution_target(train_rows):
         raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar distribucion de goles.")
     eval_size = float(payload.get("eval_size", 0.25) or 0.25)
@@ -468,7 +504,7 @@ def train_single_hybrid_model(
 
     if x_train.empty or pd.Series(y_train).dropna().empty:
         raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
-    y_train_encoded, label_classes = encode_labels(y_train)
+    y_train_encoded, label_classes = encode_target_labels(y_train, effective_target)
     y_eval_encoded = encode_existing_labels(y_eval, label_classes)
     tuned = tune_model_if_requested(
         train_config,
@@ -607,34 +643,64 @@ def train_dual_market_model(
     if not normalized["trainable"]:
         raise WorldCupTrainingError("El ETL preparado no dejo filas entrenables para el modelo 1X2.")
 
-    result_child_id = child_market_model_id(bundle_id, "result")
     common_payload = dict(payload)
-    common_payload["market_mode"] = "result"
-
-    result_payload = {
-        **common_payload,
-        "training_target": "result",
-        "model_id": result_child_id,
-        "model_name": f"{bundle_name} - 1X2",
-        "hidden_from_catalog": True,
-    }
-    emit_training_progress(progress_callback, "market-result", 1, 6, "Entrenando mercado 1X2", market="1X2", model_id=bundle_id)
-    result_result = train_single_hybrid_model(
-        tournament=tournament,
-        payload=result_payload,
-        progress_callback=progress_callback,
-        market_label="1X2",
-    )
-    result_record = load_hybrid_model(result_child_id) or {}
+    market_plan: List[Tuple[str, str]] = [
+        ("result", "1X2"),
+        *[(target, market_label_for_progress(target)) for target in OVER_UNDER_MARKET_TARGETS],
+    ]
+    if normalized.get("goals_distribution_ready", False):
+        market_plan.append((GOALS_DISTRIBUTION_TARGET, "Distribucion goles"))
 
     warnings: List[str] = []
-    market_results = {"result": market_training_summary(result_record, result_result, "1X2")}
-    market_models = {"result": result_child_id}
+    market_results: Dict[str, Dict[str, Any]] = {}
+    market_models: Dict[str, str] = {}
+    result_result: Dict[str, Any] = {}
+    result_record: Dict[str, Any] = {}
+    goals_record: Dict[str, Any] = {}
+    total_steps = len(market_plan) + 2
 
-    warnings.extend(result_record.get("warnings", []))
+    for index, (target, label) in enumerate(market_plan, start=1):
+        child_id = child_market_model_id(bundle_id, target)
+        child_payload = {
+            **common_payload,
+            "market_mode": target,
+            "training_target": target,
+            "model_id": child_id,
+            "model_name": f"{bundle_name} - {label}",
+            "hidden_from_catalog": True,
+        }
+        emit_training_progress(
+            progress_callback,
+            f"market-{target}",
+            index,
+            total_steps,
+            f"Entrenando mercado {label}",
+            market=label,
+            model_id=bundle_id,
+        )
+        child_result = train_single_hybrid_model(
+            tournament=tournament,
+            payload=child_payload,
+            progress_callback=progress_callback,
+            market_label=label,
+        )
+        child_record = load_hybrid_model(child_id) or {}
+        market_results[target] = market_training_summary(child_record, child_result, label)
+        market_models[target] = child_id
+        warnings.extend(child_record.get("warnings", []))
+        if target == "result":
+            result_result = child_result
+            result_record = child_record
+        elif target == GOALS_DISTRIBUTION_TARGET:
+            goals_record = child_record
+
+    if not result_record:
+        raise WorldCupTrainingError("No se pudo entrenar el mercado principal 1X2.")
+
     warnings = unique_strings(warnings)
     trained_at = datetime.now(timezone.utc).isoformat()
     bundle_target_column = str(normalized.get("target_column") or result_record.get("target_column") or "result")
+    derived_total_markets = goals_record.get("derived_total_markets", {}) if goals_record else {}
     bundle_record = {
         "bundle": True,
         "market_mode": "dual_markets",
@@ -679,7 +745,7 @@ def train_dual_market_model(
         "warnings": warnings,
         "top_features": result_record.get("top_features", []),
         "feature_inventory": result_record.get("feature_inventory", {}),
-        "derived_total_markets": {},
+        "derived_total_markets": derived_total_markets,
         "markets": market_results,
         "market_models": market_models,
         "trained_at": trained_at,
@@ -688,10 +754,10 @@ def train_dual_market_model(
         "final_test_year": normalized.get("final_test_year", ""),
         "split_policy": normalized.get("split_policy", ""),
     }
-    emit_training_progress(progress_callback, "saving", 5, 6, "Guardando modelo 1X2", model_id=bundle_id)
+    emit_training_progress(progress_callback, "saving", total_steps - 1, total_steps, "Guardando bundle de mercados", model_id=bundle_id)
     save_hybrid_model(bundle_record, model_id=bundle_id)
     model_meta = read_model_metadata(model_id=bundle_id)
-    emit_training_progress(progress_callback, "complete", 6, 6, "Entrenamiento completado", model_id=bundle_id)
+    emit_training_progress(progress_callback, "complete", total_steps, total_steps, "Entrenamiento completado", model_id=bundle_id)
     return {
         "model": model_meta,
         "metrics": bundle_record["metrics"],
@@ -737,17 +803,17 @@ def predict_match_payload(
     poisson = base_model.match_probabilities(home_team, away_team)
     base_probs = {"H": poisson["home"], "D": poisson["draw"], "A": poisson["away"]}
     base_totals = total_line_probabilities_from_probs(poisson)
-    ml_outputs = {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
+    ml_outputs = {"result": {}, "over_under_ml": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
     if use_ml_model:
         ml_outputs = predict_ml_outputs(base_model, home_team, away_team, model_id=model_id, fixture_id=fixture.get("No."))
     result_ml = ml_outputs.get("result", {})
-    over_under_ml = {}
+    over_under_ml = ml_outputs.get("over_under_ml") or ml_outputs.get("over_under_25", {}) or {}
     result_weight = ml_weight if result_ml else 0.0
-    totals_weight = 0.0
+    totals_weight = ml_weight if over_under_ml else 0.0
     blended = blend_probabilities(base_probs, result_ml, result_weight)
     blended_totals = blend_total_probabilities(base_totals, over_under_ml, totals_weight)
     market_sources = market_sources_payload(result_ml, over_under_ml, ml_outputs)
-    return {
+    return_payload = {
         "fixture": {
             "id": str(fixture.get("No.", "")),
             "date": fixture.get("Fecha", ""),
@@ -767,7 +833,7 @@ def predict_match_payload(
             "poisson": {key: round(value * 100.0, 2) for key, value in base_probs.items()},
             "poisson_totals": {key: round(value * 100.0, 2) for key, value in base_totals.items()},
             "ml": {key: round(value * 100.0, 2) for key, value in result_ml.items()},
-            "over_under_ml": {},
+            "over_under_ml": {key: round(value * 100.0, 2) for key, value in over_under_ml.items()},
             "ml_weight": round(float(ml_weight if result_ml else 0.0), 3),
             "result_weight": round(float(result_weight), 3),
             "over_under_weight": round(float(totals_weight), 3),
@@ -785,6 +851,12 @@ def predict_match_payload(
         "prediction": label_display(max(blended, key=blended.get), home_team, away_team),
         "notes": ml_outputs.get("notes", []),
     }
+    if ml_outputs.get("goal_distribution_ml"):
+        return_payload["model_probs"]["goal_distribution_ml"] = {
+            key: round(value * 100.0, 2)
+            for key, value in (ml_outputs.get("goal_distribution_ml") or {}).items()
+        }
+    return return_payload
 
 
 def normalize_dataset_files(files: Iterable[Path]) -> Dict[str, Any]:
@@ -1413,8 +1485,9 @@ def build_training_matrix(
         max_goals: int = 10,
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     working = sort_match_rows(rows)
-    if target == "over_under_25":
-        working = working[working["OverUnder25"].notna()] if "OverUnder25" in working.columns else working.iloc[0:0]
+    if is_over_under_target(target):
+        target_column = over_under_column_for_target(target)
+        working = working[working[target_column].notna()] if target_column in working.columns else working.iloc[0:0]
     elif target == GOALS_DISTRIBUTION_TARGET:
         working = working[working["HG"].notna() & working["AG"].notna()]
     if team_features is None:
@@ -1499,8 +1572,8 @@ def build_training_matrix(
         if column not in x.columns:
             x[column] = 0.0
     x = x[feature_columns].astype(float)
-    if target == "over_under_25":
-        return x, working["OverUnder25"].astype(int), feature_columns
+    if is_over_under_target(target):
+        return x, working[over_under_column_for_target(target)].astype(int), feature_columns
     if target == GOALS_DISTRIBUTION_TARGET:
         return x, working.apply(total_goals_bucket_from_row, axis=1).astype(int), feature_columns
     return x, working["Label"].astype(str), feature_columns
@@ -2193,7 +2266,7 @@ def default_model_id(model_key: str, target: str) -> str:
         "catboost": "cat",
         "ngboost": "ngb",
     }.get(model_key, model_key)
-    short_target = "hibrido" if target == "dual_markets" else "goals" if target == GOALS_DISTRIBUTION_TARGET else "uo25" if target == "over_under_25" else "result"
+    short_target = "hibrido" if target == "dual_markets" else "goals" if target == GOALS_DISTRIBUTION_TARGET else target.replace("over_under_", "uo") if is_over_under_target(target) else "result"
     return f"mundial-{short_model}-{short_target}"
 
 
@@ -2207,23 +2280,47 @@ def normalize_worldcup_model_id(value: Any) -> str:
     return text
 
 
+def normalize_over_under_target_key(value: Any) -> str:
+    key = str(value or "").strip().lower().replace("-", "_")
+    compact = re.sub(r"[^a-z0-9]+", "", key)
+    aliases = {
+        "overunder": "over_under_25",
+        "overunder25": "over_under_25",
+        "ou25": "over_under_25",
+        "uo25": "over_under_25",
+        "uo025": "over_under_25",
+        "u025": "over_under_25",
+    }
+    if compact in aliases:
+        return aliases[compact]
+    match = re.search(r"(?:over_under|overunder|ou|uo|u_o)_?0?([0-3])_?5$", key)
+    if not match:
+        match = re.search(r"(?:overunder|ou|uo)0?([0-3])5$", compact)
+    if match:
+        target = f"over_under_{match.group(1)}5"
+        return target if target in OVER_UNDER_TARGET_LINES else ""
+    return key if key in OVER_UNDER_TARGET_LINES else ""
+
+
 def normalize_training_target(value: Any) -> str:
     key = str(value or "result").strip().lower().replace("-", "_")
     if key in {"goals", "goals_distribution", "goal_distribution", "total_goals", "distribucion_goles"}:
         return GOALS_DISTRIBUTION_TARGET
-    if key in {"over_under", "over_under_25", "uo25", "u_o_25", "overunder25"}:
-        return "over_under_25"
+    normalized_over_under = normalize_over_under_target_key(key)
+    if normalized_over_under:
+        return normalized_over_under
     return "result"
 
 
 def normalize_market_mode(value: Any, target: str = "result") -> str:
     key = str(value or target or "result").strip().lower().replace("-", "_")
-    if key in {"dual", "dual_markets", "both", "ambos", "all", "result_over_under_25", "result_uo25"}:
+    if key in {"dual", "dual_markets", "both", "ambos", "all", "result_over_under_25", "result_uo25", "result_over_under"}:
         return "dual_markets"
     if key in {"goals", "goals_distribution", "goal_distribution", "total_goals", "distribucion_goles"}:
         return GOALS_DISTRIBUTION_TARGET
-    if key in {"over_under", "over_under_25", "uo25", "u_o_25", "overunder25"}:
-        return "over_under_25"
+    normalized_over_under = normalize_over_under_target_key(key)
+    if normalized_over_under:
+        return normalized_over_under
     return "result"
 
 
@@ -2262,11 +2359,12 @@ def effective_n_jobs(n_jobs: int, cpu_count: int) -> int:
     return cpu_count if n_jobs == -1 else max(1, min(int(n_jobs), int(cpu_count or 1)))
 
 
-def has_over_under_target(rows: pd.DataFrame) -> bool:
-    if "OverUnder25" not in rows.columns:
+def has_over_under_target(rows: pd.DataFrame, target: str = "over_under_25") -> bool:
+    target_column = over_under_column_for_target(target)
+    if target_column not in rows.columns:
         return False
-    values = pd.to_numeric(rows["OverUnder25"], errors="coerce").dropna()
-    return values.shape[0] > 1 and values.astype(int).nunique() >= 2
+    values = pd.to_numeric(rows[target_column], errors="coerce").dropna()
+    return values.shape[0] > 1
 
 
 def has_goals_distribution_target(rows: pd.DataFrame) -> bool:
@@ -2546,6 +2644,14 @@ def encode_labels(y: pd.Series) -> Tuple[pd.Series, List[Any]]:
     return values.astype(str).map(mapping).astype(int), classes
 
 
+def encode_target_labels(y: pd.Series, target: str) -> Tuple[pd.Series, List[Any]]:
+    if is_over_under_target(target):
+        values = pd.to_numeric(pd.Series(y).reset_index(drop=True), errors="coerce").fillna(0).astype(int)
+        values = values.clip(lower=0, upper=1)
+        return values.astype(int), [0, 1]
+    return encode_labels(y)
+
+
 def encode_existing_labels(y: pd.Series, classes: List[Any]) -> pd.Series:
     values = pd.Series(y).reset_index(drop=True)
     mapping = {str(label): index for index, label in enumerate(classes)}
@@ -2562,6 +2668,16 @@ def fit_configured_classifier(
         seed: int,
         num_classes: int,
 ) -> Dict[str, Any]:
+    y_values = pd.Series(y_train).dropna()
+    if y_values.nunique() < 2:
+        classes = list(range(max(int(num_classes or 1), 1)))
+        constant = int(y_values.iloc[0]) if not y_values.empty else classes[0]
+        classifier = ConstantProbabilityClassifier(constant_class=constant, classes=classes).fit(x_train, y_train)
+        return {
+            "classifier": classifier,
+            "device": "cpu",
+            "warnings": ["El target entrenado contiene una sola clase en train; se uso un clasificador constante para conservar el mercado."],
+        }
     device, device_warnings = resolve_device(model_key, requested_device)
     try:
         classifier = build_worldcup_classifier(
@@ -3003,7 +3119,7 @@ def predict_ml_probs(base_model: WorldCupModel, home: str, away: str, model_id: 
 def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str, model_id: Optional[str] = None, fixture_id: Optional[Any] = None) -> Dict[str, Any]:
     record = load_hybrid_model(model_id=model_id)
     if not record:
-        return {"result": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
+        return {"result": {}, "over_under_ml": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
     if record.get("bundle") and record.get("market_models"):
         return predict_bundle_ml_outputs(base_model, home, away, record, fixture_id=fixture_id)
     return predict_single_record_ml_outputs(base_model, home, away, record, fixture_id=fixture_id)
@@ -3014,6 +3130,10 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
     bundle_name = str(record.get("model_name") or bundle_id or "Bundle Mundial")
     market_models = record.get("market_models") or {}
     result_output = {"result": {}, "notes": []}
+    over_under_ml: Dict[str, float] = {}
+    over_under_line_sources: Dict[str, Dict[str, str]] = {}
+    goal_distribution_ml: Dict[str, float] = {}
+    goal_distribution_totals: Dict[str, float] = {}
     market_model_names: Dict[str, str] = {}
 
     result_id = market_models.get("result")
@@ -3025,15 +3145,67 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
                 market_model_names["result"] = result_output.get("model_name", "")
 
     notes = []
-    result_notes = result_output.get("notes", [])
-    notes.extend(result_notes)
+    notes.extend(result_output.get("notes", []))
+
+    for target in OVER_UNDER_MARKET_TARGETS:
+        child_id = market_models.get(target)
+        if not child_id:
+            continue
+        child_record = load_hybrid_model(child_id)
+        if not child_record:
+            continue
+        child_output = predict_single_record_ml_outputs(base_model, home, away, child_record, fixture_id=fixture_id)
+        child_totals = child_output.get("over_under_ml") or child_output.get("over_under_25") or {}
+        line = OVER_UNDER_TARGET_LINES[target]
+        suffix = total_line_suffix(line)
+        over_key = f"over{suffix}"
+        under_key = f"under{suffix}"
+        if over_key in child_totals and under_key in child_totals:
+            over_under_ml[over_key] = float(child_totals[over_key])
+            over_under_ml[under_key] = float(child_totals[under_key])
+            market_model_names[target] = child_output.get("model_name", "")
+            over_under_line_sources[target] = {
+                "kind": "binary_ml",
+                "model_name": str(child_output.get("model_name", "")),
+            }
+        notes.extend(child_output.get("notes", []))
+
+    goals_id = market_models.get(GOALS_DISTRIBUTION_TARGET)
+    if goals_id:
+        goals_record = load_hybrid_model(goals_id)
+        if goals_record:
+            goals_output = predict_single_record_ml_outputs(base_model, home, away, goals_record, fixture_id=fixture_id)
+            goal_distribution_ml = goals_output.get("goal_distribution") or {}
+            goal_distribution_totals = goals_output.get("over_under_ml") or goals_output.get("over_under_25") or {}
+            if goal_distribution_ml:
+                market_model_names[GOALS_DISTRIBUTION_TARGET] = goals_output.get("model_name", "")
+            notes.extend(goals_output.get("notes", []))
+            for target in OVER_UNDER_MARKET_TARGETS:
+                if target in over_under_line_sources:
+                    continue
+                line = OVER_UNDER_TARGET_LINES[target]
+                suffix = total_line_suffix(line)
+                over_key = f"over{suffix}"
+                under_key = f"under{suffix}"
+                if over_key in goal_distribution_totals and under_key in goal_distribution_totals:
+                    over_under_ml[over_key] = float(goal_distribution_totals[over_key])
+                    over_under_ml[under_key] = float(goal_distribution_totals[under_key])
+                    market_model_names[target] = goals_output.get("model_name", "")
+                    over_under_line_sources[target] = {
+                        "kind": "goal_distribution_ml",
+                        "model_name": str(goals_output.get("model_name", "")),
+                    }
+
     return {
         "result": result_output.get("result", {}),
-        "over_under_25": {},
+        "over_under_ml": over_under_ml,
+        "over_under_25": over_under_ml,
+        "goal_distribution_ml": goal_distribution_ml,
         "model_id": bundle_id,
         "model_name": bundle_name,
         "market_model_ids": {key: value for key, value in market_models.items() if value},
         "market_model_names": market_model_names,
+        "over_under_line_sources": over_under_line_sources,
         "notes": unique_strings(notes),
     }
 
@@ -3051,12 +3223,13 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
         away_prob = (1.0 - draw) * (1.0 - home_share)
         return {
             "result": {"H": float(home_prob), "D": float(draw), "A": float(away_prob)},
+            "over_under_ml": {},
             "over_under_25": {},
             "model_id": active_id,
             "model_name": model_name,
             "notes": [
                 f"Modelo {model_name} team-strength aplicado ({record.get('target_column', '')}).",
-                "Over/Under 2.5 viene de Poisson porque el dataset de equipos no contiene goles de partido.",
+                "U/O 0.5-3.5 viene de Poisson porque el dataset de equipos no contiene goles de partido.",
             ],
         }
     team_features = pd.DataFrame(record.get("team_features", []))
@@ -3110,26 +3283,38 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
         over_under = total_line_probabilities_from_distribution(distribution)
         return {
             "result": {},
+            "over_under_ml": over_under,
             "over_under_25": over_under,
             "goal_distribution": {key: value for key, value in distribution.items()},
             "model_id": active_id,
             "model_name": model_name,
+            "over_under_line_sources": {
+                target: {"kind": "goal_distribution_ml", "model_name": model_name}
+                for target in OVER_UNDER_MARKET_TARGETS
+            },
             "notes": [f"Modelo {model_name} aplicado a distribucion de goles y U/O multi-linea."],
         }
-    if target == "over_under_25":
-        output = {"under25": 0.0, "over25": 0.0}
+    if is_over_under_target(target):
+        line = OVER_UNDER_TARGET_LINES[target]
+        suffix = total_line_suffix(line)
+        under_key = f"under{suffix}"
+        over_key = f"over{suffix}"
+        output = {under_key: 0.0, over_key: 0.0}
         for label, probability in zip(labels, probabilities):
             if str(label) in {"1", "True", "true"}:
-                output["over25"] += float(probability)
+                output[over_key] += float(probability)
             else:
-                output["under25"] += float(probability)
+                output[under_key] += float(probability)
         total = max(sum(output.values()), 1e-9)
+        normalized_output = {key: value / total for key, value in output.items()}
         return {
             "result": {},
-            "over_under_25": {key: value / total for key, value in output.items()},
+            "over_under_ml": normalized_output,
+            "over_under_25": normalized_output if target == "over_under_25" else {},
             "model_id": active_id,
             "model_name": model_name,
-            "notes": [f"Modelo {model_name} aplicado a Over/Under 2.5."],
+            "over_under_line_sources": {target: {"kind": "binary_ml", "model_name": model_name}},
+            "notes": [f"Modelo {model_name} aplicado a {market_label_for_progress(target)}."],
         }
     output = {label: 0.0 for label in TARGET_LABELS}
     for label, probability in zip(labels, probabilities):
@@ -3138,12 +3323,13 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
     total = max(sum(output.values()), 1e-9)
     return {
         "result": {key: value / total for key, value in output.items()},
+        "over_under_ml": {},
         "over_under_25": {},
         "model_id": active_id,
         "model_name": model_name,
         "notes": [
             f"Modelo {model_name} aplicado a 1X2.",
-            "Over/Under 2.5 viene de Poisson cuando no existe hijo O/U entrenado.",
+            "U/O 0.5-3.5 viene de Poisson cuando no existen hijos U/O entrenados.",
         ],
     }
 
@@ -3262,10 +3448,8 @@ def market_sources_payload(result_ml: Dict[str, float], over_under_ml: Dict[str,
     model_name = str(ml_outputs.get("model_name") or "").strip()
     market_model_names = ml_outputs.get("market_model_names") or {}
     result_model_name = str(market_model_names.get("result") or model_name).strip()
-    over_under_model_name = str(market_model_names.get("over_under_25") or model_name).strip()
     result_uses_ml = bool(result_ml)
-    over_under_uses_ml = bool(over_under_ml)
-    return {
+    sources = {
         "result": {
             "label": "1X2",
             "source": "ML + Poisson" if result_uses_ml else "Poisson",
@@ -3273,18 +3457,30 @@ def market_sources_payload(result_ml: Dict[str, float], over_under_ml: Dict[str,
             "model_name": result_model_name if result_uses_ml else "",
             "detail": f"1X2 mezcla el modelo {result_model_name} con Elo/Poisson." if result_uses_ml else "1X2 calculado solo con Elo/Poisson.",
         },
-        "over_under_25": {
-            "label": "U/O multi-linea",
-            "source": "ML + Poisson" if over_under_uses_ml else "Poisson",
-            "uses_ml": over_under_uses_ml,
-            "model_name": over_under_model_name if over_under_uses_ml else "",
-            "detail": f"U/O 0.5-3.5 mezcla el modelo {over_under_model_name} con Poisson." if over_under_uses_ml else "U/O 0.5-3.5 calculado con Poisson; no se usa distribucion de goles.",
-        },
     }
+    line_sources = ml_outputs.get("over_under_line_sources") or {}
+    for target in OVER_UNDER_MARKET_TARGETS:
+        line = OVER_UNDER_TARGET_LINES[target]
+        suffix = total_line_suffix(line)
+        over_key = f"over{suffix}"
+        under_key = f"under{suffix}"
+        source_meta = line_sources.get(target, {}) if isinstance(line_sources, dict) else {}
+        model_for_line = str(source_meta.get("model_name") or market_model_names.get(target) or model_name).strip()
+        source_kind = str(source_meta.get("kind") or "").strip()
+        uses_ml = over_key in over_under_ml and under_key in over_under_ml
+        source_detail = "modelo binario" if source_kind == "binary_ml" else "distribucion auxiliar" if source_kind == "goal_distribution_ml" else "ML"
+        sources[target] = {
+            "label": f"U/O {line:.1f}",
+            "source": "ML + Poisson" if uses_ml else "Poisson",
+            "uses_ml": uses_ml,
+            "model_name": model_for_line if uses_ml else "",
+            "detail": f"U/O {line:.1f} mezcla {source_detail} {model_for_line} con Poisson." if uses_ml else f"U/O {line:.1f} calculado con Poisson.",
+        }
+    return sources
 
 
 def child_market_model_id(bundle_id: str, market: str) -> str:
-    suffix = "__goals" if market == GOALS_DISTRIBUTION_TARGET else "__uo25" if market == "over_under_25" else "__result"
+    suffix = "__goals" if market == GOALS_DISTRIBUTION_TARGET else f"__uo{total_line_suffix(OVER_UNDER_TARGET_LINES[market])}" if is_over_under_target(market) else "__result"
     return normalize_worldcup_model_id(f"{str(bundle_id)[:80 - len(suffix)]}{suffix}")
 
 
@@ -3359,7 +3555,7 @@ def bundle_etl_steps(base_steps: List[Dict[str, Any]], market_models: Dict[str, 
     steps.append({
         "name": "Bundle de mercados",
         "status": "ok" if "result" in market_models else "info",
-        "detail": "Entrena 1X2 bajo un modelo seleccionable y conserva U/O 0.5-3.5 por Poisson; se omite la distribucion de goles por bajo rendimiento.",
+        "detail": "Entrena 1X2, U/O 0.5-3.5 como clasificadores binarios y distribucion de goles como apoyo auxiliar cuando existe.",
         "count": len(market_models),
     })
     return steps
@@ -3428,11 +3624,24 @@ def derived_total_market_metrics(y_train, y_train_pred, y_eval, y_eval_pred) -> 
     return output
 
 
+def is_over_under_target(target: Any) -> bool:
+    return str(target or "") in OVER_UNDER_TARGET_LINES
+
+
+def over_under_column_for_target(target: Any) -> str:
+    line = OVER_UNDER_TARGET_LINES.get(str(target or ""), 2.5)
+    return f"OverUnder{total_line_suffix(line)}"
+
+
 def goal_line_label_from_suffix(line_suffix: str) -> str:
     text = str(line_suffix or "").strip()
     if len(text) == 2 and text.isdigit():
         return f"U/O {int(text[0])}.{text[1]}"
     return "U/O goles"
+
+
+def goal_line_label_for_suffix(line_suffix: str) -> str:
+    return goal_line_label_from_suffix(line_suffix)
 
 
 def total_binary_for_line(values, line: float) -> pd.Series:
@@ -3508,9 +3717,13 @@ def display_class_label(label: Any, target: str = "result") -> str:
     if text == "A":
         return "2 Visita"
     if text in {"0", "False", "false"}:
-        return "Under 2.5" if target == "over_under_25" else "No"
+        if is_over_under_target(target):
+            return f"Under {OVER_UNDER_TARGET_LINES[target]:.1f}"
+        return "No"
     if text in {"1", "True", "true"}:
-        return "Over 2.5" if target == "over_under_25" else "Si"
+        if is_over_under_target(target):
+            return f"Over {OVER_UNDER_TARGET_LINES[target]:.1f}"
+        return "Si"
     return text
 
 

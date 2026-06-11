@@ -450,7 +450,7 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert options["defaults"]["training_target"] == "result"
     assert options["defaults"]["market_mode"] == "dual_markets"
     assert [target["key"] for target in options["targets"]] == ["dual_markets"]
-    assert options["targets"][0]["label"] == "1X2 + U/O Poisson"
+    assert options["targets"][0]["label"] == "1X2 + U/O 0.5-3.5 ML"
     assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
 
 
@@ -943,6 +943,7 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "South Africa", "Canada"])
     prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
     catalog = training.list_worldcup_models()
+    expected_markets = {"result", "over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"}
 
     assert status["trainable"] is True
     assert prepared["etl_ready"] is True
@@ -952,11 +953,16 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert status["eval_strategy"] == "final_worldcup_test"
     assert status["final_test_year"] == "2022"
     assert result["model"]["trained"] is True
+    assert result["model"]["bundle"] is True
     assert result["model"]["model_id"] == "mex-test"
     assert result["model"]["model_type"] == "xgboost"
     assert result["model"]["eval_strategy"] == "final_worldcup_test"
     assert result["model"]["final_test_year"] == "2022"
     assert result["model"]["confusion_matrix"]["matrix"]
+    assert set(result["model"]["market_models"]) == expected_markets
+    assert set(result["model"]["markets"]) == expected_markets
+    for market in expected_markets:
+        assert result["model"]["markets"][market]["confusion_matrix"]["matrix"]
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["enabled"] is False
     assert result["model"]["hardware"]["actual_device"] in {"cpu", "cuda"}
@@ -966,11 +972,11 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert prediction["model_probs"]["ml_weight"] == 0.5
     assert prediction["model_probs"]["model_id"] == "mex-test"
     assert prediction["market_sources"]["result"]["source"] == "ML + Poisson"
-    assert prediction["market_sources"]["over_under_25"]["source"] == "Poisson"
-    assert prediction["market_sources"]["over_under_25"]["uses_ml"] is False
+    assert prediction["market_sources"]["over_under_25"]["source"] == "ML + Poisson"
+    assert prediction["market_sources"]["over_under_25"]["uses_ml"] is True
     assert set(prediction["model_probs"]) >= {"poisson", "poisson_totals", "ml", "over_under_ml"}
-    assert prediction["model_probs"]["over_under_ml"] == {}
-    assert "goal_distribution_ml" not in prediction["model_probs"]
+    assert set(prediction["model_probs"]["over_under_ml"]) >= {"over05", "under05", "over15", "under15", "over25", "under25", "over35", "under35"}
+    assert "goal_distribution_ml" in prediction["model_probs"]
     assert catalog["active_model_id"] == "mex-test"
     assert any(item["model_id"] == "mex-test" for item in catalog["models"])
 
@@ -983,18 +989,20 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
 
     assert dual_result["model"]["bundle"] is True
     assert dual_result["model"]["market_mode"] == "dual_markets"
-    assert set(dual_result["model"]["market_models"]) == {"result"}
-    assert set(dual_result["model"]["markets"]) == {"result"}
-    assert dual_result["model"]["markets"]["result"]["confusion_matrix"]["matrix"]
+    assert set(dual_result["model"]["market_models"]) == expected_markets
+    assert set(dual_result["model"]["markets"]) == expected_markets
+    for market in expected_markets:
+        assert dual_result["model"]["markets"][market]["confusion_matrix"]["matrix"]
     assert dual_prediction["model_probs"]["model_id"] == "mex-dual"
     assert dual_prediction["model_probs"]["ml"]
-    assert dual_prediction["model_probs"]["over_under_ml"] == {}
+    assert set(dual_prediction["model_probs"]["over_under_ml"]) >= {"over05", "under05", "over15", "under15", "over25", "under25", "over35", "under35"}
     assert dual_prediction["market_sources"]["result"]["source"] == "ML + Poisson"
-    assert dual_prediction["market_sources"]["over_under_25"]["source"] == "Poisson"
+    assert dual_prediction["market_sources"]["over_under_25"]["source"] == "ML + Poisson"
     assert dual_catalog["active_model_id"] == "mex-dual"
     assert any(item["model_id"] == "mex-dual" and item["bundle"] for item in dual_catalog["models"])
     assert not any(str(item["model_id"]).endswith("__result") for item in dual_catalog["models"])
     assert not any(str(item["model_id"]).endswith("__uo25") for item in dual_catalog["models"])
+    assert not any("__uo" in str(item["model_id"]) or str(item["model_id"]).endswith("__goals") for item in dual_catalog["models"])
 
 
 def test_worldcup_training_rejects_single_market_requests(tmp_path, monkeypatch):
@@ -1016,7 +1024,7 @@ def test_worldcup_training_rejects_single_market_requests(tmp_path, monkeypatch)
     ]).to_csv(training.KAGGLE_ROOT / "train.csv", index=False)
     training.prepare_training_dataset(force=True)
 
-    with pytest.raises(training.WorldCupTrainingError, match="modelo principal 1X2"):
+    with pytest.raises(training.WorldCupTrainingError, match="bundle principal 1X2"):
         training.train_hybrid_model(
             fallback_tournament_2026(),
             payload={"seed": 7, "n_estimators": 5, "training_target": "over_under_25", "market_mode": "over_under_25"},
@@ -1070,15 +1078,18 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert result["prediction_rows"] == 2
     assert result["model"]["target_column"] == "Label + GoalsDistribution + OverUnder05/15/25/35"
     assert result["model"]["eval_strategy"] == "final_worldcup_test"
+    expected_markets = {"result", "over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"}
     assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
-    assert set(result["model"]["markets"]) == {"result"}
+    assert set(result["model"]["markets"]) == expected_markets
+    for market in expected_markets:
+        assert result["model"]["markets"][market]["confusion_matrix"]["matrix"]
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["steps"]
     assert result["model"]["model_label"] == "XGBoost"
     assert result["model"]["hardware"]["effective_n_jobs"] >= 1
     assert prediction["model_probs"]["ml"]
-    assert prediction["model_probs"]["over_under_ml"] == {}
-    assert "goal_distribution_ml" not in prediction["model_probs"]
+    assert set(prediction["model_probs"]["over_under_ml"]) >= {"over05", "under05", "over15", "under15", "over25", "under25", "over35", "under35"}
+    assert "goal_distribution_ml" in prediction["model_probs"]
 
 
 def test_worldcup_predict_upcoming_returns_future_predictions(tmp_path, monkeypatch):
@@ -1299,7 +1310,7 @@ def test_worldcup_ngboost_dual_training_with_tuning_completes(tmp_path, monkeypa
     assert result["model"]["trained"] is True
     assert result["model"]["bundle"] is True
     assert result["model"]["markets"]["result"]["top_features"]
-    assert set(result["model"]["markets"]) == {"result"}
+    assert {"result", "over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"}.issubset(result["model"]["markets"])
 
 
 def test_mundial_lineup_payload_adds_visual_positions_and_photos():

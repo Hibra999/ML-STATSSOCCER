@@ -34,7 +34,7 @@ const goalMarketLines = [
   { key: "over_under_35", label: "U/O 3.5", over: "over35", under: "under35" },
 ];
 
-const trainingMarketOrder = ["result"];
+const trainingMarketOrder = ["result", "over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"];
 
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
@@ -360,7 +360,7 @@ function renderModelsCatalog(payload) {
   const activeId = (payload && payload.active_model_id) || state.activeModelId || "";
   state.models = models;
   state.activeModelId = activeId;
-  const options = models.map((model) => `<option value="${escapeAttr(model.model_id)}">${escapeHtml(model.model_name || model.model_id)}${model.bundle ? " - 1X2 + U/O" : ""}${model.active ? " - activo" : ""}</option>`).join("");
+  const options = models.map((model) => `<option value="${escapeAttr(model.model_id)}">${escapeHtml(model.model_name || model.model_id)}${model.bundle ? " - 1X2 + U/O ML" : ""}${model.active ? " - activo" : ""}</option>`).join("");
   const selectHtml = `<option value="">Sin modelo seleccionado</option>${options}`;
   ["model-active-select", "upcoming-model-select"].forEach((id) => {
     const select = document.getElementById(id);
@@ -429,7 +429,7 @@ function startNewWorldcupModel() {
   document.getElementById("training-model-state").innerHTML = [
     predictionCard("Modo", "Nuevo modelo"),
     predictionCard("Modelo", "Sin guardar"),
-    predictionCard("Mercados", "1X2 + U/O Poisson"),
+    predictionCard("Mercados", "1X2 + U/O 0.5-3.5"),
     predictionCard("Eval", "pendiente"),
   ].join("");
   document.getElementById("training-metric-cards").innerHTML = loadingHtml("Entrena el nuevo modelo");
@@ -823,7 +823,7 @@ function trainingMarketSections(model, payload) {
   }
   const target = (model && (model.effective_target || model.requested_target)) || (payload && (payload.effective_target || payload.requested_target)) || "result";
   return [{
-    key: target === "over_under_25" ? "over_under_25" : target === "goals_distribution" ? "goals_distribution" : "result",
+    key: target && String(target).startsWith("over_under_") ? target : target === "goals_distribution" ? "goals_distribution" : "result",
     label: marketLabel(target),
     metrics: (model && model.metrics) || (payload && payload.metrics) || {},
     confusion_matrix: (model && model.confusion_matrix) || (payload && payload.confusion_matrix) || {},
@@ -884,11 +884,12 @@ function renderModelState(model, payload) {
 function modelMarketLabel(model) {
   if (!model) return "-";
   if (model.bundle || model.market_mode === "dual_markets" || model.requested_target === "dual_markets") {
-    return "1X2 + U/O Poisson";
+    return "1X2 + U/O 0.5-3.5";
   }
   const target = model.effective_target || model.requested_target || model.training_target || "";
-  if (target === "goals_distribution") return "Distribución goles (legacy)";
-  if (target === "over_under_25") return "U/O 2.5";
+  const line = goalMarketLines.find((item) => item.key === target);
+  if (line) return line.label;
+  if (target === "goals_distribution") return "Distribución goles";
   if (target === "team_strength") return "1X2 team-strength";
   if (target === "result") return "1X2";
   return target || "-";
@@ -903,7 +904,7 @@ function walkForwardModeLabel(mode) {
 function marketLabel(key) {
   const line = goalMarketLines.find((item) => item.key === key);
   if (line) return line.label;
-  if (key === "goals_distribution") return "Distribución goles (legacy)";
+  if (key === "goals_distribution") return "Distribución goles";
   if (key === "team_strength") return "1X2 team-strength";
   return "1X2";
 }
@@ -1218,7 +1219,7 @@ function metricsTableFromMarket(market) {
 
 function confusionTargetLabel(target) {
   if (String(target || "").startsWith("over_under_")) return "2 clases: Under / Over";
-  if (target === "goals_distribution") return "Buckets de goles totales (legacy)";
+  if (target === "goals_distribution") return "Buckets de goles totales";
   return "3 clases: 1 / X / 2";
 }
 
@@ -1346,7 +1347,7 @@ function renderUpcomingPredictions(result) {
       </div>
       <div class="source-strip">
         <span>${marketBadgeText(sources.result, "1X2: Poisson")}</span>
-        <span>${marketBadgeText(sources.over_under_25, "U/O: Poisson")}</span>
+        ${goalMarketLines.map((line) => `<span>${marketBadgeText(sources[line.key], `${line.label}: Poisson`)}</span>`).join("")}
       </div>
       <small>${escapeHtml((prediction.notes || []).join(" - "))}</small>
     </article>`;

@@ -116,7 +116,7 @@ class BlendedWorldCupModel:
             output["home"] /= total
             output["draw"] /= total
             output["away"] /= total
-        totals_ml = ml.get("over_under_25", {})
+        totals_ml = ml.get("over_under_ml") or ml.get("over_under_25", {})
         if totals_ml:
             for line in (0.5, 1.5, 2.5, 3.5):
                 suffix = total_line_suffix(line)
@@ -163,7 +163,7 @@ class BlendedWorldCupModel:
         base = self.base_model.match_probabilities(team1, team2)
         ml = ml or predict_ml_outputs(self.base_model, team1, team2, model_id=self.model_id)
         result_ml = ml.get("result", {}) or {}
-        totals_ml = ml.get("over_under_25", {}) or {}
+        totals_ml = ml.get("over_under_ml") or ml.get("over_under_25", {}) or {}
         lambda1 = float(base.get("lambda1", 1.0))
         lambda2 = float(base.get("lambda2", 1.0))
         total_goals = max(lambda1 + lambda2, 0.4)
@@ -723,6 +723,10 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
         "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
         "Fuente 1X2": (sources.get("result") or {}).get("source", ""),
         "Fuente O/U": (sources.get("over_under_25") or {}).get("source", ""),
+        "Fuente U/O 0.5": (sources.get("over_under_05") or {}).get("source", ""),
+        "Fuente U/O 1.5": (sources.get("over_under_15") or {}).get("source", ""),
+        "Fuente U/O 2.5": (sources.get("over_under_25") or {}).get("source", ""),
+        "Fuente U/O 3.5": (sources.get("over_under_35") or {}).get("source", ""),
     }
 
 
