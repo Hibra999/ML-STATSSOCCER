@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
@@ -313,11 +316,93 @@ def test_international_recent_provider_aliases_features_and_contextual_poisson(t
     assert row["recent15_matches_home"] == pytest.approx(2.0)
     assert "recent15_recent15_matches_home" not in row
     assert context["available"] is True
+    status = international_provider.international_results_status()
+    assert status["exists"] is True
+    assert status["available"] is True
+    assert status["rows"] == 5
     assert context["context_lambda_home"] > 0
     assert set(context["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
     assert len(context["top_scores"]) == 5
     assert len(context["score_matrix"]) == 7
     assert len(context["recent_matches"]["home"]) == 2
+
+
+def test_international_provider_uses_valid_alternate_csv_name(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", tmp_path)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", tmp_path / "all_matches.csv")
+    pd.DataFrame([
+        {"match_date": "2025-02-01", "home": "USA", "away": "Canada", "home_goals": 2, "away_goals": 0, "competition": "Friendly"},
+        {"match_date": "2025-03-01", "home": "Mexico", "away": "Canada", "home_goals": 1, "away_goals": 1, "competition": "Gold Cup"},
+    ]).to_csv(tmp_path / "results.csv", index=False)
+
+    matches = international_provider.load_international_matches(required=True)
+    status = international_provider.international_results_status()
+
+    assert international_provider.INTERNATIONAL_MATCHES_FILE.exists() is False
+    assert matches.shape[0] == 2
+    assert set(matches["home_team"]) == {"United States", "Mexico"}
+    assert status["exists"] is False
+    assert status["available"] is True
+    assert status["rows"] == 2
+    assert status["source_path"].endswith("results.csv")
+    assert "warning" in status
+
+
+def test_download_international_results_copies_valid_alternate_to_all_matches(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    local_root = tmp_path / "local"
+    source_root = tmp_path / "downloaded"
+    source_root.mkdir()
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", local_root)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", local_root / "all_matches.csv")
+    monkeypatch.setitem(
+        sys.modules,
+        "kagglehub",
+        SimpleNamespace(dataset_download=lambda slug: str(source_root)),
+    )
+    pd.DataFrame([
+        {"match_date": "2025-02-01", "home": "USA", "away": "Canada", "home_goals": 2, "away_goals": 0},
+    ]).to_csv(source_root / "results.csv", index=False)
+
+    status = international_provider.download_international_results(force=True)
+    matches = international_provider.load_international_matches(required=True)
+
+    assert international_provider.INTERNATIONAL_MATCHES_FILE.exists() is True
+    assert status["available"] is True
+    assert status["exists"] is True
+    assert status["rows"] == 1
+    assert status["source_file"].endswith("results.csv")
+    assert status["copied_files"] == [str(international_provider.INTERNATIONAL_MATCHES_FILE)]
+    assert matches.iloc[0]["home_team"] == "United States"
+
+
+def test_contextual_poisson_missing_all_matches_returns_base_matrix(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", tmp_path)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", tmp_path / "all_matches.csv")
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "Canada"])
+
+    context = international_provider.contextual_poisson_for_match(
+        "Mexico",
+        "Canada",
+        base_model=model,
+        before_date="2026-06-11",
+        max_goals=4,
+    )
+
+    assert context["available"] is False
+    assert context["matrix_available"] is True
+    assert context["matrix_source"] == "base_model"
+    assert context["reason"] == "all_matches.csv no disponible"
+    assert set(context["probabilities"]) >= {"home", "draw", "away", "over25", "under25"}
+    assert len(context["top_scores"]) == 5
+    assert len(context["score_matrix"]) == 5
+    assert len(context["heatmap"]["cells"]) == 25
+    assert context["recent_matches"] == {"home": [], "away": []}
 
 
 def test_match_feature_row_includes_market_dc_score_grid_shrinkage_history_h2h_and_context():

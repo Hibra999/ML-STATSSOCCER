@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from typing import Dict, Iterable, Tuple
+from functools import lru_cache
+from typing import Any, Dict, Iterable, Tuple
 
 import numpy as np
 import pandas as pd
@@ -192,45 +193,24 @@ class WorldCupModel:
     def match_probabilities(self, team1: str, team2: str, max_goals: int | None = None) -> Dict[str, float]:
         max_goals = int(max_goals if max_goals is not None else self.max_goals)
         lambda1, lambda2 = self.expected_goals(team1, team2)
-        probs1 = [_poisson_pmf(goals, lambda1) for goals in range(max_goals + 1)]
-        probs2 = [_poisson_pmf(goals, lambda2) for goals in range(max_goals + 1)]
-        total = 0.0
-        home = 0.0
-        draw = 0.0
-        away = 0.0
-        totals = {line: 0.0 for line in TOTAL_GOAL_LINES}
-        modal_score = (0, 0)
-        modal_prob = -1.0
-        for goals1, prob1 in enumerate(probs1):
-            for goals2, prob2 in enumerate(probs2):
-                prob = prob1 * prob2
-                total += prob
-                if goals1 > goals2:
-                    home += prob
-                elif goals1 == goals2:
-                    draw += prob
-                else:
-                    away += prob
-                total_goals = goals1 + goals2
-                for line in totals:
-                    if total_goals > line:
-                        totals[line] += prob
-                if prob > modal_prob:
-                    modal_prob = prob
-                    modal_score = (goals1, goals2)
-        total = max(total, 1e-9)
+        max_goals = _normalized_max_goals(max_goals)
+        grid = poisson_score_grid(lambda1=lambda1, lambda2=lambda2, max_goals=max_goals)
+        masks = _score_grid_masks(max_goals)
+        modal_index = int(np.argmax(grid))
+        modal_score = np.unravel_index(modal_index, grid.shape)
         output = {
             "lambda1": lambda1,
             "lambda2": lambda2,
-            "home": home / total,
-            "draw": draw / total,
-            "away": away / total,
-            "modal_g1": modal_score[0],
-            "modal_g2": modal_score[1],
+            "home": float(grid[masks["home"]].sum()),
+            "draw": float(grid[masks["draw"]].sum()),
+            "away": float(grid[masks["away"]].sum()),
+            "modal_g1": int(modal_score[0]),
+            "modal_g2": int(modal_score[1]),
         }
-        for line, over_prob in totals.items():
+        for line in TOTAL_GOAL_LINES:
+            over_prob = float(grid[masks["over"][line]].sum())
             suffix = total_line_suffix(line)
-            output[f"over{suffix}"] = over_prob / total
+            output[f"over{suffix}"] = over_prob
             output[f"under{suffix}"] = 1.0 - output[f"over{suffix}"]
         return output
 
@@ -253,50 +233,41 @@ class WorldCupModel:
 
 def score_grid_features(lambda1: float, lambda2: float, max_goals: int = 10, score_cap: int = 4) -> Dict[str, float]:
     grid = poisson_score_grid(lambda1=lambda1, lambda2=lambda2, max_goals=max_goals)
+    max_goals = grid.shape[0] - 1
+    masks = _score_grid_masks(max_goals)
     features: Dict[str, float] = {}
     for home_goals in range(score_cap + 1):
         for away_goals in range(score_cap + 1):
-            features[f"prob_score_{home_goals}_{away_goals}"] = float(grid[home_goals, away_goals])
+            value = grid[home_goals, away_goals] if home_goals <= max_goals and away_goals <= max_goals else 0.0
+            features[f"prob_score_{home_goals}_{away_goals}"] = float(value)
 
-    total_distribution: Dict[int, float] = {}
-    home_distribution: Dict[int, float] = {}
-    away_distribution: Dict[int, float] = {}
-    home_win_by_1 = home_win_by_2plus = away_win_by_1 = away_win_by_2plus = 0.0
-    draw = 0.0
-    btts = 0.0
-    for home_goals in range(grid.shape[0]):
-        for away_goals in range(grid.shape[1]):
-            prob = float(grid[home_goals, away_goals])
-            total_goals = home_goals + away_goals
-            margin = home_goals - away_goals
-            total_distribution[total_goals] = total_distribution.get(total_goals, 0.0) + prob
-            home_distribution[home_goals] = home_distribution.get(home_goals, 0.0) + prob
-            away_distribution[away_goals] = away_distribution.get(away_goals, 0.0) + prob
-            if home_goals > 0 and away_goals > 0:
-                btts += prob
-            if margin == 0:
-                draw += prob
-            elif margin == 1:
-                home_win_by_1 += prob
-            elif margin >= 2:
-                home_win_by_2plus += prob
-            elif margin == -1:
-                away_win_by_1 += prob
-            elif margin <= -2:
-                away_win_by_2plus += prob
-
-    total_mean, total_var, total_skew, total_kurt = distribution_moments(total_distribution)
-    home_mean, home_var, home_skew, home_kurt = distribution_moments(home_distribution)
-    away_mean, away_var, away_skew, away_kurt = distribution_moments(away_distribution)
+    goals = masks["goals"]
+    total_goals = masks["total_goals_int"].ravel()
+    flat_grid = grid.ravel()
+    total_distribution = np.bincount(total_goals, weights=flat_grid, minlength=(max_goals * 2) + 1)
+    home_distribution = grid.sum(axis=1)
+    away_distribution = grid.sum(axis=0)
+    total_values = np.arange(total_distribution.shape[0], dtype=float)
+    goal_values = goals.astype(float)
+    total_mean, total_var, total_skew, total_kurt = _distribution_moments_from_arrays(total_values, total_distribution)
+    home_mean, home_var, home_skew, home_kurt = _distribution_moments_from_arrays(goal_values, home_distribution)
+    away_mean, away_var, away_skew, away_kurt = _distribution_moments_from_arrays(goal_values, away_distribution)
+    margins = masks["margin"]
+    btts = float(grid[masks["btts"]].sum())
+    draw = float(grid[masks["draw"]].sum())
+    home_win_by_1 = float(grid[margins == 1].sum())
+    home_win_by_2plus = float(grid[margins >= 2].sum())
+    away_win_by_1 = float(grid[margins == -1].sum())
+    away_win_by_2plus = float(grid[margins <= -2].sum())
     features.update({
         "prob_home_clean_sheet": float(grid[:, 0].sum()),
         "prob_away_clean_sheet": float(grid[0, :].sum()),
         "prob_home_2plus_goals": float(grid[2:, :].sum()),
         "prob_away_2plus_goals": float(grid[:, 2:].sum()),
-        "prob_total_0_1": float(sum(prob for goals, prob in total_distribution.items() if goals <= 1)),
-        "prob_total_2_3": float(sum(prob for goals, prob in total_distribution.items() if 2 <= goals <= 3)),
-        "prob_total_4_5": float(sum(prob for goals, prob in total_distribution.items() if 4 <= goals <= 5)),
-        "prob_total_6plus": float(sum(prob for goals, prob in total_distribution.items() if goals >= 6)),
+        "prob_total_0_1": float(total_distribution[:2].sum()),
+        "prob_total_2_3": float(total_distribution[2:4].sum()),
+        "prob_total_4_5": float(total_distribution[4:6].sum()),
+        "prob_total_6plus": float(total_distribution[6:].sum()),
         "prob_margin_home_1": float(home_win_by_1),
         "prob_margin_home_2plus": float(home_win_by_2plus),
         "prob_margin_draw": float(draw),
@@ -308,7 +279,7 @@ def score_grid_features(lambda1: float, lambda2: float, max_goals: int = 10, sco
         "total_goals_variance": float(total_var),
         "total_goals_skew": float(total_skew),
         "total_goals_kurtosis": float(total_kurt),
-        "total_goals_tail_5plus": float(sum(prob for goals, prob in total_distribution.items() if goals >= 5)),
+        "total_goals_tail_5plus": float(total_distribution[5:].sum()),
         "home_goals_variance": float(home_var),
         "away_goals_variance": float(away_var),
         "home_goals_skew": float(home_skew),
@@ -320,16 +291,16 @@ def score_grid_features(lambda1: float, lambda2: float, max_goals: int = 10, sco
     })
     for line in TOTAL_GOAL_LINES:
         suffix = total_line_suffix(line)
-        over_prob = float(sum(prob for goals, prob in total_distribution.items() if goals > line))
+        over_prob = float(total_distribution[total_values > line].sum())
         features[f"prob_over{suffix}"] = over_prob
         features[f"prob_under{suffix}"] = float(1.0 - over_prob)
     return features
 
 
 def poisson_score_grid(lambda1: float, lambda2: float, max_goals: int = 10) -> np.ndarray:
-    max_goals = int(_clamp(max_goals, 4, 14))
-    probs1 = np.asarray([_poisson_pmf(goals, lambda1) for goals in range(max_goals + 1)], dtype=float)
-    probs2 = np.asarray([_poisson_pmf(goals, lambda2) for goals in range(max_goals + 1)], dtype=float)
+    max_goals = _normalized_max_goals(max_goals)
+    probs1 = _poisson_pmf_vector(lambda1, max_goals)
+    probs2 = _poisson_pmf_vector(lambda2, max_goals)
     grid = np.outer(probs1, probs2)
     total = float(grid.sum())
     if total <= 0.0:
@@ -338,31 +309,14 @@ def poisson_score_grid(lambda1: float, lambda2: float, max_goals: int = 10) -> n
 
 
 def dixon_coles_probabilities(lambda1: float, lambda2: float, rho: float = 0.0, max_goals: int = 10) -> Dict[str, float]:
-    grid = poisson_score_grid(lambda1=lambda1, lambda2=lambda2, max_goals=max_goals)
-    adjusted = grid.copy()
+    adjusted = dixon_coles_score_grid(lambda1=lambda1, lambda2=lambda2, rho=rho, max_goals=max_goals)
+    max_goals = adjusted.shape[0] - 1
+    masks = _score_grid_masks(max_goals)
     rho = float(_clamp(rho, -0.25, 0.25))
-    low_pairs = {
-        (0, 0): 1.0 - lambda1 * lambda2 * rho,
-        (0, 1): 1.0 + lambda1 * rho,
-        (1, 0): 1.0 + lambda2 * rho,
-        (1, 1): 1.0 - rho,
-    }
-    for (home_goals, away_goals), factor in low_pairs.items():
-        adjusted[home_goals, away_goals] *= max(float(factor), 1e-6)
-    total = float(adjusted.sum())
-    adjusted = adjusted / max(total, 1e-9)
-    home = draw = away = over25 = 0.0
-    for home_goals in range(adjusted.shape[0]):
-        for away_goals in range(adjusted.shape[1]):
-            prob = float(adjusted[home_goals, away_goals])
-            if home_goals > away_goals:
-                home += prob
-            elif home_goals == away_goals:
-                draw += prob
-            else:
-                away += prob
-            if home_goals + away_goals >= 3:
-                over25 += prob
+    home = float(adjusted[masks["home"]].sum())
+    draw = float(adjusted[masks["draw"]].sum())
+    away = float(adjusted[masks["away"]].sum())
+    over25 = float(adjusted[masks["total_goals"] >= 3.0].sum())
     return {
         "dc_rho": rho,
         "dc_prob_home_win": float(home),
@@ -385,16 +339,19 @@ def estimate_dixon_coles_rho(history_df: pd.DataFrame, max_goals: int = 10) -> f
         return 0.0
     lambda1 = float(max(working["G1"].mean(), 0.2))
     lambda2 = float(max(working["G2"].mean(), 0.2))
+    max_goals = _normalized_max_goals(max_goals)
+    observed_home = working["G1"].to_numpy(dtype=float)
+    observed_away = working["G2"].to_numpy(dtype=float)
+    observed_home = np.clip(np.nan_to_num(observed_home, nan=0.0), 0, max_goals).astype(int)
+    observed_away = np.clip(np.nan_to_num(observed_away, nan=0.0), 0, max_goals).astype(int)
+    observed_counts = np.zeros((max_goals + 1, max_goals + 1), dtype=float)
+    np.add.at(observed_counts, (observed_home, observed_away), 1.0)
     candidates = np.linspace(-0.2, 0.2, 41)
     best_rho = 0.0
     best_ll = -float("inf")
     for rho in candidates:
         grid = dixon_coles_score_grid(lambda1, lambda2, float(rho), max_goals=max_goals)
-        log_likelihood = 0.0
-        for _, row in working.iterrows():
-            g1 = int(min(max(row["G1"], 0), max_goals))
-            g2 = int(min(max(row["G2"], 0), max_goals))
-            log_likelihood += math.log(max(float(grid[g1, g2]), 1e-12))
+        log_likelihood = float(np.sum(observed_counts * np.log(np.maximum(grid, 1e-12))))
         if log_likelihood > best_ll:
             best_ll = log_likelihood
             best_rho = float(rho)
@@ -404,14 +361,73 @@ def estimate_dixon_coles_rho(history_df: pd.DataFrame, max_goals: int = 10) -> f
 def dixon_coles_score_grid(lambda1: float, lambda2: float, rho: float = 0.0, max_goals: int = 10) -> np.ndarray:
     grid = poisson_score_grid(lambda1=lambda1, lambda2=lambda2, max_goals=max_goals)
     adjusted = grid.copy()
-    for (home_goals, away_goals), factor in {
-        (0, 0): 1.0 - lambda1 * lambda2 * rho,
-        (0, 1): 1.0 + lambda1 * rho,
-        (1, 0): 1.0 + lambda2 * rho,
-        (1, 1): 1.0 - rho,
-    }.items():
-        adjusted[home_goals, away_goals] *= max(float(factor), 1e-6)
+    rho = float(_clamp(rho, -0.25, 0.25))
+    adjusted[:2, :2] *= np.maximum(np.asarray([
+        [1.0 - lambda1 * lambda2 * rho, 1.0 + lambda1 * rho],
+        [1.0 + lambda2 * rho, 1.0 - rho],
+    ], dtype=float), 1e-6)
     return adjusted / max(float(adjusted.sum()), 1e-9)
+
+
+def _normalized_max_goals(max_goals: int) -> int:
+    return int(_clamp(max_goals, 4, 14))
+
+
+@lru_cache(maxsize=32)
+def _poisson_goal_cache(max_goals: int) -> Tuple[np.ndarray, np.ndarray]:
+    max_goals = _normalized_max_goals(max_goals)
+    goals = np.arange(max_goals + 1, dtype=float)
+    factorials = np.asarray([math.factorial(int(goal)) for goal in goals], dtype=float)
+    return goals, factorials
+
+
+def _poisson_pmf_vector(rate: float, max_goals: int) -> np.ndarray:
+    goals, factorials = _poisson_goal_cache(max_goals)
+    rate = float(rate)
+    if not np.isfinite(rate) or rate < 0.0:
+        rate = 0.0
+    if rate <= 0.0:
+        output = np.zeros_like(goals, dtype=float)
+        output[0] = 1.0
+        return output
+    return np.exp(-rate) * np.power(rate, goals) / factorials
+
+
+@lru_cache(maxsize=32)
+def _score_grid_masks(max_goals: int) -> Dict[str, Any]:
+    max_goals = _normalized_max_goals(max_goals)
+    goals = np.arange(max_goals + 1, dtype=int)
+    home_goals, away_goals = np.meshgrid(goals, goals, indexing="ij")
+    total_goals = home_goals + away_goals
+    margin = home_goals - away_goals
+    return {
+        "goals": goals,
+        "home_goals": home_goals,
+        "away_goals": away_goals,
+        "total_goals": total_goals.astype(float),
+        "total_goals_int": total_goals,
+        "margin": margin,
+        "home": margin > 0,
+        "draw": margin == 0,
+        "away": margin < 0,
+        "btts": (home_goals > 0) & (away_goals > 0),
+        "over": {line: total_goals > line for line in TOTAL_GOAL_LINES},
+    }
+
+
+def _distribution_moments_from_arrays(values: np.ndarray, probabilities: np.ndarray) -> Tuple[float, float, float, float]:
+    probs = np.asarray(probabilities, dtype=float)
+    values = np.asarray(values, dtype=float)
+    total = max(float(probs.sum()), 1e-12)
+    mean = float(np.sum(values * probs) / total)
+    centered = values - mean
+    variance = float(np.sum((centered ** 2) * probs) / total)
+    if variance <= 1e-12:
+        return mean, 0.0, 0.0, 0.0
+    std = math.sqrt(variance)
+    skew = float(np.sum((centered ** 3) * probs) / total / (std ** 3))
+    kurtosis = float(np.sum((centered ** 4) * probs) / total / (variance ** 2))
+    return mean, variance, skew, kurtosis
 
 
 def distribution_moments(distribution: Dict[int, float]) -> Tuple[float, float, float, float]:

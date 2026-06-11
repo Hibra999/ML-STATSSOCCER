@@ -258,7 +258,9 @@ def normalize_market_frame(df: pd.DataFrame) -> pd.DataFrame:
         "home_xg", "away_xg", "home_shots", "away_shots", "home_shots_on_target", "away_shots_on_target",
     ]
     if df.empty:
-        return pd.DataFrame(columns=columns)
+        output = pd.DataFrame(columns=columns)
+        output.attrs["worldcup_market_normalized"] = True
+        return output
     working = df.copy()
     for column in columns:
         if column not in working.columns:
@@ -279,7 +281,9 @@ def normalize_market_frame(df: pd.DataFrame) -> pd.DataFrame:
     working["_priority"] = working["market_source"].map(market_source_priority)
     working["_date_sort"] = working["Date"].fillna(pd.Timestamp("1900-01-01"))
     working = working.sort_values(["Home", "Away", "_date_sort", "_priority"], kind="stable").drop(columns=["_priority", "_date_sort"])
-    return working.reset_index(drop=True)
+    output = working.reset_index(drop=True)
+    output.attrs["worldcup_market_normalized"] = True
+    return output
 
 
 def market_for_match(
@@ -291,7 +295,7 @@ def market_for_match(
 ) -> Dict[str, Any]:
     if market_rows is None or market_rows.empty:
         return {}
-    working = normalize_market_frame(market_rows)
+    working = market_rows.copy() if market_rows.attrs.get("worldcup_market_normalized") else normalize_market_frame(market_rows)
     home_key = normalize_team_key(home)
     away_key = normalize_team_key(away)
     scoped = working[
@@ -486,7 +490,7 @@ def qualifier_feature_table(
 ) -> pd.DataFrame:
     if qualifier_rows is None or qualifier_rows.empty:
         return pd.DataFrame(columns=["Team"])
-    working = normalize_market_frame(qualifier_rows)
+    working = qualifier_rows.copy() if qualifier_rows.attrs.get("worldcup_market_normalized") else normalize_market_frame(qualifier_rows)
     working = working[working["is_qualifier"]].copy()
     working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
     reference_ts = pd.to_datetime(reference_date, errors="coerce")

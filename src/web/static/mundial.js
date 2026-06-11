@@ -712,12 +712,17 @@ async function loadTrainingStatus() {
 
 async function downloadTrainingDataset() {
   clearAlert();
-  document.getElementById("training-status").textContent = "Descargando Kaggle...";
+  document.getElementById("training-status").textContent = "Descargando Kaggle + All matches...";
   try {
     const result = await api("/api/mundial/training/download-kaggle", jsonOptions({ force: false }));
-    state.training = result;
-    if (!state.trainingOptions) await loadTrainingStatus();
-    renderTrainingStatus(result);
+    const refreshed = await api("/api/mundial/training/status");
+    state.training = {
+      ...refreshed,
+      international_recent: result.international_recent || refreshed.international_recent,
+      download_warnings: trainingStatusWarnings(result),
+    };
+    state.trainingOptions = refreshed.options || state.trainingOptions;
+    renderTrainingStatus(state.training);
   } catch (error) {
     showError(error.message);
     await loadTrainingStatus();
@@ -784,7 +789,7 @@ function renderTrainingStatus(payload) {
   renderWalkForwardNotice(payload.walk_forward_refresh || {});
   renderModelState(model, payload);
   renderTable("training-preview", payload.preview);
-  renderTrainingWarnings([...(payload.prepared_warnings || []), ...(model.warnings || [])]);
+  renderTrainingWarnings(trainingStatusWarnings(payload));
   renderTrainingVisuals(model, payload);
   renderTrainingTables(model, payload);
 }
@@ -841,6 +846,7 @@ function datasetSummaryHtml(payload) {
   const walkForward = payload.walk_forward || {};
   const refresh = payload.walk_forward_refresh || {};
   const international = payload.international_recent || {};
+  const internationalReady = Boolean(international.available);
   return [
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
     datasetCard("ETL", etlStatusShort(payload), payload.prepared_label_source || "preparar artifact"),
@@ -848,10 +854,37 @@ function datasetSummaryHtml(payload) {
     datasetCard("Evaluacion", evalValue, evalStrategyLabel(payload.eval_strategy)),
     datasetCard("Predicción 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
-    datasetCard("All matches", international.available ? international.rows || 0 : "Opcional", international.available ? "ultimos 15 activos" : "recent15 en cero"),
+    datasetCard("All matches", internationalReady ? international.rows || 0 : "faltante", internationalStatusDetail(international)),
     datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} base / ${refresh.ready_with_players || 0} con jugadores`),
     datasetCard("Target", targetDisplayLabel(payload.target_column || "-"), "label entrenable"),
   ].join("");
+}
+
+function internationalStatusDetail(international) {
+  const status = international || {};
+  if (status.available) {
+    const source = status.source_path && status.source_path !== status.file_path ? ` · ${status.source_path}` : "";
+    return `ultimos 15 activos${source}`;
+  }
+  const reason = status.reason || "all_matches.csv no disponible";
+  const path = status.file_path || "storage/worldcup/international/all_matches.csv";
+  return `${reason} · ${path}`;
+}
+
+function trainingStatusWarnings(payload) {
+  const model = (payload && payload.model) || {};
+  const international = (payload && payload.international_recent) || {};
+  const warnings = [
+    ...((payload && payload.prepared_warnings) || []),
+    ...((payload && payload.warnings) || []),
+    ...((payload && payload.market_warnings) || []),
+    ...((payload && payload.api_football_warnings) || []),
+    ...(model.warnings || []),
+    ...((payload && payload.download_warnings) || []),
+    international.warning || "",
+    !international.available && international.reason ? `All matches: ${international.reason}` : "",
+  ].filter(Boolean).map((item) => String(item));
+  return [...new Set(warnings)];
 }
 
 function targetDisplayLabel(value) {
@@ -1362,18 +1395,22 @@ function renderUpcomingPredictions(result) {
 function contextualPoissonHtml(contextual, fixture) {
   const context = contextual || {};
   const fixtureData = fixture || {};
-  if (!context.available) {
+  const probs = context.probabilities || {};
+  const topScores = context.top_scores || [];
+  const overUnder = context.over_under || {};
+  const hasMatrix = Boolean(context.available || context.matrix_available || topScores.length || ((context.heatmap || {}).cells || []).length);
+  if (!hasMatrix) {
     return `<section class="context-poisson unavailable">
       <header><strong>Poisson ultimos 15</strong><small>${escapeHtml(context.reason || "all_matches.csv no disponible")}</small></header>
     </section>`;
   }
-  const probs = context.probabilities || {};
-  const topScores = context.top_scores || [];
-  const overUnder = context.over_under || {};
+  const title = context.available ? "Poisson ultimos 15" : "Poisson base";
+  const lambdaText = `λ ${context.context_lambda_home ?? "-"} / ${context.context_lambda_away ?? "-"}`;
+  const detail = context.available ? lambdaText : `${context.reason || "recent15 no disponible"} · ${lambdaText}`;
   return `<section class="context-poisson">
     <header>
-      <strong>Poisson ultimos 15</strong>
-      <small>λ ${escapeHtml(context.context_lambda_home ?? "-")} / ${escapeHtml(context.context_lambda_away ?? "-")}</small>
+      <strong>${escapeHtml(title)}</strong>
+      <small>${escapeHtml(detail)}</small>
     </header>
     <div class="context-outcomes">
       <span>1 <b>${escapeHtml(probs.home ?? "-")}%</b></span>
@@ -1389,13 +1426,13 @@ function contextualPoissonHtml(contextual, fixture) {
       ${topScores.map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(score.probability)}%</b></span>`).join("")}
     </div>
     ${scoreHeatmapHtml(context)}
-    <details class="recent15-drawer">
+    ${context.available ? `<details class="recent15-drawer">
       <summary>Ultimos 15 partidos</summary>
       <div class="recent15-columns">
         ${recentMatchesMiniTable((context.recent_matches || {}).home || [], fixtureData.home || "Local")}
         ${recentMatchesMiniTable((context.recent_matches || {}).away || [], fixtureData.away || "Visitante")}
       </div>
-    </details>
+    </details>` : ""}
   </section>`;
 }
 

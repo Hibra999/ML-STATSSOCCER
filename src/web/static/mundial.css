@@ -927,6 +927,7 @@ h3 { font-size: 16px; }
 .dataset-card small {
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 .dataset-card strong {
   color: var(--ink);
@@ -1410,6 +1411,9 @@ h3 { font-size: 16px; }
 }
 .context-poisson header small {
   color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 .context-outcomes,
 .context-totals,

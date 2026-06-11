@@ -733,7 +733,7 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
         "Under 3.5 %": probs.get("under35", ""),
         "Prediccion": result.get("prediction", ""),
         "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
-        "Poisson 15": "Si" if contextual.get("available") else "No",
+        "Poisson 15": "Si" if contextual.get("available") else "Base" if contextual.get("matrix_available") else "No",
         "Lambda 15 Local": contextual.get("context_lambda_home", ""),
         "Lambda 15 Visita": contextual.get("context_lambda_away", ""),
         "Top score 15": context_top.get("score", ""),

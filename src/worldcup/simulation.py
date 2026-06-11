@@ -24,6 +24,16 @@ ADVANCEMENT_COLUMNS = [
     "Final %",
     "Campeon %",
 ]
+COUNT_TOP2 = 0
+COUNT_BEST_THIRD = 1
+COUNT_GROUP_ADVANCE = 2
+COUNT_ROUND32 = 3
+COUNT_ROUND16 = 4
+COUNT_QUARTER = 5
+COUNT_SEMI = 6
+COUNT_FINAL = 7
+COUNT_CHAMPION = 8
+COUNT_COLUMNS = 9
 
 
 def simulate_worldcup(
@@ -40,70 +50,94 @@ def simulate_worldcup(
     group_matches = group_stage_matches(tournament)
     knockouts = sorted(knockout_matches(tournament), key=lambda match: _knockout_sort_key(match))
     teams = [team for group in groups.values() for team in group]
-    counters = {team: Counter() for team in teams}
+    team_index = {team: index for index, team in enumerate(teams)}
+    counts = np.zeros((len(teams), COUNT_COLUMNS), dtype=np.int32)
+    ratings = np.asarray([model.profile(team).rating for team in teams], dtype=float)
+    group_infos = _group_simulation_infos(groups, team_index)
+    group_lookup = {info["group"]: index for index, info in enumerate(group_infos)}
+    group_specs = _group_match_specs(group_matches, group_lookup, group_infos, team_index, model)
+    group_lambda_home = np.asarray([spec[3] for spec in group_specs], dtype=float)
+    group_lambda_away = np.asarray([spec[4] for spec in group_specs], dtype=float)
+    pair_cache: Dict[Tuple[int, int], Tuple[float, float, float]] = {}
     report_every = max(1, iterations // 100)
     _emit_progress(progress_callback, "simulation", 0, iterations, "Monte Carlo en ejecucion")
 
     for iteration in range(iterations):
-        standings = _initial_standings(groups)
-        for match in group_matches:
-            team1 = str(match["team1"])
-            team2 = str(match["team2"])
-            if team1 not in counters or team2 not in counters:
+        points = [np.zeros(len(info["teams"]), dtype=np.int16) for info in group_infos]
+        goals_for = [np.zeros(len(info["teams"]), dtype=np.int16) for info in group_infos]
+        goals_against = [np.zeros(len(info["teams"]), dtype=np.int16) for info in group_infos]
+        if group_specs:
+            sampled_home = rng.poisson(group_lambda_home)
+            sampled_away = rng.poisson(group_lambda_away)
+            for spec_index, (group_idx, pos1, pos2, _, _) in enumerate(group_specs):
+                goals1 = int(sampled_home[spec_index])
+                goals2 = int(sampled_away[spec_index])
+                goals_for[group_idx][pos1] += goals1
+                goals_against[group_idx][pos1] += goals2
+                goals_for[group_idx][pos2] += goals2
+                goals_against[group_idx][pos2] += goals1
+                if goals1 > goals2:
+                    points[group_idx][pos1] += 3
+                elif goals2 > goals1:
+                    points[group_idx][pos2] += 3
+                else:
+                    points[group_idx][pos1] += 1
+                    points[group_idx][pos2] += 1
+
+        slots: Dict[str, int] = {}
+        third_candidates: List[Tuple[int, int]] = []
+        for group_idx, info in enumerate(group_infos):
+            ranking = _rank_group_arrays(info, points[group_idx], goals_for[group_idx], goals_against[group_idx])
+            if len(ranking) < 3:
                 continue
-            goals1, goals2 = model.sample_score(team1, team2, rng)
-            _apply_group_result(standings[str(match["group"])], team1, team2, goals1, goals2)
+            first_pos = ranking[0]
+            second_pos = ranking[1]
+            third_pos = ranking[2]
+            first_idx = int(info["team_indices"][first_pos])
+            second_idx = int(info["team_indices"][second_pos])
+            slots[f"1{info['letter']}"] = first_idx
+            slots[f"2{info['letter']}"] = second_idx
+            counts[first_idx, COUNT_TOP2] += 1
+            counts[second_idx, COUNT_TOP2] += 1
+            third_candidates.append((group_idx, third_pos))
 
-        ranked_groups = {group: _rank_group(group, table, groups[group]) for group, table in standings.items()}
-        slots: Dict[str, str] = {}
-        third_candidates = []
-        for group, ranking in ranked_groups.items():
-            letter = group_letter(group)
-            first = ranking[0]["team"]
-            second = ranking[1]["team"]
-            third = ranking[2]
-            slots[f"1{letter}"] = first
-            slots[f"2{letter}"] = second
-            counters[first]["top2"] += 1
-            counters[second]["top2"] += 1
-            third_candidates.append((group, third))
-
-        best_thirds = _best_third_teams(third_candidates)
-        third_slots = {group_letter(group): row["team"] for group, row in best_thirds}
+        best_thirds = _best_third_team_indices(third_candidates, group_infos, points, goals_for, goals_against)
+        third_slots = {group_infos[group_idx]["letter"]: int(group_infos[group_idx]["team_indices"][team_pos]) for group_idx, team_pos in best_thirds}
         available_thirds = third_slots.copy()
-        qualifiers = set(slots.values()) | set(third_slots.values())
-        for team in qualifiers:
-            counters[team]["best_third"] += int(team in third_slots.values())
-            counters[team]["group_advance"] += 1
-            counters[team]["round32"] += 1
+        best_third_indices = set(third_slots.values())
+        qualifiers = set(slots.values()) | best_third_indices
+        for team_idx in qualifiers:
+            counts[team_idx, COUNT_BEST_THIRD] += int(team_idx in best_third_indices)
+            counts[team_idx, COUNT_GROUP_ADVANCE] += 1
+            counts[team_idx, COUNT_ROUND32] += 1
 
-        winners: Dict[int, str] = {}
-        losers: Dict[int, str] = {}
+        winners: Dict[int, int] = {}
+        losers: Dict[int, int] = {}
         for match in knockouts:
             round_name = str(match.get("round", ""))
-            team1 = _resolve_slot(str(match.get("team1", "")), slots, winners, losers, available_thirds, model)
-            team2 = _resolve_slot(str(match.get("team2", "")), slots, winners, losers, available_thirds, model)
-            if not team1 or not team2 or team1 == team2:
+            team1_idx = _resolve_slot_index(str(match.get("team1", "")), slots, winners, losers, available_thirds, team_index, ratings)
+            team2_idx = _resolve_slot_index(str(match.get("team2", "")), slots, winners, losers, available_thirds, team_index, ratings)
+            if team1_idx < 0 or team2_idx < 0 or team1_idx == team2_idx:
                 continue
-            winner, loser, _, _ = model.sample_knockout_winner(team1, team2, rng)
+            winner_idx, loser_idx = _sample_knockout_winner_index(team1_idx, team2_idx, teams, model, rng, pair_cache)
             number = int(match.get("num", len(winners) + 73))
-            winners[number] = winner
-            losers[number] = loser
+            winners[number] = winner_idx
+            losers[number] = loser_idx
             if round_name == "Round of 32":
-                counters[winner]["round16"] += 1
+                counts[winner_idx, COUNT_ROUND16] += 1
             elif round_name == "Round of 16":
-                counters[winner]["quarter"] += 1
+                counts[winner_idx, COUNT_QUARTER] += 1
             elif round_name == "Quarter-final":
-                counters[winner]["semi"] += 1
+                counts[winner_idx, COUNT_SEMI] += 1
             elif round_name == "Semi-final":
-                counters[winner]["final"] += 1
+                counts[winner_idx, COUNT_FINAL] += 1
             elif round_name == "Final":
-                counters[winner]["champion"] += 1
+                counts[winner_idx, COUNT_CHAMPION] += 1
         current = iteration + 1
         if current == iterations or current % report_every == 0:
             _emit_progress(progress_callback, "simulation", current, iterations, "Monte Carlo en ejecucion")
 
-    advancement = _advancement_dataframe(groups, model, counters, iterations)
+    advancement = _advancement_dataframe_from_counts(groups, model, counts, team_index, iterations)
     match_probs = match_probabilities_dataframe(group_matches, model)
     _emit_progress(progress_callback, "simulation", iterations, iterations, "Monte Carlo completado")
     return {"advancement": advancement, "matches": match_probs}
@@ -123,6 +157,134 @@ def _emit_progress(callback, stage: str, current: int, total: int, message: str)
         "percent": int(round(current * 100 / total)),
         "message": message,
     })
+
+
+def _group_simulation_infos(groups: Dict[str, List[str]], team_index: Dict[str, int]) -> List[Dict[str, Any]]:
+    infos: List[Dict[str, Any]] = []
+    for group, group_teams in groups.items():
+        indices = np.asarray([team_index[team] for team in group_teams if team in team_index], dtype=int)
+        teams = [team for team in group_teams if team in team_index]
+        infos.append({
+            "group": group,
+            "letter": group_letter(group),
+            "sort_key": group_sort_key(group),
+            "teams": teams,
+            "team_indices": indices,
+            "positions": {int(team_idx): pos for pos, team_idx in enumerate(indices)},
+        })
+    return infos
+
+
+def _group_match_specs(
+        group_matches: List[Dict[str, Any]],
+        group_lookup: Dict[str, int],
+        group_infos: List[Dict[str, Any]],
+        team_index: Dict[str, int],
+        model: WorldCupModel,
+) -> List[Tuple[int, int, int, float, float]]:
+    specs: List[Tuple[int, int, int, float, float]] = []
+    for match in group_matches:
+        group_idx = group_lookup.get(str(match.get("group") or ""))
+        team1 = str(match.get("team1") or "")
+        team2 = str(match.get("team2") or "")
+        team1_idx = team_index.get(team1)
+        team2_idx = team_index.get(team2)
+        if group_idx is None or team1_idx is None or team2_idx is None:
+            continue
+        positions = group_infos[group_idx]["positions"]
+        if team1_idx not in positions or team2_idx not in positions:
+            continue
+        lambda1, lambda2 = model.expected_goals(team1, team2)
+        specs.append((int(group_idx), int(positions[team1_idx]), int(positions[team2_idx]), float(lambda1), float(lambda2)))
+    return specs
+
+
+def _rank_group_arrays(info: Dict[str, Any], points: np.ndarray, goals_for: np.ndarray, goals_against: np.ndarray) -> List[int]:
+    goal_diff = goals_for - goals_against
+    teams = info["teams"]
+    return sorted(
+        range(len(teams)),
+        key=lambda pos: (-int(points[pos]), -int(goal_diff[pos]), -int(goals_for[pos]), int(pos), teams[pos]),
+    )
+
+
+def _best_third_team_indices(
+        third_candidates: List[Tuple[int, int]],
+        group_infos: List[Dict[str, Any]],
+        points: List[np.ndarray],
+        goals_for: List[np.ndarray],
+        goals_against: List[np.ndarray],
+) -> List[Tuple[int, int]]:
+    return sorted(
+        third_candidates,
+        key=lambda item: (
+            -int(points[item[0]][item[1]]),
+            -int((goals_for[item[0]] - goals_against[item[0]])[item[1]]),
+            -int(goals_for[item[0]][item[1]]),
+            group_infos[item[0]]["sort_key"],
+        ),
+    )[:8]
+
+
+def _resolve_slot_index(
+        token: str,
+        slots: Dict[str, int],
+        winners: Dict[int, int],
+        losers: Dict[int, int],
+        third_slots: Dict[str, int],
+        team_index: Dict[str, int],
+        ratings: np.ndarray,
+) -> int:
+    token = token.strip()
+    if token in slots:
+        return int(slots[token])
+    if token.startswith("W") and token[1:].isdigit():
+        return int(winners.get(int(token[1:]), -1))
+    if token.startswith("L") and token[1:].isdigit():
+        return int(losers.get(int(token[1:]), -1))
+    if token.startswith("3"):
+        allowed = [part for part in token[1:].split("/") if part]
+        for letter in allowed:
+            if letter in third_slots:
+                return int(third_slots.pop(letter))
+        if third_slots:
+            best_letter = max(third_slots, key=lambda letter: ratings[int(third_slots[letter])])
+            return int(third_slots.pop(best_letter))
+    if token and not any(char.isdigit() for char in token):
+        return int(team_index.get(token, -1))
+    return -1
+
+
+def _sample_knockout_winner_index(
+        team1_idx: int,
+        team2_idx: int,
+        teams: List[str],
+        model: WorldCupModel,
+        rng: np.random.Generator,
+        pair_cache: Dict[Tuple[int, int], Tuple[float, float, float]],
+) -> Tuple[int, int]:
+    cache_key = (int(team1_idx), int(team2_idx))
+    if cache_key not in pair_cache:
+        team1 = teams[team1_idx]
+        team2 = teams[team2_idx]
+        probabilities = model.match_probabilities(team1, team2)
+        lambda1 = float(probabilities.get("lambda1", 1.0))
+        lambda2 = float(probabilities.get("lambda2", 1.0))
+        win_share = float(probabilities.get("home", 0.0)) / max(
+            float(probabilities.get("home", 0.0)) + float(probabilities.get("away", 0.0)),
+            1e-9,
+        )
+        pair_cache[cache_key] = (lambda1, lambda2, win_share)
+    lambda1, lambda2, win_share = pair_cache[cache_key]
+    goals1 = int(rng.poisson(lambda1))
+    goals2 = int(rng.poisson(lambda2))
+    if goals1 > goals2:
+        return team1_idx, team2_idx
+    if goals2 > goals1:
+        return team2_idx, team1_idx
+    if rng.random() <= win_share:
+        return team1_idx, team2_idx
+    return team2_idx, team1_idx
 
 
 def match_probabilities_dataframe(matches: List[Dict[str, Any]], model: WorldCupModel) -> pd.DataFrame:
@@ -224,6 +386,36 @@ def _resolve_slot(
             best_letter = max(third_slots, key=lambda letter: model.profile(third_slots[letter]).rating)
             return third_slots.pop(best_letter)
     return token if token and not any(char.isdigit() for char in token) else ""
+
+
+def _advancement_dataframe_from_counts(
+        groups: Dict[str, List[str]],
+        model: WorldCupModel,
+        counts: np.ndarray,
+        team_index: Dict[str, int],
+        iterations: int,
+) -> pd.DataFrame:
+    rows = []
+    for group, teams in groups.items():
+        for team in teams:
+            idx = team_index[team]
+            profile = model.profile(team)
+            team_counts = counts[idx]
+            rows.append({
+                "Grupo": group,
+                "Equipo": team,
+                "Rating": round(profile.rating, 1),
+                "Top 2 %": _pct(team_counts[COUNT_TOP2] / iterations),
+                "Mejor tercero %": _pct(team_counts[COUNT_BEST_THIRD] / iterations),
+                "Pasa grupo %": _pct(team_counts[COUNT_GROUP_ADVANCE] / iterations),
+                "R32 %": _pct(team_counts[COUNT_ROUND32] / iterations),
+                "Octavos %": _pct(team_counts[COUNT_ROUND16] / iterations),
+                "Cuartos %": _pct(team_counts[COUNT_QUARTER] / iterations),
+                "Semis %": _pct(team_counts[COUNT_SEMI] / iterations),
+                "Final %": _pct(team_counts[COUNT_FINAL] / iterations),
+                "Campeon %": _pct(team_counts[COUNT_CHAMPION] / iterations),
+            })
+    return pd.DataFrame(rows, columns=ADVANCEMENT_COLUMNS)
 
 
 def _advancement_dataframe(groups: Dict[str, List[str]], model: WorldCupModel, counters: Dict[str, Counter], iterations: int) -> pd.DataFrame:

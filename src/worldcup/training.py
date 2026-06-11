@@ -30,6 +30,8 @@ from src.worldcup.market_provider import (
     load_market_data,
     market_feature_row as build_market_feature_row,
     market_for_match,
+    market_source_priority,
+    normalize_market_frame,
     qualifier_feature_table,
 )
 from src.worldcup.model import (
@@ -1523,6 +1525,8 @@ def build_training_matrix(
         market_rows = pd.DataFrame()
     if qualifier_rows is None:
         qualifier_rows = pd.DataFrame()
+    elif not qualifier_rows.empty and not qualifier_rows.attrs.get("worldcup_market_normalized"):
+        qualifier_rows = normalize_market_frame(qualifier_rows)
     api_football = api_football or {}
     if international_matches is None:
         international_matches = load_international_matches(required=False)
@@ -1532,11 +1536,16 @@ def build_training_matrix(
     frozen_years = frozen_years or set()
     if static_model is None and history_df is None:
         static_model = WorldCupModel.from_history(pd.DataFrame(), teams=working_teams)
+    market_lookup = build_market_lookup(market_rows)
+    team_features_cache: Dict[Optional[int], pd.DataFrame] = {}
+    static_feature_cache: Dict[Tuple[str, str], Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     snapshot_cache: Dict[Tuple[str, ...], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     for _, row in working.iterrows():
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
         reference_date = reference_date_for_row(row_date, row_year)
+        if row_year not in team_features_cache:
+            team_features_cache[row_year] = team_features_asof(team_features, row_year)
         if history_df is not None:
             frozen = row_year in frozen_years
             cache_key = ("year", str(int(row_year))) if row_year else ("date", reference_date)
@@ -1574,29 +1583,35 @@ def build_training_matrix(
             row_model = static_model
             row_history_features = history_team_features
             row_matchup_features = matchup_features
-            row_qualifier_features = qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=working_teams)
-            row_api_football_features = api_football_feature_table(
-                api_football.get("team_stats", pd.DataFrame()),
-                reference_date=reference_date,
-                teams=working_teams,
-                lineups=api_football.get("lineups", pd.DataFrame()),
-                injuries=api_football.get("injuries", pd.DataFrame()),
-            )
-            row_recent15_features = recent15_feature_table(
-                international_matches,
-                teams=working_teams,
-                before_date=reference_date,
-                base_model=row_model,
-            )
+            static_cache_key = (reference_date, str(int(row_year)) if row_year else "")
+            if static_cache_key not in static_feature_cache:
+                static_feature_cache[static_cache_key] = (
+                    qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=working_teams),
+                    api_football_feature_table(
+                        api_football.get("team_stats", pd.DataFrame()),
+                        reference_date=reference_date,
+                        teams=working_teams,
+                        lineups=api_football.get("lineups", pd.DataFrame()),
+                        injuries=api_football.get("injuries", pd.DataFrame()),
+                    ),
+                    recent15_feature_table(
+                        international_matches,
+                        teams=working_teams,
+                        before_date=reference_date,
+                        base_model=row_model,
+                    ),
+                )
+            row_qualifier_features, row_api_football_features, row_recent15_features = static_feature_cache[static_cache_key]
         records.append(
             match_feature_row(
                 row_model,
-                team_features_asof(team_features, row_year),
+                team_features_cache[row_year],
                 row["Home"],
                 row["Away"],
                 history_team_features=row_history_features,
                 matchup_features=row_matchup_features,
                 market_rows=market_rows,
+                market_lookup=market_lookup,
                 qualifier_features=row_qualifier_features,
                 api_football_features=row_api_football_features,
                 recent15_features=row_recent15_features,
@@ -1618,8 +1633,65 @@ def build_training_matrix(
     if is_over_under_target(target):
         return x, working[over_under_column_for_target(target)].astype(int), feature_columns
     if target == GOALS_DISTRIBUTION_TARGET:
-        return x, working.apply(total_goals_bucket_from_row, axis=1).astype(int), feature_columns
+        return x, total_goals_buckets(working).astype(int), feature_columns
     return x, working["Label"].astype(str), feature_columns
+
+
+def total_goals_buckets(rows: pd.DataFrame, cap: int = TOTAL_GOALS_CAP) -> pd.Series:
+    home_goals = pd.to_numeric(rows.get("HG", pd.Series(index=rows.index, dtype=float)), errors="coerce")
+    away_goals = pd.to_numeric(rows.get("AG", pd.Series(index=rows.index, dtype=float)), errors="coerce")
+    totals = home_goals + away_goals
+    buckets = pd.Series(0, index=rows.index, dtype=int)
+    valid = totals.notna()
+    if valid.any():
+        buckets.loc[valid] = totals.loc[valid].astype(int).clip(lower=0, upper=int(cap))
+    return buckets
+
+
+def build_market_lookup(market_rows: Optional[pd.DataFrame]) -> Dict[Tuple[str, str], pd.DataFrame]:
+    if market_rows is None or market_rows.empty:
+        return {}
+    working = normalize_market_frame(market_rows)
+    if working.empty:
+        return {}
+    working = working.copy()
+    working["_home_key"] = working["Home"].map(normalize_team_key)
+    working["_away_key"] = working["Away"].map(normalize_team_key)
+    working["_date_key"] = pd.to_datetime(working["Date"], errors="coerce").dt.date
+    working["_year_key"] = pd.to_numeric(working["Year"], errors="coerce")
+    working["_priority"] = working["market_source"].map(market_source_priority)
+    return {
+        (str(home_key), str(away_key)): frame.copy()
+        for (home_key, away_key), frame in working.groupby(["_home_key", "_away_key"], sort=False)
+    }
+
+
+def market_for_match_lookup(
+        lookup: Dict[Tuple[str, str], pd.DataFrame],
+        home: str,
+        away: str,
+        match_date: Optional[Any] = None,
+        year: Optional[int] = None,
+) -> Dict[str, Any]:
+    if not lookup:
+        return {}
+    scoped = lookup.get((normalize_team_key(home), normalize_team_key(away)))
+    if scoped is None or scoped.empty:
+        return {}
+    selected = scoped
+    date_ts = pd.to_datetime(match_date, errors="coerce") if match_date is not None else pd.NaT
+    if pd.notna(date_ts):
+        same_day = selected[selected["_date_key"] == pd.Timestamp(date_ts).date()]
+        if same_day.empty:
+            return {}
+        selected = same_day
+    elif year is not None:
+        same_year = selected[selected["_year_key"] == int(year)]
+        if not same_year.empty:
+            selected = same_year
+    if selected.empty:
+        return {}
+    return selected.sort_values("_priority", ascending=False, kind="stable").iloc[0].to_dict()
 
 
 def match_feature_row(
@@ -1638,6 +1710,7 @@ def match_feature_row(
         match_date: Optional[Any] = None,
         match_year: Optional[int] = None,
         fixture_context: Optional[Dict[str, Any]] = None,
+        market_lookup: Optional[Dict[Tuple[str, str], pd.DataFrame]] = None,
         dc_rho: float = 0.0,
 ) -> Dict[str, float]:
     p_home = base_model.profile(home)
@@ -1682,12 +1755,16 @@ def match_feature_row(
     row.update(score_grid_features(lambda_home, lambda_away, max_goals=base_model.max_goals, score_cap=4))
     row.update(dixon_coles_probabilities(lambda_home, lambda_away, rho=dc_rho, max_goals=base_model.max_goals))
     row.update(model_calibration_features(poisson))
-    market_match = market_for_match(
-        market_rows if market_rows is not None else pd.DataFrame(),
-        home,
-        away,
-        match_date=match_date,
-        year=match_year,
+    market_match = (
+        market_for_match_lookup(market_lookup, home, away, match_date=match_date, year=match_year)
+        if market_lookup is not None
+        else market_for_match(
+            market_rows if market_rows is not None else pd.DataFrame(),
+            home,
+            away,
+            match_date=match_date,
+            year=match_year,
+        )
     )
     row.update(build_market_feature_row(
         market_match,
@@ -3835,6 +3912,13 @@ def etl_steps(
     api_stat_rows = int(prepared.get("api_football_stat_rows", normalized.get("api_football_stat_rows", 0)) or 0)
     api_market_rows = int(prepared.get("api_football_market_rows", normalized.get("api_football_market_rows", 0)) or 0)
     international_status = prepared.get("international_recent") or normalized.get("international_recent") or international_results_status()
+    international_detail = (
+        f"all_matches.csv disponible para Poisson ultimos 15 y features opcionales ({international_status.get('rows', 0)} filas)."
+        if international_status.get("available")
+        else f"All matches faltante: {international_status.get('reason') or 'sin CSV valido'} Ruta esperada: {international_status.get('file_path') or 'storage/worldcup/international/all_matches.csv'}."
+    )
+    if international_status.get("warning"):
+        international_detail = f"{international_detail} {international_status.get('warning')}"
     return [
         {
             "name": "Descarga Kaggle",
@@ -3888,7 +3972,7 @@ def etl_steps(
             "name": "All matches recientes",
             "status": "ok" if international_status.get("available") else "info",
             "count": int(international_status.get("rows", 0) or 0),
-            "detail": "all_matches.csv disponible para Poisson ultimos 15 y features opcionales." if international_status.get("available") else "Auxiliar opcional no descargado; features recent15 quedan en 0.",
+            "detail": international_detail,
         },
         {
             "name": "Walk-forward XI",

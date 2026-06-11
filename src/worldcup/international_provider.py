@@ -4,7 +4,7 @@ import math
 import shutil
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -60,11 +60,26 @@ RECENT15_NUMERIC_COLUMNS = [
     "recent15_over25_rate",
     "recent15_btts_rate",
 ]
+INTERNATIONAL_REQUIRED_COLUMNS = ("date", "home_team", "away_team", "home_score", "away_score")
+INTERNATIONAL_COLUMN_ALIASES = {
+    "date": ("date", "match_date", "game_date", "fixture_date"),
+    "home_team": ("home_team", "home", "home_name", "home_country", "home_team_name", "team1", "team_1", "team_a", "local"),
+    "away_team": ("away_team", "away", "away_name", "away_country", "away_team_name", "team2", "team_2", "team_b", "visitor"),
+    "home_score": ("home_score", "home_goals", "home_goal", "home_ft", "home_score_ft", "score_home", "goals_home", "hg", "g1"),
+    "away_score": ("away_score", "away_goals", "away_goal", "away_ft", "away_score_ft", "score_away", "goals_away", "ag", "g2"),
+    "tournament": ("tournament", "competition", "competition_name", "tournament_name", "event"),
+    "country": ("country", "host_country", "venue_country"),
+    "neutral": ("neutral", "is_neutral", "neutral_site", "neutral_venue"),
+}
 
 
 def download_international_results(force: bool = False) -> Dict[str, Any]:
+    canonical_valid = False
     if INTERNATIONAL_MATCHES_FILE.exists() and not force:
-        return international_results_status()
+        status = international_results_status()
+        canonical_valid = bool(status.get("available") and Path(str(status.get("source_path") or "")) == INTERNATIONAL_MATCHES_FILE)
+        if canonical_valid:
+            return status
     try:
         import kagglehub
     except ImportError as exc:
@@ -75,21 +90,35 @@ def download_international_results(force: bool = False) -> Dict[str, Any]:
         raise RuntimeError(f"Kaggle no devolvio una ruta valida para {INTERNATIONAL_DATASET_SLUG}.")
     INTERNATIONAL_ROOT.mkdir(parents=True, exist_ok=True)
     copied: List[str] = []
-    candidates = sorted(source_path.rglob("all_matches.csv"))
-    if not candidates:
-        candidates = sorted(path for path in source_path.rglob("*.csv") if path.is_file())
+    invalid_files: List[str] = []
+    candidates = discover_international_csv_files(source_path)
+    selected_source = ""
     for path in candidates:
-        if not path.is_file():
+        matches, reason = read_normalized_international_csv(path)
+        if matches.empty:
+            invalid_files.append(f"{path}: {reason}")
             continue
-        target = INTERNATIONAL_ROOT / ("all_matches.csv" if path.name == "all_matches.csv" else path.name)
-        if force or not target.exists():
+        target = INTERNATIONAL_MATCHES_FILE
+        if path.absolute() != target.absolute() and (force or not target.exists() or not canonical_valid):
             shutil.copy2(path, target)
+        elif path.absolute() == target.absolute():
+            pass
+        elif not force and target.exists():
+            pass
         copied.append(str(target))
-        if target.name == "all_matches.csv":
-            break
+        selected_source = str(path)
+        break
     status = international_results_status()
     status["downloaded_path"] = str(source_path)
     status["copied_files"] = copied
+    status["source_file"] = selected_source
+    status["scanned_files"] = len(candidates)
+    if invalid_files:
+        status["invalid_files"] = invalid_files[:8]
+    if selected_source and Path(selected_source).name != "all_matches.csv":
+        status["warning"] = f"Kaggle no entrego all_matches.csv como nombre principal; se uso {Path(selected_source).name} y se guardo como all_matches.csv."
+    elif not selected_source:
+        status["warning"] = f"No se encontro un CSV internacional valido en {source_path}."
     return status
 
 
@@ -99,47 +128,104 @@ def international_results_status() -> Dict[str, Any]:
     if not matches.empty:
         teams.update(matches["home_team"].dropna().astype(str).tolist())
         teams.update(matches["away_team"].dropna().astype(str).tolist())
-    return {
+    source_path = str(matches.attrs.get("source_path") or "")
+    reason = str(matches.attrs.get("reason") or "")
+    warning = str(matches.attrs.get("warning") or "")
+    expected_exists = INTERNATIONAL_MATCHES_FILE.exists()
+    available = bool(not matches.empty)
+    status = {
         "dataset_slug": INTERNATIONAL_DATASET_SLUG,
         "local_path": str(INTERNATIONAL_ROOT),
         "file_path": str(INTERNATIONAL_MATCHES_FILE),
-        "available": bool(INTERNATIONAL_MATCHES_FILE.exists() and not matches.empty),
+        "source_path": source_path,
+        "exists": bool(expected_exists),
+        "available": available,
         "rows": int(matches.shape[0]),
         "teams": int(len(teams)),
     }
+    if not available:
+        status["reason"] = reason or f"No existe {INTERNATIONAL_MATCHES_FILE}."
+    if warning:
+        status["warning"] = warning
+    elif available and source_path and Path(source_path) != INTERNATIONAL_MATCHES_FILE:
+        status["warning"] = f"Usando {source_path}; se recomienda descargar/guardar el artifact canonico en {INTERNATIONAL_MATCHES_FILE}."
+    return status
 
 
 def load_international_matches(required: bool = False) -> pd.DataFrame:
-    if not INTERNATIONAL_MATCHES_FILE.exists():
-        if required:
-            raise RuntimeError(f"No existe {INTERNATIONAL_MATCHES_FILE}. Descarga primero {INTERNATIONAL_DATASET_SLUG}.")
-        return empty_matches_frame()
+    candidates = local_international_candidate_files()
+    reasons: List[str] = []
+    for path in candidates:
+        matches, reason = read_normalized_international_csv(path)
+        if not matches.empty:
+            if Path(path) != INTERNATIONAL_MATCHES_FILE:
+                matches.attrs["warning"] = f"Usando {path}; falta el artifact canonico {INTERNATIONAL_MATCHES_FILE}."
+            return matches
+        reasons.append(f"{path}: {reason}")
+    if not candidates:
+        reason = f"No existe {INTERNATIONAL_MATCHES_FILE}. Descarga primero {INTERNATIONAL_DATASET_SLUG}."
+    else:
+        reason = "No se encontro un CSV internacional valido. " + " | ".join(reasons[:4])
+    if required:
+        raise RuntimeError(reason)
+    return empty_matches_frame(reason=reason, source_path=str(INTERNATIONAL_MATCHES_FILE))
+
+
+def local_international_candidate_files() -> List[Path]:
+    candidates: List[Path] = []
+    if INTERNATIONAL_MATCHES_FILE.exists():
+        candidates.append(INTERNATIONAL_MATCHES_FILE)
+    for path in discover_international_csv_files(INTERNATIONAL_ROOT):
+        if Path(path) != INTERNATIONAL_MATCHES_FILE:
+            candidates.append(path)
+    return candidates
+
+
+def discover_international_csv_files(root: Path) -> List[Path]:
+    root = Path(root)
+    if root.is_file():
+        return [root] if root.suffix.lower() == ".csv" else []
+    if not root.exists():
+        return []
+    return sorted(
+        (path for path in root.rglob("*.csv") if path.is_file()),
+        key=lambda path: (0 if path.name == "all_matches.csv" else 1, str(path).lower()),
+    )
+
+
+def read_normalized_international_csv(path: Path) -> Tuple[pd.DataFrame, str]:
     try:
-        raw = pd.read_csv(INTERNATIONAL_MATCHES_FILE)
+        raw = pd.read_csv(path)
     except Exception as exc:
-        if required:
-            raise RuntimeError(f"No se pudo leer {INTERNATIONAL_MATCHES_FILE}: {exc}") from exc
-        return empty_matches_frame()
-    return normalize_international_matches(raw)
+        return empty_matches_frame(reason=f"No se pudo leer {path}: {exc}", source_path=str(path)), str(exc)
+    matches = normalize_international_matches(raw)
+    if matches.empty:
+        reason = str(matches.attrs.get("reason") or "CSV sin filas internacionales validas.")
+        matches.attrs["source_path"] = str(path)
+        return matches, reason
+    matches.attrs["source_path"] = str(path)
+    matches.attrs["file_path"] = str(INTERNATIONAL_MATCHES_FILE)
+    return matches, ""
 
 
 def normalize_international_matches(raw: pd.DataFrame) -> pd.DataFrame:
     if raw is None or raw.empty:
-        return empty_matches_frame()
+        return empty_matches_frame(reason="CSV vacio.")
     clean = raw.copy()
     clean.columns = [normalize_column(column) for column in clean.columns]
-    required = {"date", "home_team", "away_team", "home_score", "away_score"}
-    if not required.issubset(clean.columns):
-        return empty_matches_frame()
+    column_map = resolve_international_columns(clean.columns)
+    missing = [column for column in INTERNATIONAL_REQUIRED_COLUMNS if column not in column_map]
+    if missing:
+        return empty_matches_frame(reason=f"Columnas requeridas faltantes: {', '.join(missing)}.")
     output = pd.DataFrame()
-    output["date"] = pd.to_datetime(clean["date"], errors="coerce")
-    output["home_team"] = clean["home_team"].map(canonical_team_name)
-    output["away_team"] = clean["away_team"].map(canonical_team_name)
-    output["home_score"] = pd.to_numeric(clean["home_score"], errors="coerce")
-    output["away_score"] = pd.to_numeric(clean["away_score"], errors="coerce")
-    output["tournament"] = clean["tournament"].astype(str) if "tournament" in clean.columns else ""
-    output["country"] = clean["country"].astype(str) if "country" in clean.columns else ""
-    output["neutral"] = clean["neutral"].map(coerce_bool) if "neutral" in clean.columns else False
+    output["date"] = pd.to_datetime(clean[column_map["date"]], errors="coerce")
+    output["home_team"] = clean[column_map["home_team"]].map(canonical_team_name)
+    output["away_team"] = clean[column_map["away_team"]].map(canonical_team_name)
+    output["home_score"] = pd.to_numeric(clean[column_map["home_score"]], errors="coerce")
+    output["away_score"] = pd.to_numeric(clean[column_map["away_score"]], errors="coerce")
+    output["tournament"] = clean[column_map["tournament"]].astype(str) if "tournament" in column_map else ""
+    output["country"] = clean[column_map["country"]].astype(str) if "country" in column_map else ""
+    output["neutral"] = clean[column_map["neutral"]].map(coerce_bool) if "neutral" in column_map else False
     output = output[
         output["date"].notna()
         & output["home_team"].astype(str).str.len().gt(1)
@@ -148,10 +234,22 @@ def normalize_international_matches(raw: pd.DataFrame) -> pd.DataFrame:
         & output["away_score"].notna()
     ].copy()
     if output.empty:
-        return empty_matches_frame()
+        return empty_matches_frame(reason="CSV sin filas con fecha, equipos y marcadores validos.")
     output["home_score"] = output["home_score"].astype(float)
     output["away_score"] = output["away_score"].astype(float)
     return output.sort_values("date", kind="stable").reset_index(drop=True)
+
+
+def resolve_international_columns(columns: Iterable[str]) -> Dict[str, str]:
+    available = {normalize_column(column): str(column) for column in columns}
+    resolved: Dict[str, str] = {}
+    for canonical, aliases in INTERNATIONAL_COLUMN_ALIASES.items():
+        for alias in aliases:
+            normalized = normalize_column(alias)
+            if normalized in available:
+                resolved[canonical] = available[normalized]
+                break
+    return resolved
 
 
 def recent15_feature_table(
@@ -166,18 +264,144 @@ def recent15_feature_table(
         return pd.DataFrame(columns=["Team", *RECENT15_NUMERIC_COLUMNS])
     if teams is None:
         teams = sorted(set(matches["home_team"].dropna().astype(str)) | set(matches["away_team"].dropna().astype(str)))
-    rows = [
-        recent15_team_context(
-            team=team,
-            matches=matches,
-            before_date=before_date,
-            limit=limit,
-            base_model=base_model,
-            include_matches=False,
-        )["features"]
-        for team in teams
-    ]
+    rows = recent15_feature_rows_vectorized(
+        matches=matches,
+        teams=list(teams),
+        before_date=before_date,
+        limit=limit,
+        base_model=base_model,
+    )
     return pd.DataFrame(rows).fillna(0.0) if rows else pd.DataFrame(columns=["Team", *RECENT15_NUMERIC_COLUMNS])
+
+
+def recent15_feature_rows_vectorized(
+        matches: pd.DataFrame,
+        teams: Iterable[str],
+        before_date: Optional[Any] = None,
+        limit: int = RECENT_MATCH_LIMIT,
+        base_model: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    requested = [(str(team or "").strip(), canonical_team_name(team)) for team in teams]
+    if not requested:
+        return []
+    base_rows = {display: recent15_summary_features(display, [], before_date=before_date) for display, _ in requested}
+    if matches is None or matches.empty:
+        return [base_rows[display] for display, _ in requested]
+
+    working = matches.copy()
+    working["date"] = pd.to_datetime(working.get("date"), errors="coerce")
+    working = working[working["date"].notna()].copy()
+    cutoff = pd.to_datetime(before_date, errors="coerce")
+    if pd.notna(cutoff):
+        working = working[working["date"] < pd.Timestamp(cutoff)].copy()
+    if working.empty:
+        return [base_rows[display] for display, _ in requested]
+
+    working["_match_order"] = np.arange(len(working), dtype=int)
+    home_rows = pd.DataFrame({
+        "date": working["date"],
+        "_match_order": working["_match_order"],
+        "team": working["home_team"].astype(str),
+        "opponent": working["away_team"].astype(str),
+        "is_home": True,
+        "neutral": working.get("neutral", False).astype(bool) if "neutral" in working.columns else False,
+        "tournament": working.get("tournament", "").astype(str) if "tournament" in working.columns else "",
+        "gf": pd.to_numeric(working["home_score"], errors="coerce"),
+        "ga": pd.to_numeric(working["away_score"], errors="coerce"),
+    })
+    away_rows = pd.DataFrame({
+        "date": working["date"],
+        "_match_order": working["_match_order"],
+        "team": working["away_team"].astype(str),
+        "opponent": working["home_team"].astype(str),
+        "is_home": False,
+        "neutral": working.get("neutral", False).astype(bool) if "neutral" in working.columns else False,
+        "tournament": working.get("tournament", "").astype(str) if "tournament" in working.columns else "",
+        "gf": pd.to_numeric(working["away_score"], errors="coerce"),
+        "ga": pd.to_numeric(working["home_score"], errors="coerce"),
+    })
+    long = pd.concat([home_rows, away_rows], ignore_index=True)
+    long["team_key"] = long["team"].map(canonical_team_name)
+    team_keys = {canonical for _, canonical in requested if canonical}
+    if team_keys:
+        long = long[long["team_key"].isin(team_keys)].copy()
+    long = long[long["gf"].notna() & long["ga"].notna()].copy()
+    if long.empty:
+        return [base_rows[display] for display, _ in requested]
+
+    long = long.sort_values(["team_key", "date", "_match_order"], kind="stable")
+    recent = long.groupby("team_key", sort=False, group_keys=False).tail(max(int(limit or RECENT_MATCH_LIMIT), 1)).copy()
+    group_sizes = recent.groupby("team_key", sort=False)["date"].transform("size").astype(float)
+    group_positions = recent.groupby("team_key", sort=False).cumcount().astype(float) + 1.0
+    recent["goal_diff"] = recent["gf"].astype(float) - recent["ga"].astype(float)
+    recent["points"] = np.select(
+        [recent["goal_diff"].gt(0.0), recent["goal_diff"].eq(0.0)],
+        [3.0, 1.0],
+        default=0.0,
+    )
+    recent["is_friendly"] = recent["tournament"].map(is_friendly_tournament)
+    recent["tournament_weight"] = recent["tournament"].map(tournament_weight).astype(float)
+    recent["recency_weight"] = 0.72 + (0.56 * (group_positions / group_sizes.clip(lower=1.0)))
+    recent["weight"] = recent["tournament_weight"] * recent["recency_weight"]
+    rating_cache = {
+        opponent: rating_for_team(opponent, base_model=base_model)
+        for opponent in recent["opponent"].dropna().astype(str).unique()
+    }
+    recent["opponent_rating"] = recent["opponent"].map(rating_cache).fillna(1500.0).astype(float)
+    recent["difficulty_factor"] = np.clip(1.0 + ((recent["opponent_rating"] - 1500.0) / 900.0), 0.72, 1.32)
+    recent["adjusted_gf"] = recent["gf"].astype(float) * recent["difficulty_factor"]
+    recent["adjusted_ga"] = recent["ga"].astype(float) / recent["difficulty_factor"].clip(lower=1e-9)
+
+    summaries: Dict[str, Dict[str, Any]] = {}
+    for team_key, frame in recent.groupby("team_key", sort=False):
+        output: Dict[str, Any] = {"Team": str(team_key or "").strip()}
+        output.update({column: 0.0 for column in RECENT15_NUMERIC_COLUMNS})
+        weights = frame["weight"].astype(float)
+        official = frame[~frame["is_friendly"].astype(bool)]
+        friendly = frame[frame["is_friendly"].astype(bool)]
+        totals = frame["gf"].astype(float) + frame["ga"].astype(float)
+        output.update({
+            "recent15_matches": float(frame.shape[0]),
+            "recent15_gf_avg": float(frame["gf"].mean()),
+            "recent15_ga_avg": float(frame["ga"].mean()),
+            "recent15_goal_diff_avg": float(frame["goal_diff"].mean()),
+            "recent15_weighted_gf_avg": weighted_average(frame["gf"], weights),
+            "recent15_weighted_ga_avg": weighted_average(frame["ga"], weights),
+            "recent15_weighted_goal_diff_avg": weighted_average(frame["goal_diff"], weights),
+            "recent15_adjusted_gf_avg": weighted_average(frame["adjusted_gf"], weights),
+            "recent15_adjusted_ga_avg": weighted_average(frame["adjusted_ga"], weights),
+            "recent15_adjusted_goal_diff_avg": weighted_average(frame["adjusted_gf"] - frame["adjusted_ga"], weights),
+            "recent15_points_avg": float(frame["points"].mean()),
+            "recent15_weighted_points_avg": weighted_average(frame["points"], weights),
+            "recent15_win_rate": float((frame["goal_diff"] > 0).mean()),
+            "recent15_draw_rate": float((frame["goal_diff"] == 0).mean()),
+            "recent15_loss_rate": float((frame["goal_diff"] < 0).mean()),
+            "recent15_official_matches": float(official.shape[0]),
+            "recent15_friendly_matches": float(friendly.shape[0]),
+            "recent15_official_gf_avg": safe_mean(official.get("gf", pd.Series(dtype=float))),
+            "recent15_official_ga_avg": safe_mean(official.get("ga", pd.Series(dtype=float))),
+            "recent15_friendly_gf_avg": safe_mean(friendly.get("gf", pd.Series(dtype=float))),
+            "recent15_friendly_ga_avg": safe_mean(friendly.get("ga", pd.Series(dtype=float))),
+            "recent15_opponent_rating_avg": float(frame["opponent_rating"].mean()),
+            "recent15_weighted_opponent_rating_avg": weighted_average(frame["opponent_rating"], weights),
+            "recent15_weight_sum": float(weights.sum()),
+            "recent15_goal_total_avg": float(totals.mean()),
+            "recent15_over25_rate": float((totals > 2.5).mean()),
+            "recent15_btts_rate": float(((frame["gf"] > 0) & (frame["ga"] > 0)).mean()),
+        })
+        last_date = pd.Timestamp(frame["date"].max()) if not frame.empty else pd.NaT
+        if pd.notna(cutoff) and pd.notna(last_date):
+            output["recent15_days_since_last_match"] = float(max((pd.Timestamp(cutoff) - last_date).days, 0))
+        summaries[str(team_key)] = output
+
+    rows: List[Dict[str, Any]] = []
+    for display, canonical in requested:
+        row = dict(base_rows[display])
+        if canonical in summaries:
+            row.update(summaries[canonical])
+            row["Team"] = display
+        rows.append(row)
+    return rows
 
 
 def recent15_team_context(
@@ -211,16 +435,16 @@ def contextual_poisson_for_match(
         limit: int = RECENT_MATCH_LIMIT,
 ) -> Dict[str, Any]:
     matches = load_international_matches(required=False) if matches is None else matches
-    source_path = str(INTERNATIONAL_MATCHES_FILE)
+    source_path = str(getattr(matches, "attrs", {}).get("source_path") or INTERNATIONAL_MATCHES_FILE)
     if matches is None or matches.empty:
-        return unavailable_context("all_matches.csv no disponible", source_path, home, away, before_date)
+        return unavailable_context("all_matches.csv no disponible", source_path, home, away, before_date, base_model=base_model, max_goals=max_goals)
 
     home_context = recent15_team_context(home, matches, before_date=before_date, limit=limit, base_model=base_model)
     away_context = recent15_team_context(away, matches, before_date=before_date, limit=limit, base_model=base_model)
     home_features = home_context["features"]
     away_features = away_context["features"]
     if not home_context["matches"] and not away_context["matches"]:
-        return unavailable_context("Sin partidos recientes para las selecciones solicitadas", source_path, home, away, before_date)
+        return unavailable_context("Sin partidos recientes para las selecciones solicitadas", source_path, home, away, before_date, base_model=base_model, max_goals=max_goals)
 
     base_lambda_home, base_lambda_away = base_lambdas(base_model, home, away)
     home_attack = positive_or_default(home_features.get("recent15_adjusted_gf_avg"), base_lambda_home)
@@ -247,6 +471,27 @@ def contextual_poisson_for_match(
     recent_weight = 0.35 + 0.45 * coverage
     lambda_home = clamp((recent_lambda_home * recent_weight) + (base_lambda_home * (1.0 - recent_weight)), 0.2, 4.8)
     lambda_away = clamp((recent_lambda_away * recent_weight) + (base_lambda_away * (1.0 - recent_weight)), 0.2, 4.8)
+    matrix_payload = poisson_matrix_payload(lambda_home, lambda_away, max_goals=max_goals)
+    return {
+        "available": True,
+        "matrix_available": True,
+        "matrix_source": "recent15",
+        "source": "all_matches.csv",
+        "dataset_slug": INTERNATIONAL_DATASET_SLUG,
+        "source_path": source_path,
+        "before_date": date_to_string(before_date),
+        "match_limit": int(limit),
+        **matrix_payload,
+        "home_recent": home_context,
+        "away_recent": away_context,
+        "recent_matches": {
+            "home": home_context["matches"],
+            "away": away_context["matches"],
+        },
+    }
+
+
+def poisson_matrix_payload(lambda_home: float, lambda_away: float, max_goals: int = 10) -> Dict[str, Any]:
     max_goals = int(clamp(max_goals, 4, 14))
     grid = poisson_score_grid(lambda_home, lambda_away, max_goals=max_goals)
     raw_probs = grid_result_probabilities(grid)
@@ -256,15 +501,9 @@ def contextual_poisson_for_match(
     top_scores = sorted(cells, key=lambda item: item["probability_raw"], reverse=True)[:5]
     max_probability = max((cell["probability"] for cell in cells), default=0.0)
     return {
-        "available": True,
-        "source": "all_matches.csv",
-        "dataset_slug": INTERNATIONAL_DATASET_SLUG,
-        "source_path": source_path,
-        "before_date": date_to_string(before_date),
-        "match_limit": int(limit),
-        "context_lambda_home": round(lambda_home, 3),
-        "context_lambda_away": round(lambda_away, 3),
-        "lambdas": {"home": round(lambda_home, 3), "away": round(lambda_away, 3)},
+        "context_lambda_home": round(float(lambda_home), 3),
+        "context_lambda_away": round(float(lambda_away), 3),
+        "lambdas": {"home": round(float(lambda_home), 3), "away": round(float(lambda_away), 3)},
         "probabilities": pct_probs,
         "probabilities_raw": raw_probs,
         "over_under": {
@@ -283,12 +522,6 @@ def contextual_poisson_for_match(
             "cells": cells,
         },
         "top_scores": top_scores,
-        "home_recent": home_context,
-        "away_recent": away_context,
-        "recent_matches": {
-            "home": home_context["matches"],
-            "away": away_context["matches"],
-        },
     }
 
 
@@ -413,23 +646,17 @@ def public_recent_match_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def grid_result_probabilities(grid: np.ndarray) -> Dict[str, float]:
-    home = draw = away = 0.0
-    totals = {line: 0.0 for line in CONTEXT_TOTAL_GOAL_LINES}
-    for home_goals in range(grid.shape[0]):
-        for away_goals in range(grid.shape[1]):
-            prob = float(grid[home_goals, away_goals])
-            if home_goals > away_goals:
-                home += prob
-            elif home_goals == away_goals:
-                draw += prob
-            else:
-                away += prob
-            total_goals = home_goals + away_goals
-            for line in totals:
-                if total_goals > line:
-                    totals[line] += prob
-    output = {"home": home, "draw": draw, "away": away}
-    for line, over_prob in totals.items():
+    goals = np.arange(grid.shape[0], dtype=int)
+    home_goals, away_goals = np.meshgrid(goals, goals, indexing="ij")
+    margin = home_goals - away_goals
+    total_goals = home_goals + away_goals
+    output = {
+        "home": float(grid[margin > 0].sum()),
+        "draw": float(grid[margin == 0].sum()),
+        "away": float(grid[margin < 0].sum()),
+    }
+    for line in CONTEXT_TOTAL_GOAL_LINES:
+        over_prob = float(grid[total_goals > line].sum())
         suffix = total_line_suffix(line)
         output[f"over{suffix}"] = float(over_prob)
         output[f"under{suffix}"] = float(1.0 - over_prob)
@@ -437,37 +664,41 @@ def grid_result_probabilities(grid: np.ndarray) -> Dict[str, float]:
 
 
 def score_cells(grid: np.ndarray) -> List[Dict[str, Any]]:
-    cells: List[Dict[str, Any]] = []
-    for home_goals in range(grid.shape[0]):
-        for away_goals in range(grid.shape[1]):
-            raw = float(grid[home_goals, away_goals])
-            cells.append({
-                "home_goals": int(home_goals),
-                "away_goals": int(away_goals),
-                "score": f"{home_goals}-{away_goals}",
-                "probability": round(raw * 100.0, 3),
-                "probability_raw": raw,
-            })
-    return cells
+    return [
+        {
+            "home_goals": int(home_goals),
+            "away_goals": int(away_goals),
+            "score": f"{home_goals}-{away_goals}",
+            "probability": round(float(grid[home_goals, away_goals]) * 100.0, 3),
+            "probability_raw": float(grid[home_goals, away_goals]),
+        }
+        for home_goals in range(grid.shape[0])
+        for away_goals in range(grid.shape[1])
+    ]
 
 
-def unavailable_context(reason: str, source_path: str, home: str, away: str, before_date: Optional[Any]) -> Dict[str, Any]:
+def unavailable_context(
+        reason: str,
+        source_path: str,
+        home: str,
+        away: str,
+        before_date: Optional[Any],
+        base_model: Optional[Any] = None,
+        max_goals: int = 10,
+) -> Dict[str, Any]:
+    lambda_home, lambda_away = base_lambdas(base_model, home, away)
+    matrix_payload = poisson_matrix_payload(lambda_home, lambda_away, max_goals=max_goals)
     return {
         "available": False,
+        "matrix_available": True,
+        "matrix_source": "base_model",
         "reason": reason,
         "source": "all_matches.csv",
         "dataset_slug": INTERNATIONAL_DATASET_SLUG,
         "source_path": source_path,
         "before_date": date_to_string(before_date),
-        "context_lambda_home": 0.0,
-        "context_lambda_away": 0.0,
-        "lambdas": {"home": 0.0, "away": 0.0},
-        "probabilities": {},
-        "over_under": {},
-        "score_matrix": [],
-        "score_cells": [],
-        "heatmap": {"home_goals": [], "away_goals": [], "max_probability": 0.0, "cells": []},
-        "top_scores": [],
+        "match_limit": int(RECENT_MATCH_LIMIT),
+        **matrix_payload,
         "home_recent": {"team": home, "canonical_team": canonical_team_name(home), "features": recent15_summary_features(home, []), "matches": []},
         "away_recent": {"team": away, "canonical_team": canonical_team_name(away), "features": recent15_summary_features(away, []), "matches": []},
         "recent_matches": {"home": [], "away": []},
@@ -603,5 +834,10 @@ def date_to_string(value: Optional[Any]) -> str:
     return parsed.date().isoformat() if pd.notna(parsed) else str(value)
 
 
-def empty_matches_frame() -> pd.DataFrame:
-    return pd.DataFrame(columns=["date", "home_team", "away_team", "home_score", "away_score", "tournament", "country", "neutral"])
+def empty_matches_frame(reason: str = "", source_path: str = "") -> pd.DataFrame:
+    frame = pd.DataFrame(columns=["date", "home_team", "away_team", "home_score", "away_score", "tournament", "country", "neutral"])
+    if reason:
+        frame.attrs["reason"] = reason
+    if source_path:
+        frame.attrs["source_path"] = source_path
+    return frame
