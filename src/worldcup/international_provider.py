@@ -264,7 +264,16 @@ def recent15_feature_table(
         before_date: Optional[Any] = None,
         limit: int = RECENT_MATCH_LIMIT,
         base_model: Optional[Any] = None,
+        match_index: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> pd.DataFrame:
+    if match_index is not None:
+        return recent15_feature_table_from_index(
+            match_index=match_index,
+            teams=teams,
+            before_date=before_date,
+            limit=limit,
+            base_model=base_model,
+        )
     matches = load_international_matches(required=False) if matches is None else matches
     if matches is None or matches.empty:
         return pd.DataFrame(columns=["Team", *RECENT15_NUMERIC_COLUMNS])
@@ -277,6 +286,114 @@ def recent15_feature_table(
         limit=limit,
         base_model=base_model,
     )
+    return pd.DataFrame(rows).fillna(0.0) if rows else pd.DataFrame(columns=["Team", *RECENT15_NUMERIC_COLUMNS])
+
+
+def build_recent15_match_index(matches: Optional[pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+    if matches is None or matches.empty:
+        return {}
+    required = {"date", "home_team", "away_team", "home_score", "away_score"}
+    if not required.issubset(matches.columns):
+        return {}
+
+    working = matches.copy()
+    working["date"] = pd.to_datetime(working.get("date"), errors="coerce")
+    working["home_score"] = pd.to_numeric(working.get("home_score"), errors="coerce")
+    working["away_score"] = pd.to_numeric(working.get("away_score"), errors="coerce")
+    working = working[
+        working["date"].notna()
+        & working["home_score"].notna()
+        & working["away_score"].notna()
+    ].copy()
+    if working.empty:
+        return {}
+
+    working["_match_order"] = np.arange(len(working), dtype=int)
+    neutral = working["neutral"].map(coerce_bool) if "neutral" in working.columns else False
+    tournament = working.get("tournament", "").astype(str) if "tournament" in working.columns else ""
+    home_rows = pd.DataFrame({
+        "date": working["date"],
+        "_match_order": working["_match_order"],
+        "team": working["home_team"].astype(str),
+        "opponent": working["away_team"].astype(str),
+        "is_home": True,
+        "neutral": neutral,
+        "tournament": tournament,
+        "gf": working["home_score"].astype(float),
+        "ga": working["away_score"].astype(float),
+    })
+    away_rows = pd.DataFrame({
+        "date": working["date"],
+        "_match_order": working["_match_order"],
+        "team": working["away_team"].astype(str),
+        "opponent": working["home_team"].astype(str),
+        "is_home": False,
+        "neutral": neutral,
+        "tournament": tournament,
+        "gf": working["away_score"].astype(float),
+        "ga": working["home_score"].astype(float),
+    })
+    long = pd.concat([home_rows, away_rows], ignore_index=True)
+    long["team_key"] = long["team"].map(canonical_team_name)
+    long = long[long["team_key"].astype(str).str.len().gt(0)].copy()
+    if long.empty:
+        return {}
+    long = long.sort_values(["team_key", "date", "_match_order"], kind="stable")
+    return {
+        str(team_key): frame.reset_index(drop=True)
+        for team_key, frame in long.groupby("team_key", sort=False)
+    }
+
+
+def recent15_feature_table_from_index(
+        match_index: Dict[str, pd.DataFrame],
+        teams: Optional[Iterable[str]] = None,
+        before_date: Optional[Any] = None,
+        limit: int = RECENT_MATCH_LIMIT,
+        base_model: Optional[Any] = None,
+) -> pd.DataFrame:
+    if not match_index:
+        return pd.DataFrame(columns=["Team", *RECENT15_NUMERIC_COLUMNS])
+    if teams is None:
+        teams = sorted(match_index.keys())
+    requested = [(str(team or "").strip(), canonical_team_name(team)) for team in teams]
+    cutoff = pd.to_datetime(before_date, errors="coerce")
+    max_rows = max(int(limit or RECENT_MATCH_LIMIT), 1)
+    rows: List[Dict[str, Any]] = []
+    for display, canonical in requested:
+        frame = match_index.get(canonical)
+        if frame is None or frame.empty:
+            rows.append(recent15_summary_features(display, [], before_date=before_date))
+            continue
+        scoped = frame
+        if pd.notna(cutoff):
+            scoped = scoped[scoped["date"] < pd.Timestamp(cutoff)]
+        if scoped.empty:
+            rows.append(recent15_summary_features(display, [], before_date=before_date))
+            continue
+        recent = scoped.tail(max_rows).copy().reset_index(drop=True)
+        total = max(int(recent.shape[0]), 1)
+        positions = np.arange(1, total + 1, dtype=float)
+        recent["goal_diff"] = recent["gf"].astype(float) - recent["ga"].astype(float)
+        recent["points"] = np.select(
+            [recent["goal_diff"].gt(0.0), recent["goal_diff"].eq(0.0)],
+            [3.0, 1.0],
+            default=0.0,
+        )
+        recent["is_friendly"] = recent["tournament"].map(is_friendly_tournament)
+        recent["tournament_weight"] = recent["tournament"].map(tournament_weight).astype(float)
+        recent["recency_weight"] = 0.72 + (0.56 * (positions / float(total)))
+        recent["weight"] = recent["tournament_weight"] * recent["recency_weight"]
+        rating_cache = {
+            opponent: rating_for_team(opponent, base_model=base_model)
+            for opponent in recent["opponent"].dropna().astype(str).unique()
+        }
+        recent["opponent_rating"] = recent["opponent"].map(rating_cache).fillna(1500.0).astype(float)
+        recent["difficulty_factor"] = np.clip(1.0 + ((recent["opponent_rating"] - 1500.0) / 900.0), 0.72, 1.32)
+        recent["adjusted_gf"] = recent["gf"].astype(float) * recent["difficulty_factor"]
+        recent["adjusted_ga"] = recent["ga"].astype(float) / recent["difficulty_factor"].clip(lower=1e-9)
+        feature_row = recent15_summary_features(display, recent.to_dict(orient="records"), before_date=before_date)
+        rows.append(feature_row)
     return pd.DataFrame(rows).fillna(0.0) if rows else pd.DataFrame(columns=["Team", *RECENT15_NUMERIC_COLUMNS])
 
 
@@ -764,9 +881,37 @@ def tournament_weight(tournament: str) -> float:
 
 def is_worldcup_tournament(tournament: str) -> bool:
     text = normalize_key(tournament)
-    if "world cup" not in text:
+    if not text:
         return False
-    return not any(token in text for token in ("qualification", "qualifier", "qualifiers"))
+    blocked_terms = (
+        "qualification",
+        "qualifier",
+        "qualifiers",
+        "futsal",
+        "women",
+        "womens",
+        "woman",
+        "u17",
+        "u 17",
+        "under 17",
+        "u20",
+        "u 20",
+        "under 20",
+        "club",
+        "beach soccer",
+        "beach",
+        "youth",
+        "junior",
+        "olympic",
+    )
+    if any(token in text for token in blocked_terms):
+        return False
+    parts = text.split()
+    return parts in (["world", "cup"], ["fifa", "world", "cup"]) or (
+        len(parts) == 3 and parts[0:2] == ["world", "cup"] and parts[2].isdigit()
+    ) or (
+        len(parts) == 4 and parts[0:3] == ["fifa", "world", "cup"] and parts[3].isdigit()
+    )
 
 
 def is_friendly_tournament(tournament: str) -> bool:

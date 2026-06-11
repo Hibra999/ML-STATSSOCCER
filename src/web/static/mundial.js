@@ -383,7 +383,7 @@ function renderActiveModel(model) {
     predictionCard("Activo", model && model.trained ? (model.model_name || model.model_id) : "Sin modelo"),
     predictionCard("Tipo", (model && (model.model_label || model.model_type)) || "-"),
     predictionCard("Mercados", modelMarketLabel(model || {})),
-    predictionCard("Eval", evalStrategyLabel(model && model.eval_strategy)),
+    predictionCard("Eval", evalStrategyLabel(model && model.eval_strategy, model)),
   ].join("");
 }
 
@@ -779,7 +779,7 @@ function renderTrainingStatus(payload) {
   const hardware = (model.hardware && model.trained) ? model.hardware : ((state.trainingOptions || {}).hardware || {});
   renderHeroHardware(hardware);
   document.getElementById("training-status").textContent = payload.available
-    ? `${payload.train_rows || 0} train listo - ${etlStatusLabel(payload)} - ${evalStrategyLabel(payload.eval_strategy)}`
+    ? `${payload.train_rows || 0} train listo - ${etlStatusLabel(payload)} - ${evalStrategyLabel(payload.eval_strategy, payload)}`
     : "Dataset Kaggle no descargado";
   document.getElementById("training-source").textContent = `${payload.dataset_slug || "Kaggle"} - ${payload.training_mode || "sin modo"} - ${payload.prepared_label_source || "fuente pendiente"}`;
   document.getElementById("training-summary").innerHTML = datasetSummaryHtml(payload);
@@ -840,7 +840,12 @@ function trainingMarketSections(model, payload) {
 }
 
 function datasetSummaryHtml(payload) {
-  const evalValue = payload.test_rows
+  const benchmarkYear = benchmarkWorldcupYear(payload);
+  const targetYear = targetWorldcupYear(payload);
+  const finalBenchmark = payload.eval_strategy === "final_worldcup_test";
+  const evalValue = finalBenchmark && benchmarkYear
+    ? `benchmark ${benchmarkYear}`
+    : payload.test_rows
     ? `${payload.test_rows} filas test`
     : `${payload.eval_rows || 0} holdout`;
   const walkForward = payload.walk_forward || {};
@@ -848,11 +853,13 @@ function datasetSummaryHtml(payload) {
   const international = payload.international_recent || {};
   const internationalReady = Boolean(international.available);
   return [
+    datasetCard("Objetivo", `Mundial ${targetYear}`, "torneo operativo"),
+    datasetCard("Benchmark histórico", benchmarkYear ? `Mundial ${benchmarkYear}` : "pendiente", "último Mundial FIFA senior completo"),
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
     datasetCard("ETL", etlStatusShort(payload), payload.prepared_label_source || "preparar artifact"),
     datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
-    datasetCard("Evaluacion", evalValue, evalStrategyLabel(payload.eval_strategy)),
-    datasetCard("Predicción 2026", payload.prediction_rows || 0, "filas sin label usadas como features"),
+    datasetCard("Eval", evalValue, evalStrategyLabel(payload.eval_strategy, payload)),
+    datasetCard(`Predicción ${targetYear}`, payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
     datasetCard("All matches", internationalReady ? international.rows || 0 : "faltante", internationalStatusDetail(international)),
     datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} base / ${refresh.ready_with_players || 0} con jugadores`),
@@ -872,14 +879,11 @@ function internationalStatusDetail(international) {
 }
 
 function trainingStatusWarnings(payload) {
-  const model = (payload && payload.model) || {};
   const international = (payload && payload.international_recent) || {};
   const warnings = [
     ...((payload && payload.prepared_warnings) || []),
-    ...((payload && payload.warnings) || []),
     ...((payload && payload.market_warnings) || []),
     ...((payload && payload.api_football_warnings) || []),
-    ...(model.warnings || []),
     ...((payload && payload.download_warnings) || []),
     international.warning || "",
     !international.available && international.reason ? `All matches: ${international.reason}` : "",
@@ -911,7 +915,7 @@ function renderModelState(model, payload) {
   document.getElementById("training-model-state").innerHTML = [
     predictionCard("Modelo", model.trained ? (model.model_label || payload.model_type || "Listo") : "Pendiente"),
     predictionCard("Mercados", modelMarketLabel(model.trained ? model : payload)),
-    predictionCard("Eval", evalStrategyLabel(model.eval_strategy || payload.eval_strategy)),
+    predictionCard("Eval", evalStrategyLabel(model.eval_strategy || payload.eval_strategy, model.trained ? model : payload)),
     predictionCard("Walk-forward", walkForwardModeLabel((model.walk_forward_mode || (model.walk_forward_summary || {}).mode || "none"))),
   ].join("");
 }
@@ -944,13 +948,24 @@ function marketLabel(key) {
   return "1X2";
 }
 
-function evalStrategyLabel(strategy) {
-  if (strategy === "final_worldcup_test") return "ultimo Mundial test";
+function evalStrategyLabel(strategy, payload) {
+  if (strategy === "final_worldcup_test") {
+    const year = benchmarkWorldcupYear(payload);
+    return year ? `benchmark ${year}` : "benchmark historico";
+  }
   if (strategy === "test_file") return "test etiquetado";
   if (strategy === "holdout_temporal") return "holdout temporal";
   if (strategy === "holdout_from_train") return "holdout desde train";
   if (strategy === "unavailable") return "sin evaluacion";
   return strategy || "pendiente";
+}
+
+function benchmarkWorldcupYear(payload) {
+  return String((payload && (payload.benchmark_worldcup_year || payload.final_test_year)) || "").trim();
+}
+
+function targetWorldcupYear(payload) {
+  return String((payload && payload.target_worldcup_year) || "2026").trim();
 }
 
 function renderTrainingControls(options, model) {
@@ -1578,11 +1593,13 @@ function worldcupJobProgressSignature(job) {
   return [
     job.status || "",
     progress.stage || "",
+    progress.message || "",
     progress.current ?? "",
     progress.total ?? "",
     progress.percent ?? "",
     progress.current_trial ?? "",
     progress.total_trials ?? "",
+    job.updated_at || "",
   ].join("|");
 }
 
@@ -1656,6 +1673,7 @@ function renderWorldcupJobProgress(kind) {
   const stateText = progress.last_state ? `<span>${escapeHtml(progress.last_state)}</span>` : "";
   const market = progress.market ? `<span>${escapeHtml(progress.market)}</span>` : "";
   const error = job.error ? `<span>${escapeHtml(cleanMessage(job.error))}</span>` : "";
+  const activity = worldcupJobActivityLabel(job);
   target.className = `worldcup-progress ${escapeAttr(job.status || "queued")}`;
   target.innerHTML = `
     <div class="progress-header">
@@ -1672,8 +1690,34 @@ function renderWorldcupJobProgress(kind) {
       ${market}
       ${best}
       ${stateText}
+      ${activity ? `<span>${escapeHtml(activity)}</span>` : ""}
       ${error}
     </div>`;
+}
+
+function worldcupJobActivityLabel(job) {
+  if (!job || !job.updated_at || isTerminalJob(job)) return "";
+  const seconds = secondsSinceIso(job.updated_at);
+  if (seconds === null) return "";
+  if (seconds >= 20) return `Sigue ejecutándose; sin nuevo evento hace ${formatElapsed(seconds)}`;
+  return `Actualizado hace ${formatElapsed(seconds)}`;
+}
+
+function secondsSinceIso(value) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+}
+
+function formatElapsed(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const remainder = total % 60;
+  if (minutes < 60) return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const minuteRemainder = minutes % 60;
+  return minuteRemainder ? `${hours}h ${minuteRemainder}m` : `${hours}h`;
 }
 
 function latestWorldcupJob(kind) {

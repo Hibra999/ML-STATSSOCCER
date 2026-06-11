@@ -270,7 +270,12 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Ingresa un nombre para el nuevo modelo" not in app_source
     assert "paramsTable" in app_source
     assert "evalStrategyLabel" in app_source
-    assert "ultimo Mundial test" in app_source
+    assert "benchmarkWorldcupYear" in app_source
+    assert "Benchmark histórico" in app_source
+    assert "benchmark historico" in app_source
+    assert "ultimo Mundial test" not in app_source
+    assert "Test final bloqueado" not in app_source
+    assert "model.warnings" not in app_source
     assert "holdout temporal" in app_source
     assert "renderConfusionMatrix" in app_source
     assert "confusionSummaryHtml" in app_source
