@@ -85,6 +85,7 @@ def test_public_storage_assets_only_serves_graphics():
 
     assert assets.lookup_path("graphics/countries/Mexico.png")[0].endswith("storage/graphics/countries/Mexico.png")
     assert assets.lookup_path("/graphics/countries/Mexico.png")[0].endswith("storage/graphics/countries/Mexico.png")
+    assert assets.lookup_path(r"graphics\countries\Mexico.png")[0].endswith("storage/graphics/countries/Mexico.png")
     assert assets.lookup_path("worldcup/cache/worldcup_training_prepared.pkl") == ("", None)
 
 
