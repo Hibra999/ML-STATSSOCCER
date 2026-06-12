@@ -69,3 +69,32 @@ def test_simulation_config_accepts_score_model_key():
 
     assert config["score_model"] == "diagonal_inflated_bivariate_poisson"
     assert config["bayes_draws"] == 100
+
+
+def test_pytensor_cxx_guard_appends_empty_cxx_only_without_compiler(monkeypatch):
+    from src.worldcup import score_models
+
+    monkeypatch.delenv("CXX", raising=False)
+    monkeypatch.delenv("PYTENSOR_FLAGS", raising=False)
+    monkeypatch.setattr(score_models.shutil, "which", lambda command: None)
+
+    assert score_models._ensure_pytensor_cxx_flag() is True
+    assert score_models.os.environ["PYTENSOR_FLAGS"] == "cxx="
+
+    monkeypatch.setenv("PYTENSOR_FLAGS", "floatX=float32")
+    assert score_models._ensure_pytensor_cxx_flag() is True
+    assert score_models.os.environ["PYTENSOR_FLAGS"] == "floatX=float32,cxx="
+
+    monkeypatch.setenv("PYTENSOR_FLAGS", "floatX=float32,cxx=/custom/compiler")
+    assert score_models._ensure_pytensor_cxx_flag() is False
+    assert score_models.os.environ["PYTENSOR_FLAGS"] == "floatX=float32,cxx=/custom/compiler"
+
+    monkeypatch.setenv("PYTENSOR_FLAGS", "floatX=float64")
+    monkeypatch.setattr(score_models.shutil, "which", lambda command: "/usr/bin/g++" if command == "g++" else None)
+    assert score_models._ensure_pytensor_cxx_flag() is False
+    assert score_models.os.environ["PYTENSOR_FLAGS"] == "floatX=float64"
+
+    monkeypatch.setattr(score_models.shutil, "which", lambda command: None)
+    monkeypatch.setenv("CXX", "custom-cxx")
+    assert score_models._ensure_pytensor_cxx_flag() is False
+    assert score_models.os.environ["PYTENSOR_FLAGS"] == "floatX=float64"

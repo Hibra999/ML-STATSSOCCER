@@ -3,6 +3,18 @@ import json
 import pandas as pd
 
 
+def test_sota_sequence_temporarily_excludes_bayes_models_but_catalog_keeps_them():
+    from src.web import mundial_services as services
+    from src.worldcup.score_models import score_model_options
+
+    disabled = {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}
+    catalog_keys = {option["key"] for option in score_model_options()}
+
+    assert disabled.isdisjoint(services.SOTA_SCORE_MODEL_SEQUENCE)
+    assert disabled <= catalog_keys
+    assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 8
+
+
 def test_consensus_rounding_signature_and_strength_levels():
     from src.web import mundial_services as services
 
@@ -151,3 +163,52 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     latest = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
     assert latest["report_id"] == result["report_id"]
     assert any(item.get("model_key") == "xg_poisson_local" for item in progress)
+    assert {item.get("model_total") for item in progress if item.get("model_key")} == {len(services.SOTA_SCORE_MODEL_SEQUENCE)}
+
+
+def test_sota_report_honors_explicit_cuda_when_detected_and_warns_cpu_bound(monkeypatch):
+    from src.web import mundial_services as services
+
+    monkeypatch.setattr(services, "detect_hardware", lambda: {
+        "cpu_count": 16,
+        "default_n_jobs": -1,
+        "cuda_available": True,
+        "cuda_devices": ["GPU 0: NVIDIA GeForce RTX 5070"],
+        "cuda_device_names": ["NVIDIA GeForce RTX 5070"],
+        "cuda_detection_source": "nvidia-smi:/usr/bin/nvidia-smi",
+        "cuda_detection_sources": ["nvidia-smi:/usr/bin/nvidia-smi"],
+        "cuda_error": "",
+        "cuda_warning": "",
+        "device_default": "cuda",
+    })
+
+    hardware = services.stat_report_hardware("cuda", "poisson_sota")
+    metadata = services.score_model_report_metadata({"warnings": []}, hardware)
+
+    assert hardware["actual_device"] == "cuda"
+    assert hardware["backend_supports_cuda"] is False
+    assert any("CPU-bound" in warning for warning in hardware["warnings"])
+    assert any("CPU-bound" in warning for warning in metadata["warnings"])
+
+
+def test_sota_report_explicit_cuda_without_gpu_returns_clear_device_error(monkeypatch):
+    from src.web import mundial_services as services
+
+    monkeypatch.setattr(services, "detect_hardware", lambda: {
+        "cpu_count": 8,
+        "default_n_jobs": -1,
+        "cuda_available": False,
+        "cuda_devices": [],
+        "cuda_device_names": [],
+        "cuda_detection_source": "none",
+        "cuda_detection_sources": [],
+        "cuda_error": "nvidia-smi no disponible",
+        "cuda_warning": "nvidia-smi no disponible",
+        "device_default": "cpu",
+    })
+
+    hardware = services.stat_report_hardware("cuda", "poisson_sota")
+
+    assert hardware["actual_device"] == "cpu"
+    assert "CUDA fue solicitada explicitamente" in hardware["device_error"]
+    assert hardware["device_error"] in hardware["warnings"]

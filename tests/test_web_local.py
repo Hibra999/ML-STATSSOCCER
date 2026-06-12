@@ -585,6 +585,81 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
 
 
+def test_worldcup_detect_hardware_uses_nvidia_smi_from_path(monkeypatch):
+    from src.worldcup import training
+
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout="GPU 0: NVIDIA GeForce RTX 5070 (UUID: GPU-test)\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(training, "framework_cuda_devices", lambda: ([], "", ""))
+    monkeypatch.setattr(training.shutil, "which", lambda command: "/usr/bin/nvidia-smi" if command == "nvidia-smi" else None)
+    monkeypatch.setattr(training.subprocess, "run", fake_run)
+
+    hardware = training.detect_hardware()
+
+    assert commands == [["/usr/bin/nvidia-smi", "-L"]]
+    assert hardware["cuda_available"] is True
+    assert hardware["cuda_detection_source"] == "nvidia-smi:/usr/bin/nvidia-smi"
+    assert hardware["cuda_device_names"] == ["NVIDIA GeForce RTX 5070"]
+    assert hardware["device_default"] == "cuda"
+
+
+def test_worldcup_detect_hardware_uses_windows_nvidia_smi_common_path(monkeypatch):
+    from src.worldcup import training
+
+    expected_path = str(training.Path("/opt/program-files") / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe")
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="GPU 0: NVIDIA RTX A4000\n", stderr="")
+
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    monkeypatch.setenv("ProgramFiles", "/opt/program-files")
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("SystemRoot", raising=False)
+    monkeypatch.setattr(training, "framework_cuda_devices", lambda: ([], "", ""))
+    monkeypatch.setattr(training.shutil, "which", lambda command: None)
+    monkeypatch.setattr(training.sys, "platform", "win32")
+    monkeypatch.setattr(training.Path, "is_file", lambda self: str(self) == expected_path)
+    monkeypatch.setattr(training.subprocess, "run", fake_run)
+
+    hardware = training.detect_hardware()
+
+    assert commands == [[expected_path, "-L"]]
+    assert hardware["cuda_available"] is True
+    assert hardware["cuda_detection_source"] == f"nvidia-smi:{expected_path}"
+    assert hardware["cuda_device_names"] == ["NVIDIA RTX A4000"]
+
+
+def test_worldcup_detect_hardware_uses_tensorflow_gpu_fallback(monkeypatch):
+    from src.worldcup import training
+
+    fake_gpu = SimpleNamespace(name="/physical_device:GPU:0")
+    fake_tf = SimpleNamespace(
+        config=SimpleNamespace(
+            list_physical_devices=lambda kind: [fake_gpu] if kind == "GPU" else []
+        )
+    )
+
+    monkeypatch.setattr(training.shutil, "which", lambda command: None)
+    monkeypatch.setitem(training.sys.modules, "tensorflow", fake_tf)
+
+    hardware = training.detect_hardware()
+
+    assert hardware["cuda_available"] is True
+    assert hardware["cuda_detection_source"] == "tensorflow"
+    assert hardware["cuda_devices"] == ["TensorFlow GPU: /physical_device:GPU:0"]
+    assert hardware["cuda_error"] == ""
+
+
 def test_worldcup_auto_device_uses_cuda_when_available(monkeypatch):
     from src.worldcup import training
 

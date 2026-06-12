@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import hashlib
+import sys
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -343,32 +344,134 @@ def training_options() -> Dict[str, Any]:
 def detect_hardware() -> Dict[str, Any]:
     cpu_count = int(os.cpu_count() or 1)
     cuda_devices: List[str] = []
-    cuda_error = ""
-    if shutil.which("nvidia-smi"):
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "-L"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            if result.returncode == 0:
-                cuda_devices = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            elif result.stderr:
-                cuda_error = result.stderr.strip().splitlines()[0]
-        except Exception as exc:
-            cuda_error = f"{exc.__class__.__name__}: {exc}"
+    cuda_sources: List[str] = []
+    cuda_warnings: List[str] = []
+    nvidia_smi = find_nvidia_smi()
+    if nvidia_smi:
+        devices, warning = query_nvidia_smi(nvidia_smi)
+        if devices:
+            cuda_devices.extend(devices)
+            cuda_sources.append(f"nvidia-smi:{nvidia_smi}")
+        elif warning:
+            cuda_warnings.append(warning)
     else:
-        cuda_error = "nvidia-smi no disponible"
+        cuda_warnings.append("nvidia-smi no disponible")
+    if not cuda_devices:
+        framework_devices, framework_source, framework_warning = framework_cuda_devices()
+        if framework_devices:
+            cuda_devices.extend(framework_devices)
+            cuda_sources.append(framework_source)
+        elif framework_warning:
+            cuda_warnings.append(framework_warning)
+    cuda_available = bool(cuda_devices)
+    cuda_warning = "; ".join(dict.fromkeys(item for item in cuda_warnings if item))
+    cuda_error = "" if cuda_available else (cuda_warning or "sin dispositivos CUDA detectados")
     return {
         "cpu_count": cpu_count,
         "default_n_jobs": -1,
-        "cuda_available": bool(cuda_devices),
+        "cuda_available": cuda_available,
         "cuda_devices": cuda_devices,
+        "cuda_device_names": cuda_device_names(cuda_devices),
+        "cuda_detection_source": ", ".join(cuda_sources) if cuda_sources else "none",
+        "cuda_detection_sources": cuda_sources,
         "cuda_error": cuda_error,
-        "device_default": "cuda" if cuda_devices else "cpu",
+        "cuda_warning": cuda_warning,
+        "device_default": "cuda" if cuda_available else "cpu",
     }
+
+
+def find_nvidia_smi() -> str:
+    path = shutil.which("nvidia-smi")
+    if path:
+        return str(path)
+    for candidate in windows_nvidia_smi_candidates():
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return ""
+
+
+def windows_nvidia_smi_candidates() -> List[Path]:
+    if os.name != "nt" and not sys.platform.startswith("win"):
+        return []
+    candidates: List[Path] = []
+    program_roots = [
+        os.environ.get("ProgramW6432"),
+        os.environ.get("ProgramFiles"),
+        os.environ.get("ProgramFiles(x86)"),
+    ]
+    for root in program_roots:
+        if root:
+            candidates.append(Path(root) / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe")
+    system_root = os.environ.get("SystemRoot")
+    if system_root:
+        candidates.append(Path(system_root) / "System32" / "nvidia-smi.exe")
+    unique: List[Path] = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def query_nvidia_smi(executable: str) -> Tuple[List[str], str]:
+    try:
+        result = subprocess.run(
+            [executable, "-L"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception as exc:
+        return [], f"{exc.__class__.__name__}: {exc}"
+    if result.returncode == 0:
+        devices = [line.strip() for line in str(result.stdout or "").splitlines() if line.strip()]
+        if devices:
+            return devices, ""
+        return [], "nvidia-smi no reporto dispositivos CUDA"
+    message = str(result.stderr or result.stdout or "").strip().splitlines()
+    if message:
+        return [], message[0]
+    return [], f"nvidia-smi fallo con codigo {result.returncode}"
+
+
+def framework_cuda_devices() -> Tuple[List[str], str, str]:
+    devices, source, warning = tensorflow_cuda_devices()
+    if devices:
+        return devices, source, warning
+    return [], "", warning
+
+
+def tensorflow_cuda_devices() -> Tuple[List[str], str, str]:
+    try:
+        tf = sys.modules.get("tensorflow")
+        if tf is None:
+            return [], "", ""
+        config = getattr(tf, "config", None)
+        list_physical_devices = getattr(config, "list_physical_devices", None)
+        if not callable(list_physical_devices):
+            return [], "", "TensorFlow no expone deteccion de GPU"
+        gpus = list_physical_devices("GPU") or []
+        devices = [f"TensorFlow GPU: {getattr(gpu, 'name', str(gpu))}" for gpu in gpus]
+        return devices, "tensorflow", ""
+    except Exception as exc:
+        return [], "", f"TensorFlow GPU check fallo ({exc.__class__.__name__}: {exc})"
+
+
+def cuda_device_names(cuda_devices: Iterable[Any]) -> List[str]:
+    names: List[str] = []
+    for item in cuda_devices:
+        name = str(item or "").strip()
+        name = re.sub(r"^GPU\s+\d+\s*:\s*", "", name)
+        name = re.sub(r"\s+\(UUID:.*\)$", "", name)
+        if name:
+            names.append(name)
+    return names
 
 
 def default_training_payload() -> Dict[str, Any]:

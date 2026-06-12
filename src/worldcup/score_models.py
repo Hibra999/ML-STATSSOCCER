@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -520,6 +522,7 @@ def _fit_bayesian_state(
         config: Dict[str, Any],
 ) -> ScoreModelState:
     try:
+        _ensure_pytensor_cxx_flag()
         import pymc as pm  # type: ignore
     except Exception:
         return ScoreModelState(
@@ -615,6 +618,28 @@ def _fit_bayesian_state(
         "chains": chains,
     }
     return ScoreModelState(key=key, label=label, available=True, params=params, fingerprint=fingerprint)
+
+
+def _ensure_pytensor_cxx_flag() -> bool:
+    if _has_cxx_compiler() or _pytensor_flags_include_cxx(os.environ.get("PYTENSOR_FLAGS", "")):
+        return False
+    existing = os.environ.get("PYTENSOR_FLAGS", "").strip()
+    os.environ["PYTENSOR_FLAGS"] = f"{existing},cxx=" if existing else "cxx="
+    return True
+
+
+def _has_cxx_compiler() -> bool:
+    if str(os.environ.get("CXX") or "").strip():
+        return True
+    return any(shutil.which(candidate) for candidate in ("g++", "clang++", "cl.exe"))
+
+
+def _pytensor_flags_include_cxx(flags: str) -> bool:
+    for part in str(flags or "").split(","):
+        key = part.strip().split("=", 1)[0].strip().lower()
+        if key == "cxx":
+            return True
+    return False
 
 
 def _history_model_rows(history_df: pd.DataFrame | None, base_model: Any) -> List[Dict[str, Any]]:

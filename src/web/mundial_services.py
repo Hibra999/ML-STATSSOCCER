@@ -89,8 +89,6 @@ SOTA_SCORE_MODEL_SEQUENCE = [
     "bivariate_poisson_mle",
     "diagonal_inflated_bivariate_poisson",
     "zero_inflated_generalized_poisson",
-    "bayesian_hierarchical_poisson",
-    "bayesian_dynamic_poisson",
     "skellam_margin",
     "copula_weibull_count",
     "xg_poisson_local",
@@ -1085,6 +1083,7 @@ def upcoming_sota_fixture_reports(
                 "params": {},
                 "warnings": [f"{exc.__class__.__name__}: {exc}; se usa Poisson independiente."],
             }
+        metadata = score_model_report_metadata(metadata, hardware)
         for fixture_index, fixture in enumerate(fixtures, start=1):
             emit_report_progress(
                 progress_callback,
@@ -1144,20 +1143,39 @@ def stat_report_hardware(requested_device: Any, pipeline_mode: str) -> Dict[str,
     warnings: List[str] = []
     backend_supports_cuda = False
     actual_device = "cpu"
+    device_error = ""
     if pipeline_mode == "poisson_sota":
-        if requested == "cuda":
-            warnings.append("CUDA fue solicitada, pero los modelos estadisticos de marcador disponibles corren en CPU en este backend.")
+        cuda_reason = detected.get("cuda_error") or detected.get("cuda_warning") or "sin dispositivos"
+        if requested == "cuda" and detected.get("cuda_available"):
+            actual_device = "cuda"
+            warnings.append("CUDA fue solicitada y detectada; los modelos estadisticos SOTA actuales son CPU-bound y no ejecutan kernels GPU.")
+        elif requested == "cuda":
+            device_error = f"CUDA fue solicitada explicitamente, pero no se detecto GPU ({cuda_reason}); SOTA corre en CPU."
+            warnings.append(device_error)
         elif requested == "auto" and detected.get("cuda_available"):
             warnings.append("CUDA detectada; los modelos estadisticos actuales no exponen backend GPU y se ejecutan en CPU.")
         elif requested == "auto" and not detected.get("cuda_available"):
-            warnings.append(f"CUDA no disponible ({detected.get('cuda_error') or 'sin dispositivos'}); SOTA corre en CPU.")
+            warnings.append(f"CUDA no disponible ({cuda_reason}); SOTA corre en CPU.")
     return {
         **detected,
         "requested_device": requested,
         "actual_device": actual_device,
         "backend_supports_cuda": backend_supports_cuda,
+        "device_error": device_error,
         "warnings": warnings,
     }
+
+
+def score_model_report_metadata(metadata: Dict[str, Any], hardware: Dict[str, Any]) -> Dict[str, Any]:
+    if not hardware.get("cuda_available") or hardware.get("backend_supports_cuda"):
+        return metadata
+    if hardware.get("requested_device") != "cuda" or hardware.get("actual_device") != "cuda":
+        return metadata
+    warning = "Modelo estadistico CPU-bound: CUDA esta disponible, pero esta implementacion se ejecuta en CPU."
+    warnings = [str(item) for item in metadata.get("warnings", []) if str(item)]
+    if warning not in warnings:
+        warnings.append(warning)
+    return {**metadata, "warnings": warnings}
 
 
 def emit_report_progress(
