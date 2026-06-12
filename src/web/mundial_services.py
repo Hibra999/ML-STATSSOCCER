@@ -65,11 +65,7 @@ COUNTRY_FLAGS_ROOT = PROJECT_ROOT / "storage" / "graphics" / "countries"
 DEFAULT_CONFIG = {
     "iterations": 5000,
     "seed": 2026,
-    "use_lineups": False,
-    "use_player_features": False,
     "use_ml_model": False,
-    "lineup_weight": 1.0,
-    "player_feature_weight": 1.0,
     "ml_weight": 0.5,
     "history_weight": 1.0,
     "recency_weight": 0.35,
@@ -296,6 +292,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
     fixture_df = tournament_fixtures_dataframe(tournament)
     players_df, players_source = load_players(refresh=False)
     fixture_summary = fixture_overview_payload(fixture_df)
+    standings = group_standings_payload(groups, fixture_df)
     return {
         "name": tournament.get("name", "World Cup 2026"),
         "teams": sum(len(teams) for teams in groups.values()),
@@ -306,10 +303,12 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
         "fixture_source": fixture_source,
         "players_source": players_source,
         "opener": fixture_summary["opener"],
+        "featured_matches": fixture_summary["featured_matches"],
         "highlight": fixture_summary["highlight"],
         "next_matches": fixture_summary["next_matches"],
         "countdown_target": fixture_summary["countdown_target"],
         "countdown_state": fixture_summary["countdown_state"],
+        "group_standings": standings,
         "default_config": DEFAULT_CONFIG,
         "model": "Elo + Poisson Monte Carlo",
         "assets_policy": "Banderas locales/publicas y fotos publicas de SofaScore con fallback visual.",
@@ -324,6 +323,7 @@ def groups(refresh: bool = False) -> Dict[str, Any]:
         items.append({
             "name": group_name,
             "letter": group_letter(group_name),
+            "standings": group_standing_rows(group_name, team_names, tournament_fixtures_dataframe(tournament)),
             "teams": [
                 {
                     **team_asset(team),
@@ -617,14 +617,6 @@ def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     config = simulation_config(payload)
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     model, history_source = build_model(tournament, config)
-    if config["use_lineups"]:
-        adjustments, _ = lineup_rating_adjustments(tournament, weight=config["lineup_weight"])
-        if adjustments:
-            model = model.adjusted(adjustments)
-    if config["use_player_features"]:
-        adjustments, _ = player_feature_rating_adjustments(tournament, weight=config["player_feature_weight"])
-        if adjustments:
-            model = model.adjusted(adjustments)
     result = predict_match_payload(
         tournament=tournament,
         base_model=model,
@@ -646,14 +638,6 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     config = simulation_config(payload)
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     model, history_source = build_model(tournament, config)
-    if config["use_lineups"]:
-        adjustments, _ = lineup_rating_adjustments(tournament, weight=config["lineup_weight"])
-        if adjustments:
-            model = model.adjusted(adjustments)
-    if config["use_player_features"]:
-        adjustments, _ = player_feature_rating_adjustments(tournament, weight=config["player_feature_weight"])
-        if adjustments:
-            model = model.adjusted(adjustments)
 
     limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
     group_filter = str(payload.get("group") or "").strip()
@@ -698,14 +682,13 @@ def upcoming_fixture_rows(tournament: Dict[str, Any], group_filter: str = "") ->
         ~df["Equipo 1"].astype(str).str.match(r"^[123W][A-Z0-9/]+$") &
         ~df["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
     ].copy()
-    df["_date"] = pd.to_datetime(df["Fecha"], errors="coerce")
-    today = pd.Timestamp.today().normalize()
-    upcoming = df[df["_date"].notna() & (df["_date"] >= today)]
+    df = attach_fixture_schedule(df)
+    upcoming = future_fixture_rows(df)
     if upcoming.empty:
         upcoming = df[df["_date"].notna()]
     if upcoming.empty:
         upcoming = df
-    return upcoming.sort_values(["_date", "No."], kind="stable")
+    return drop_internal_fixture_columns(upcoming.sort_values(["_sort_time", "No."], kind="stable"))
 
 
 def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -759,25 +742,11 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     emit_job_progress(progress_callback, "preparing", 0, 100, "Preparando Monte Carlo")
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     model, history_source = build_model(tournament, config)
-    lineup_notes: List[str] = []
-    if config["use_lineups"]:
-        adjustments, lineup_notes = lineup_rating_adjustments(tournament, weight=config["lineup_weight"])
-        if adjustments:
-            model = model.adjusted(adjustments)
-    feature_notes: List[str] = []
-    if config["use_player_features"]:
-        adjustments, feature_notes = player_feature_rating_adjustments(tournament, weight=config["player_feature_weight"])
-        if adjustments:
-            model = model.adjusted(adjustments)
     active_model = read_model_metadata(model_id=config["model_id"] or None)
     hybrid_layers = ["Poisson base"]
     if config["use_ml_model"] and active_model.get("trained"):
         model = BlendedWorldCupModel(model, model_id=config["model_id"], ml_weight=float(config["ml_weight"]))
         hybrid_layers.extend(["ML blend 1X2", "ML ajuste lambdas"])
-    if config["use_lineups"]:
-        hybrid_layers.append("XI pre-partido")
-    if config["use_player_features"]:
-        hybrid_layers.append("Features XI")
     result = simulate_worldcup(
         tournament=tournament,
         model=model,
@@ -792,19 +761,13 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
             "config": config,
             "fixture_source": fixture_source,
             "history_source": history_source,
-            "use_lineups": config["use_lineups"],
-            "use_player_features": config["use_player_features"],
             "use_ml_model": config["use_ml_model"],
             "model_id": config["model_id"],
             "active_model": active_model,
-            "lineup_notes": lineup_notes,
-            "player_feature_notes": feature_notes,
             "hybrid_layers": hybrid_layers,
             "anti_leakage": [
                 "Historico filtrado antes del 2026-06-11.",
-                "Alineaciones ignoradas si fueron obtenidas despues de la fecha del partido.",
-                "Features del XI ignoradas si fueron obtenidas despues de la fecha del partido.",
-                "Modelo Kaggle entrenado/evaluado con split train/test local y sin partidos 2026.",
+                "Modelo ML entrenado/evaluado con partidos internacionales no Mundial y sin partidos 2026.",
                 "No se usan resultados del Mundial 2026 para entrenar ni calibrar.",
             ],
         },
@@ -850,19 +813,11 @@ def procedure() -> Dict[str, Any]:
             },
             {
                 "name": "Fine-tuning",
-                "detail": "Ajusta peso historico, recencia, ventaja local, limite de goles y peso opcional de alineaciones.",
-            },
-            {
-                "name": "11 iniciales",
-                "detail": "Detecta automaticamente eventos SofaScore por fecha/equipos, extrae titulares, formacion, ratings y stats disponibles.",
-            },
-            {
-                "name": "Features del XI",
-                "detail": "Calcula rating promedio, dispersion, min/max y promedios por linea; solo impactan la prediccion si son pre-partido.",
+                "detail": "Ajusta peso historico, recencia, ventaja local, limite de goles y mezcla opcional con ML.",
             },
             {
                 "name": "Walk-forward",
-                "detail": "Cuando ya existe XI con stats por partido, guarda snapshot de jugadores y features de equipo para un futuro reentreno incremental sin mezclar datos incompletos.",
+                "detail": "Cuando hay partidos ya jugados, guarda snapshots de resultado para un reentreno incremental sin mezclar datos incompletos.",
             },
             {
                 "name": "Monte Carlo",
@@ -878,9 +833,7 @@ def procedure() -> Dict[str, Any]:
             "Football-Data WorldCup2026.xlsx para odds 1X2 historicas y clasificatorios",
             "storage/worldcup/market/manual_odds.csv opcional para odds actuales/O-U 2.5",
             "Kaggle: harrachimustapha/fifa-world-cup-team-dataset",
-            "FotMob JSON publico para autodeteccion/lineups cuando existan",
             "storage/worldcup/cache/*.json",
-            "LanusStats/SofaScore opcional para alineaciones",
             "Wikipedia squads opcional para jugadores",
         ],
     }
@@ -906,11 +859,7 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "iterations": int(_clamp_int(payload.get("iterations", DEFAULT_CONFIG["iterations"]), 100, 20000)),
         "seed": int(payload.get("seed") if payload.get("seed") is not None else DEFAULT_CONFIG["seed"]),
-        "use_lineups": bool(payload.get("use_lineups", DEFAULT_CONFIG["use_lineups"])),
-        "use_player_features": bool(payload.get("use_player_features", DEFAULT_CONFIG["use_player_features"])),
         "use_ml_model": bool(payload.get("use_ml_model", DEFAULT_CONFIG["use_ml_model"])),
-        "lineup_weight": _clamp_float(payload.get("lineup_weight", DEFAULT_CONFIG["lineup_weight"]), 0.0, 2.0),
-        "player_feature_weight": _clamp_float(payload.get("player_feature_weight", DEFAULT_CONFIG["player_feature_weight"]), 0.0, 2.0),
         "ml_weight": _clamp_float(payload.get("ml_weight", DEFAULT_CONFIG["ml_weight"]), 0.0, 1.0),
         "history_weight": _clamp_float(payload.get("history_weight", DEFAULT_CONFIG["history_weight"]), 0.2, 2.0),
         "recency_weight": _clamp_float(payload.get("recency_weight", DEFAULT_CONFIG["recency_weight"]), 0.0, 1.0),
@@ -1009,25 +958,39 @@ def fixture_overview_payload(fixture_df: pd.DataFrame) -> Dict[str, Any]:
         fallback = _opener_payload(fixture_df)
         return {
             "opener": fallback,
-            "highlight": fallback,
+            "featured_matches": [],
+            "highlight": {},
             "next_matches": [],
             "countdown_target": "",
             "countdown_state": "pending",
         }
-    playable["_date"] = pd.to_datetime(playable["Fecha"], errors="coerce")
-    playable = playable.sort_values(["_date", "No."], kind="stable").reset_index(drop=True)
+    playable = attach_fixture_schedule(playable).sort_values(["_sort_time", "No."], kind="stable").reset_index(drop=True)
     opener = fixture_card_payload(playable.iloc[0])
-    today = pd.Timestamp.today().normalize()
-    upcoming = playable[playable["_date"].notna() & (playable["_date"] >= today)].copy()
-    ordered = upcoming if not upcoming.empty else playable
-    highlight_row = ordered.iloc[0]
-    highlight = fixture_card_payload(highlight_row)
+    upcoming = future_fixture_rows(playable)
+    if upcoming.empty:
+        return {
+            "opener": opener,
+            "featured_matches": [],
+            "highlight": {},
+            "next_matches": [],
+            "countdown_target": "",
+            "countdown_state": "finished",
+        }
+    first_sort = upcoming.iloc[0].get("_sort_time")
+    if pd.isna(first_sort):
+        featured = upcoming.iloc[[0]].copy()
+    else:
+        featured = upcoming[upcoming["_sort_time"].eq(first_sort)].copy()
+    featured_matches = [fixture_card_payload(row) for _, row in featured.iterrows()]
+    next_rows = upcoming.loc[~upcoming.index.isin(featured.index)].copy()
     next_matches = [
         fixture_card_payload(row)
-        for _, row in ordered.iloc[1:5].iterrows()
+        for _, row in next_rows.head(4).iterrows()
     ]
+    highlight = featured_matches[0] if featured_matches else {}
     return {
         "opener": opener,
+        "featured_matches": featured_matches,
         "highlight": highlight,
         "next_matches": next_matches,
         "countdown_target": highlight.get("kickoff_iso", ""),
@@ -1035,11 +998,82 @@ def fixture_overview_payload(fixture_df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def group_standings_payload(group_map: Dict[str, List[str]], fixture_df: pd.DataFrame) -> List[Dict[str, Any]]:
+    return [
+        {
+            "name": group_name,
+            "letter": group_letter(group_name),
+            "rows": group_standing_rows(group_name, team_names, fixture_df),
+        }
+        for group_name, team_names in group_map.items()
+    ]
+
+
+def group_standing_rows(group_name: str, team_names: List[str], fixture_df: pd.DataFrame) -> List[Dict[str, Any]]:
+    seed_map = {team: index for index, team in enumerate(team_names, start=1)}
+    rows: Dict[str, Dict[str, Any]] = {
+        team: {
+            **team_asset(team),
+            "team": team,
+            "seed": seed,
+            "PJ": 0,
+            "Pts": 0,
+            "GF": 0,
+            "GC": 0,
+            "DG": 0,
+        }
+        for team, seed in seed_map.items()
+    }
+    if fixture_df is not None and not fixture_df.empty and "Grupo" in fixture_df.columns:
+        group_rows = fixture_df[fixture_df["Grupo"].astype(str) == str(group_name)].copy()
+        for _, fixture in group_rows.iterrows():
+            home = str(fixture.get("Equipo 1", "") or "").strip()
+            away = str(fixture.get("Equipo 2", "") or "").strip()
+            if home not in rows or away not in rows:
+                continue
+            goals_home = _score_value(fixture.get("Goles 1", ""))
+            goals_away = _score_value(fixture.get("Goles 2", ""))
+            if goals_home is None or goals_away is None:
+                continue
+            rows[home]["PJ"] += 1
+            rows[away]["PJ"] += 1
+            rows[home]["GF"] += goals_home
+            rows[home]["GC"] += goals_away
+            rows[away]["GF"] += goals_away
+            rows[away]["GC"] += goals_home
+            if goals_home > goals_away:
+                rows[home]["Pts"] += 3
+            elif goals_home < goals_away:
+                rows[away]["Pts"] += 3
+            else:
+                rows[home]["Pts"] += 1
+                rows[away]["Pts"] += 1
+    for row in rows.values():
+        row["DG"] = int(row["GF"] - row["GC"])
+    ordered = sorted(
+        rows.values(),
+        key=lambda row: (-int(row["Pts"]), -int(row["DG"]), -int(row["GF"]), int(row["seed"])),
+    )
+    return jsonable(ordered)
+
+
+def _score_value(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return int(number)
+
+
 def fixture_card_payload(row: pd.Series | Dict[str, Any]) -> Dict[str, Any]:
     record = row if isinstance(row, dict) else row.to_dict()
     home = str(record.get("Equipo 1", "Mexico"))
     away = str(record.get("Equipo 2", "South Africa"))
-    kickoff = fixture_kickoff_iso(record.get("Fecha", ""), record.get("Hora", ""))
+    kickoff = str(record.get("_kickoff_iso") or fixture_kickoff_iso(record.get("Fecha", ""), record.get("Hora", "")))
     return {
         "id": str(record.get("No.", "")),
         "date": record.get("Fecha", "2026-06-11"),
@@ -1072,20 +1106,26 @@ def _opener_payload(fixture_df: pd.DataFrame) -> Dict[str, Any]:
 
 
 def fixture_kickoff_iso(date_value: Any, time_value: Any) -> str:
+    kickoff = fixture_kickoff_datetime(date_value, time_value, require_time=True)
+    return kickoff.isoformat() if kickoff else ""
+
+
+def fixture_kickoff_datetime(date_value: Any, time_value: Any, require_time: bool = False) -> datetime | None:
     date_text = str(date_value or "").strip()
     if not date_text:
-        return ""
+        return None
     time_text = str(time_value or "").strip()
     offset_hours = 0
     hour = 0
     minute = 0
-    if time_text:
-        match = re.search(r"(\d{1,2}):(\d{2})(?:\s*UTC([+-]\d{1,2}))?", time_text)
-        if match:
-            hour = int(match.group(1))
-            minute = int(match.group(2))
-            if match.group(3):
-                offset_hours = int(match.group(3))
+    match = re.search(r"(\d{1,2}):(\d{2})(?:\s*UTC([+-]\d{1,2}))?", time_text)
+    if require_time and not match:
+        return None
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if match.group(3):
+            offset_hours = int(match.group(3))
     try:
         kickoff = datetime.strptime(date_text, "%Y-%m-%d").replace(
             hour=hour,
@@ -1093,8 +1133,53 @@ def fixture_kickoff_iso(date_value: Any, time_value: Any) -> str:
             tzinfo=timezone(timedelta(hours=offset_hours)),
         )
     except ValueError:
-        return ""
-    return kickoff.astimezone(timezone.utc).isoformat()
+        return None
+    return kickoff.astimezone(timezone.utc)
+
+
+def attach_fixture_schedule(df: pd.DataFrame) -> pd.DataFrame:
+    scheduled = df.copy()
+    kickoff_values = []
+    kickoff_iso_values = []
+    has_kickoff_time = []
+    for _, row in scheduled.iterrows():
+        kickoff = fixture_kickoff_datetime(row.get("Fecha", ""), row.get("Hora", ""), require_time=True)
+        kickoff_values.append(kickoff)
+        kickoff_iso_values.append(kickoff.isoformat() if kickoff else "")
+        has_kickoff_time.append(kickoff is not None)
+    scheduled["_date"] = pd.to_datetime(scheduled["Fecha"], errors="coerce")
+    scheduled["_kickoff_iso"] = kickoff_iso_values
+    scheduled["_kickoff"] = pd.to_datetime(kickoff_values, utc=True, errors="coerce")
+    scheduled["_has_kickoff_time"] = has_kickoff_time
+    date_sort = pd.to_datetime(scheduled["Fecha"], utc=True, errors="coerce")
+    scheduled["_sort_time"] = scheduled["_kickoff"].where(scheduled["_kickoff"].notna(), date_sort)
+    return scheduled
+
+
+def future_fixture_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    now = pd.Timestamp(_now_utc())
+    if now.tzinfo is None:
+        now = now.tz_localize(timezone.utc)
+    else:
+        now = now.tz_convert(timezone.utc)
+    today = pd.Timestamp(now.date())
+    finished = pd.Series(False, index=df.index)
+    if "Finalizado" in df.columns:
+        finished = df["Finalizado"].astype(str).str.strip().str.lower().isin({"si", "sí", "yes", "true", "1"})
+    has_time = df["_has_kickoff_time"].astype(bool)
+    future_by_time = has_time & df["_kickoff"].notna() & (df["_kickoff"] > now)
+    future_by_date = ~has_time & df["_date"].notna() & (df["_date"] >= today)
+    return df[~finished & (future_by_time | future_by_date)].sort_values(["_sort_time", "No."], kind="stable").copy()
+
+
+def drop_internal_fixture_columns(df: pd.DataFrame) -> pd.DataFrame:
+    return df.drop(columns=[column for column in df.columns if str(column).startswith("_")], errors="ignore")
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def table_payload(df: pd.DataFrame, page: int = 1, page_size: int = 50) -> Dict[str, Any]:

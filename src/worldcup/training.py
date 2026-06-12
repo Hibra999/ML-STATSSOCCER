@@ -137,8 +137,9 @@ WALK_FORWARD_PLAYERS_FILE = WALK_FORWARD_ROOT / "player_match_stats.csv"
 WALK_FORWARD_TEAM_FEATURES_FILE = WALK_FORWARD_ROOT / "team_match_features.csv"
 FUTURE_LABEL_EXCLUDED_YEAR = 2026
 TARGET_WORLDCUP_YEAR = FUTURE_LABEL_EXCLUDED_YEAR
-PREPARED_SCHEMA_VERSION = "worldcup_2026_benchmark_v1"
-BENCHMARK_POLICY = "latest_completed_mens_fifa_worldcup_before_target"
+PREPARED_SCHEMA_VERSION = "worldcup_2026_international_labels_v2"
+EVAL_STRATEGY_LAST_30 = "last_30_international_test"
+BENCHMARK_POLICY = EVAL_STRATEGY_LAST_30
 WORLDCUP_XGBOOST_DEFAULTS = {
     "n_estimators": 450,
     "max_depth": 3,
@@ -448,8 +449,6 @@ def dataset_status() -> Dict[str, Any]:
 
 def prepare_training_dataset(force: bool = False, refresh_history: bool = False) -> Dict[str, Any]:
     files = list(discover_dataset_files(KAGGLE_ROOT))
-    if not files:
-        raise WorldCupTrainingError("No hay dataset Kaggle local. Primero descarga el dataset.")
     normalized = normalize_dataset_files(files)
     if PREPARED_DATASET_FILE.exists() and not force:
         current = prepared_dataset_status(files=files, normalized=normalized)
@@ -468,12 +467,13 @@ def ensure_prepared_dataset_current(payload: Dict[str, Any], progress_callback=N
         dataset = current.get("dataset") or {}
         if prepared_dataset_schema_valid(dataset):
             return dataset
-    if not files:
+    international_status = international_results_status()
+    if not files and not international_status.get("available"):
         if current["ready"]:
             raise WorldCupTrainingError(
-                "El artifact ETL Mundial esta desactualizado y no hay archivos Kaggle locales para regenerarlo."
+                "El artifact ETL Mundial esta desactualizado y no existe all_matches.csv para regenerarlo."
             )
-        raise WorldCupTrainingError("Primero ejecuta Preparar ETL para construir el dataset de entrenamiento Mundial.")
+        raise WorldCupTrainingError("Primero descarga o guarda all_matches.csv y ejecuta Preparar ETL.")
     reason = "schema/targets desactualizados" if current["ready"] else "artifact ausente"
     emit_training_progress(
         progress_callback,
@@ -505,6 +505,14 @@ def prepared_dataset_schema_valid(dataset: Dict[str, Any]) -> bool:
         return False
     if str(dataset.get("target_column") or "") != "Label + GoalsDistribution + OverUnder05/15/25/35":
         return False
+    if str(dataset.get("split_policy") or "") != EVAL_STRATEGY_LAST_30:
+        return False
+    test_rows = dataset.get("test", pd.DataFrame())
+    if not isinstance(test_rows, pd.DataFrame) or int(test_rows.shape[0]) != 30:
+        return False
+    for frame in (train_rows, test_rows):
+        if "is_worldcup_match" in frame.columns and frame["is_worldcup_match"].map(coerce_bool_value).any():
+            return False
     return bool(dataset.get("over_under_ready", False)) and bool(dataset.get("goals_distribution_ready", False))
 
 
@@ -574,7 +582,7 @@ def train_single_hybrid_model(
     fixture_feature_rows = (
         shared_context.get("fixture_feature_rows")
         if "fixture_feature_rows" in shared_context
-        else read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
+        else pd.DataFrame()
     )
     feature_cache = feature_cache or WorldCupFeatureBuildCache()
     target_warning = ""
@@ -660,7 +668,9 @@ def train_single_hybrid_model(
         )
         emit_training_progress(progress_callback, "features_eval", 6, single_total_steps, f"Features eval {label} listas", market=label, model_id=model_id, rows=int(x_eval.shape[0]), features=int(x_eval.shape[1]))
     else:
-        eval_strategy = "final_worldcup_test"
+        eval_strategy = evaluation_strategy(normalized)
+        if eval_strategy == "test_file":
+            eval_strategy = EVAL_STRATEGY_LAST_30
         test_rows = sort_match_rows(test_rows)
         fit_train_rows = train_rows
         emit_training_progress(progress_callback, "features_train", 3, single_total_steps, f"Construyendo features train {label}", market=label, model_id=model_id, rows=int(train_rows.shape[0]))
@@ -922,9 +932,7 @@ def train_dual_market_model(
         "history_source": history_source,
         "international_matches": international_matches,
         "recent15_match_index": build_recent15_match_index(international_matches),
-        "fixture_feature_rows": read_fixture_feature_rows()
-        if normalize_walk_forward_mode(payload.get("walk_forward_mode", "none")) == "result_plus_players"
-        else pd.DataFrame(),
+        "fixture_feature_rows": pd.DataFrame(),
     }
     feature_cache = WorldCupFeatureBuildCache()
 
@@ -1354,71 +1362,45 @@ def build_prepared_dataset(
     qualifier_matches = market_bundle.get("qualifiers", pd.DataFrame()).copy()
     api_football_bundle = load_api_football_data(force_download=bool(refresh_history), allow_download=bool(refresh_history))
     api_market_rows = api_football_bundle.get("market_rows", pd.DataFrame()).copy()
-    international_matches = load_international_matches(required=False)
+    try:
+        international_matches = load_international_matches(required=True)
+    except Exception as exc:
+        raise WorldCupTrainingError(f"all_matches.csv es obligatorio para labels: {exc}") from exc
     international_status = international_results_status()
     all_matches_label_rows = international_match_rows(international_matches)
     if not api_market_rows.empty:
         market_data = pd.concat([market_data, api_market_rows], ignore_index=True) if not market_data.empty else api_market_rows
     combined_has_1x2 = bool(not market_data.empty and market_data[["market_odds_home", "market_odds_draw", "market_odds_away"]].apply(pd.to_numeric, errors="coerce").notna().all(axis=1).any()) if {"market_odds_home", "market_odds_draw", "market_odds_away"}.issubset(market_data.columns) else False
     combined_has_ou25 = bool(not market_data.empty and market_data[["market_odds_over25", "market_odds_under25"]].apply(pd.to_numeric, errors="coerce").notna().all(axis=1).any()) if {"market_odds_over25", "market_odds_under25"}.issubset(market_data.columns) else False
-    history_rows = history_match_rows(history_df, source=history_source)
     warnings: List[str] = []
     label_policy_notes: List[str] = [
         f"Objetivo operativo: Mundial {TARGET_WORLDCUP_YEAR}.",
-        f"Benchmark historico: ultimo Mundial FIFA masculino senior completo anterior a {TARGET_WORLDCUP_YEAR}.",
+        "Labels obligatorios desde all_matches.csv; Kaggle y Mundiales historicos quedan solo como features/contexto.",
+        "Los partidos FIFA World Cup se excluyen de train/test para que los Mundiales historicos no sean labels.",
         f"Resultados con Year >= {FUTURE_LABEL_EXCLUDED_YEAR} se excluyen de labels por politica anti-leakage; solo pueden servir como contexto pre-partido.",
+        "Evaluacion: ultimos 30 partidos internacionales no Mundial por fecha.",
     ]
-    label_source = "kaggle_match_result"
+    label_source = "all_matches.csv"
     raw_train = normalized["train"].copy()
     raw_test = normalized["test"].copy()
     raw_mode = normalized["training_mode"]
     team_features = normalized["team_features"].copy()
 
-    if not all_matches_label_rows.empty:
-        labeled_rows = deduplicate_labeled_matches(pd.concat([all_matches_label_rows, history_rows], ignore_index=True))
-        label_source = "all_matches.csv + historical_worldcup"
-        label_policy_notes.append("all_matches.csv se usa como corpus principal de labels; los Mundiales historicos se conservan como metadata y benchmark.")
-        if international_status.get("warning"):
-            warnings.append(str(international_status.get("warning")))
-    elif raw_train.empty:
-        if history_rows.empty:
-            raise WorldCupTrainingError("El ETL no encontro partidos con goles reales para construir el dataset de entrenamiento.")
-        labeled_rows = history_rows
-        label_source = "historical_worldcup"
-        warnings.append("all_matches.csv no esta disponible o no es valido; el ETL usa resultados historicos abiertos del Mundial para 1X2 y U/O 0.5, 1.5, 2.5 y 3.5.")
-    elif has_over_under_target(raw_train):
-        labeled_parts = [raw_train]
-        if has_over_under_target(raw_test):
-            labeled_parts.append(raw_test)
-        labeled_rows = deduplicate_labeled_matches(pd.concat([*labeled_parts, history_rows], ignore_index=True))
-        label_source = "kaggle_match_result"
-        warnings.append("all_matches.csv no esta disponible o no es valido; se conserva fallback Kaggle/historico.")
-        if raw_test.empty or not has_over_under_target(raw_test):
-            warnings.append("El test Kaggle no trae goles suficientes para U/O multi-linea; el ETL usara el ultimo Mundial FIFA masculino completo como benchmark si hay fechas.")
-    else:
-        if history_rows.empty:
-            raise WorldCupTrainingError("El Kaggle actual no trae goles suficientes para U/O multi-linea y no se encontraron partidos historicos con goles reales.")
-        labeled_parts = [raw_train, history_rows]
-        if has_over_under_target(raw_test):
-            labeled_parts.append(raw_test)
-        labeled_rows = deduplicate_labeled_matches(pd.concat(labeled_parts, ignore_index=True))
-        label_source = "kaggle_match_result + historical_worldcup"
-        warnings.append("all_matches.csv no esta disponible o no es valido; el ETL complemento Kaggle con el historico abierto del Mundial.")
-        if raw_test.empty or not has_over_under_target(raw_test):
-            warnings.append("El test Kaggle no trae goles suficientes; el ultimo Mundial FIFA masculino completo se usara como benchmark si hay fechas.")
+    if raw_mode and not raw_train.empty:
+        label_policy_notes.append(f"Kaggle detectado en modo {raw_mode}; se usa como features/equipos, no como labels.")
+    if international_status.get("warning"):
+        warnings.append(str(international_status.get("warning")))
+    if all_matches_label_rows.empty:
+        raise WorldCupTrainingError("all_matches.csv no contiene partidos internacionales validos con marcador para construir labels.")
 
-    labeled_rows = deduplicate_labeled_matches(sanitize_match_rows(labeled_rows))
+    labeled_rows = deduplicate_labeled_matches(sanitize_match_rows(all_matches_label_rows))
     labeled_rows, future_label_rows = drop_future_label_rows(labeled_rows)
     if future_label_rows:
         label_policy_notes.append(f"{future_label_rows} partidos con Year >= {FUTURE_LABEL_EXCLUDED_YEAR} quedaron fuera de labels por politica anti-leakage.")
-    train_df, test_df, final_test_year, split_warning = split_latest_worldcup_test(labeled_rows)
+    worldcup_rows_count = int(labeled_rows["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in labeled_rows.columns else 0
+    train_df, test_df, split_warning = split_last_30_international_test(labeled_rows)
     if split_warning:
-        if final_test_year:
-            label_policy_notes.append(split_warning)
-        else:
-            warnings.append(split_warning)
-    if final_test_year:
-        label_policy_notes.append(f"Benchmark historico: Mundial {final_test_year}; entrenamiento/validacion usan solo años anteriores.")
+        label_policy_notes.append(split_warning)
     over_under_ready = has_over_under_target(train_df)
     if not over_under_ready:
         raise WorldCupTrainingError("El ETL no pudo construir targets reales de U/O multi-linea con goles observados.")
@@ -1429,7 +1411,6 @@ def build_prepared_dataset(
     dc_rho = estimate_dixon_coles_rho(history_df)
     class_distribution = split_class_distribution(train_df, test_df)
     all_matches_rows_count = int(all_matches_label_rows.shape[0])
-    worldcup_rows_count = int(labeled_rows["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in labeled_rows.columns else 0
     market_status_payload = {
         "status": "ok" if combined_has_1x2 or combined_has_ou25 else market_bundle.get("status", "missing"),
         "has_1x2": combined_has_1x2,
@@ -1504,14 +1485,40 @@ def build_prepared_dataset(
         "label_source": label_source,
         "history_source": history_source,
         "target_worldcup_year": str(TARGET_WORLDCUP_YEAR),
-        "benchmark_worldcup_year": final_test_year,
+        "benchmark_worldcup_year": "",
         "benchmark_policy": BENCHMARK_POLICY,
-        "final_test_year": final_test_year,
-        "split_policy": "latest_worldcup_final_test" if final_test_year else "temporal_holdout_from_train",
+        "final_test_year": "",
+        "split_policy": EVAL_STRATEGY_LAST_30,
         "over_under_ready": over_under_ready,
         "goals_distribution_ready": goals_distribution_ready,
         "result_ready": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
     }
+
+
+def split_last_30_international_test(rows: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
+    if rows.empty:
+        raise WorldCupTrainingError("all_matches.csv no contiene partidos internacionales no Mundial validos para train/test.")
+    working = sort_match_rows(sanitize_match_rows(rows))
+    if "is_worldcup_match" in working.columns:
+        worldcup_mask = working["is_worldcup_match"].map(coerce_bool_value)
+    else:
+        worldcup_mask = working.get("tournament", pd.Series(index=working.index, dtype=object)).map(is_worldcup_tournament)
+    date_values = pd.to_datetime(working.get("Date"), errors="coerce")
+    valid = working[(~worldcup_mask) & date_values.notna()].copy()
+    valid = sort_match_rows(valid).reset_index(drop=True)
+    if valid.shape[0] < 31:
+        raise WorldCupTrainingError(
+            f"all_matches.csv debe contener al menos 31 partidos internacionales no Mundial validos; encontro {valid.shape[0]}."
+        )
+    train = valid.iloc[:-30].copy().reset_index(drop=True)
+    test = valid.iloc[-30:].copy().reset_index(drop=True)
+    removed_worldcup = int(worldcup_mask.sum())
+    warning = (
+        f"{removed_worldcup} partidos FIFA World Cup quedaron fuera de train/test y solo sirven como contexto."
+        if removed_worldcup
+        else ""
+    )
+    return train, test, warning
 
 
 def split_latest_worldcup_test(rows: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, str, str]:
@@ -3362,6 +3369,9 @@ def labeled_test_row_count(normalized: Dict[str, Any]) -> int:
 
 
 def evaluation_strategy(normalized: Dict[str, Any]) -> str:
+    split_policy = str(normalized.get("split_policy") or "")
+    if split_policy == EVAL_STRATEGY_LAST_30:
+        return EVAL_STRATEGY_LAST_30
     if labeled_test_row_count(normalized) > 0:
         if normalized.get("final_test_year"):
             return "final_worldcup_test"
@@ -3492,8 +3502,8 @@ def normalize_market_mode(value: Any, target: str = "result") -> str:
 
 def normalize_walk_forward_mode(value: Any) -> str:
     key = str(value or "none").strip().lower().replace("-", "_")
-    if key in {"result_plus_players", "players", "with_players", "player_features"}:
-        return "result_plus_players"
+    if key in {"players", "with_players", "player_features"}:
+        return "result_only"
     if key in {"result_only", "base", "match_only", "without_players"}:
         return "result_only"
     return "none"
@@ -3680,23 +3690,12 @@ def supplemental_training_rows(
     if removed_future:
         empty["warnings"] = [f"{removed_future} partidos 2026 con marcador quedaron fuera del reentreno por politica anti-leakage."]
         return empty
-    warnings: List[str] = []
-    if normalized_mode == "result_plus_players":
-        fixture_features = read_fixture_feature_rows()
-        ready_ids = player_ready_fixture_ids(fixture_features)
-        before = int(completed.shape[0])
-        completed = completed[completed["FixtureId"].astype(str).isin(ready_ids)].copy()
-        if completed.empty:
-            empty["warnings"] = ["No hay partidos cerrados con XI y stats pre-partido listos para reentreno enriquecido."]
-            return empty
-        if int(completed.shape[0]) < before:
-            warnings.append("Solo se incorporaron partidos con XI/stats pre-partido completos para el reentreno enriquecido.")
     return {
         "mode": normalized_mode,
         "rows": completed.reset_index(drop=True),
         "fixture_ids": completed["FixtureId"].astype(str).tolist(),
         "added_rows": int(completed.shape[0]),
-        "warnings": warnings,
+        "warnings": [],
     }
 
 
@@ -3711,42 +3710,31 @@ def walk_forward_refresh_state() -> Dict[str, Any]:
     played = worldcup_played_fixture_rows(tournament)
     completed = completed_worldcup_training_rows(tournament)
     matches = read_optional_csv(WALK_FORWARD_MATCHES_FILE)
-    fixture_features = read_fixture_feature_rows()
     snapshot_ids = set(matches["fixture_id"].astype(str)) if not matches.empty and "fixture_id" in matches.columns else set()
     included_result_ids = set()
-    included_player_ids = set()
     if not matches.empty and "fixture_id" in matches.columns:
         if "included_result_only_at" in matches.columns:
             included_result_ids = set(matches[matches["included_result_only_at"].fillna("").astype(str).str.len() > 0]["fixture_id"].astype(str))
-        if "included_with_players_at" in matches.columns:
-            included_player_ids = set(matches[matches["included_with_players_at"].fillna("").astype(str).str.len() > 0]["fixture_id"].astype(str))
     played_ids = set(played["No."].astype(str)) if not played.empty else set()
     completed_ids = set(completed["FixtureId"].astype(str)) if not completed.empty else set()
-    player_ready_ids = player_ready_fixture_ids(fixture_features)
     stale_ids = sorted(played_ids - snapshot_ids)
     ready_result_ids = sorted(completed_ids - included_result_ids)
-    ready_player_ids = sorted((completed_ids & player_ready_ids) - included_player_ids)
     latest_fixture = ""
     if not played.empty:
         latest = played.iloc[-1]
         latest_fixture = f"{latest.get('Equipo 1', '')} vs {latest.get('Equipo 2', '')} ({latest.get('Fecha', '')})"
     note = ""
     if stale_ids:
-        note = f"Hay {len(stale_ids)} partidos ya jugados sin snapshot de XI/stats. Conviene recargar datos."
-    elif ready_player_ids:
-        note = f"Hay {len(ready_player_ids)} partidos listos para reentreno enriquecido."
+        note = f"Hay {len(stale_ids)} partidos ya jugados sin snapshot. Conviene recargar datos."
     elif ready_result_ids:
         note = f"Hay {len(ready_result_ids)} partidos listos para reentreno base."
     return {
         "played_matches": int(len(played_ids)),
         "completed_results": int(len(completed_ids)),
         "snapshot_matches": int(len(snapshot_ids)),
-        "player_ready_matches": int(len(player_ready_ids)),
         "stale_match_ids": stale_ids,
         "ready_result_ids": ready_result_ids,
-        "ready_player_ids": ready_player_ids,
         "ready_result_only": int(len(ready_result_ids)),
-        "ready_with_players": int(len(ready_player_ids)),
         "requires_reload": bool(stale_ids),
         "latest_played_fixture": latest_fixture,
         "note": note,
@@ -3770,10 +3758,7 @@ def mark_walk_forward_ingested(fixture_ids: List[str], mode: str) -> None:
         key = str(fixture_id)
         if key not in set(rows["fixture_id"]):
             rows = pd.concat([rows, pd.DataFrame([{"fixture_id": key}])], ignore_index=True)
-        if normalized_mode == "result_plus_players":
-            rows.loc[rows["fixture_id"] == key, "included_with_players_at"] = timestamp
-        else:
-            rows.loc[rows["fixture_id"] == key, "included_result_only_at"] = timestamp
+        rows.loc[rows["fixture_id"] == key, "included_result_only_at"] = timestamp
     WALK_FORWARD_ROOT.mkdir(parents=True, exist_ok=True)
     rows.to_csv(WALK_FORWARD_MATCHES_FILE, index=False)
 
@@ -4487,7 +4472,7 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
         before_date=HISTORY_REFERENCE_DATE,
         base_model=base_model,
     )
-    fixture_feature_rows = read_fixture_feature_rows()
+    fixture_feature_rows = pd.DataFrame()
     x = pd.DataFrame([
         match_feature_row(
             base_model,
@@ -5218,7 +5203,7 @@ def etl_steps(
         or ""
     )
     international_detail = (
-        f"all_matches.csv disponible como corpus principal/contexto ({all_matches_rows or international_status.get('rows', 0)} labels normalizados, {worldcup_rows} filas Mundial FIFA senior, benchmark {benchmark_year or 'pendiente'})."
+        f"all_matches.csv disponible como corpus principal ({all_matches_rows or international_status.get('rows', 0)} labels normalizados, {worldcup_rows} filas Mundial FIFA senior excluidas de train/test)."
         if international_status.get("available")
         else f"All matches faltante: {international_status.get('reason') or 'sin CSV valido'} Ruta esperada: {international_status.get('file_path') or 'storage/worldcup/international/all_matches.csv'}."
     )
@@ -5247,7 +5232,7 @@ def etl_steps(
             "name": "Split evaluacion",
             "status": "ok" if eval_strategy != "unavailable" else "pending",
             "count": test_rows if test_rows else planned_holdout_rows(train_rows),
-            "detail": f"Benchmark historico: Mundial {benchmark_year}" if eval_strategy == "final_worldcup_test" and benchmark_year else "Benchmark historico Mundial" if eval_strategy == "final_worldcup_test" else "Test etiquetado" if eval_strategy == "test_file" else "Holdout temporal desde train" if eval_strategy == "holdout_temporal" else "Sin evaluacion.",
+            "detail": "Ultimos 30 partidos internacionales no Mundial" if eval_strategy == EVAL_STRATEGY_LAST_30 else f"Benchmark historico: Mundial {benchmark_year}" if eval_strategy == "final_worldcup_test" and benchmark_year else "Benchmark historico Mundial" if eval_strategy == "final_worldcup_test" else "Test etiquetado" if eval_strategy == "test_file" else "Holdout temporal desde train" if eval_strategy == "holdout_temporal" else "Sin evaluacion.",
         },
         {
             "name": "Features seleccion",
@@ -5295,7 +5280,7 @@ def etl_steps(
             "name": "Anti-leakage",
             "status": "ok" if train_rows else "pending",
             "count": 0,
-            "detail": "Features historicas/recent15 se cortan antes de la fecha del partido; el Mundial final queda solo en eval y no se usan resultados 2026 como labels.",
+            "detail": "Features historicas/recent15 se cortan antes de la fecha del partido; Mundiales historicos y 2026 no entran como labels.",
         },
     ]
 
@@ -5775,7 +5760,6 @@ def walk_forward_status() -> Dict[str, int]:
         "team_rows": int(team_features.shape[0]),
         "pending_results": pending_results,
         "ready_for_retrain": ready_for_retrain,
-        "ready_with_players": int(refresh_state["ready_with_players"]),
     }
 
 
@@ -5819,12 +5803,10 @@ def capture_walk_forward_snapshot(payload: Dict[str, Any]) -> Dict[str, int]:
     status = "ready_for_retrain" if prediction_safe and stats_known >= 22 else "pending_result"
     existing = read_optional_csv(WALK_FORWARD_MATCHES_FILE)
     included_result_only_at = ""
-    included_with_players_at = ""
     if not existing.empty and "fixture_id" in existing.columns:
         current = existing[existing["fixture_id"].astype(str) == fixture_id]
         if not current.empty:
             included_result_only_at = str(current.iloc[-1].get("included_result_only_at", "") or "")
-            included_with_players_at = str(current.iloc[-1].get("included_with_players_at", "") or "")
     match_row = pd.DataFrame([{
         "fixture_id": fixture_id,
         "date": data.get("date", ""),
@@ -5840,7 +5822,6 @@ def capture_walk_forward_snapshot(payload: Dict[str, Any]) -> Dict[str, int]:
         "stats_known": stats_known,
         "status": status,
         "included_result_only_at": included_result_only_at,
-        "included_with_players_at": included_with_players_at,
     }])
     write_deduped_csv(WALK_FORWARD_MATCHES_FILE, match_row, subset=["fixture_id"])
     return walk_forward_status()

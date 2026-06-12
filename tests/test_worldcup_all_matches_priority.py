@@ -52,6 +52,48 @@ def empty_api_football_bundle() -> dict:
     }
 
 
+def make_international_matches(rows: int = 42, include_worldcup: bool = False) -> pd.DataFrame:
+    teams = ["Mexico", "Canada", "South Africa", "Japan", "Brazil", "France"]
+    scores = [(0, 0), (1, 0), (0, 2), (2, 1), (3, 1), (1, 3), (4, 2)]
+    items = []
+    for index in range(rows):
+        home = teams[index % len(teams)]
+        away = teams[(index + 1) % len(teams)]
+        hg, ag = scores[index % len(scores)]
+        items.append({
+            "date": pd.Timestamp("2018-01-01") + pd.Timedelta(days=index),
+            "home_team": home,
+            "away_team": away,
+            "home_score": hg,
+            "away_score": ag,
+            "tournament": "Friendly" if index % 3 else "FIFA World Cup qualification",
+            "country": home,
+            "neutral": False,
+        })
+    if include_worldcup:
+        items.append({
+            "date": pd.Timestamp("2018-06-15"),
+            "home_team": "Russia",
+            "away_team": "Saudi Arabia",
+            "home_score": 5,
+            "away_score": 0,
+            "tournament": "FIFA World Cup",
+            "country": "Russia",
+            "neutral": False,
+        })
+        items.append({
+            "date": pd.Timestamp("2022-11-20"),
+            "home_team": "Qatar",
+            "away_team": "Ecuador",
+            "home_score": 0,
+            "away_score": 2,
+            "tournament": "FIFA World Cup",
+            "country": "Qatar",
+            "neutral": False,
+        })
+    return pd.DataFrame(items)
+
+
 def test_worldcup_tournament_detector_is_mens_senior_only():
     accepted = [
         "FIFA World Cup",
@@ -149,130 +191,29 @@ def test_deduplicate_prefers_worldcup_metadata_on_same_match_key():
     assert bool(deduped.iloc[0]["is_worldcup_match"]) is True
 
 
-def test_latest_worldcup_split_uses_2022_only_for_eval_and_excludes_later_context():
-    rows = training.sanitize_match_rows(pd.DataFrame([
-        {
-            "Date": "2018-06-15",
-            "Year": 2018,
-            "Home": "Russia",
-            "Away": "Saudi Arabia",
-            "HG": 5,
-            "AG": 0,
-            "Label": "H",
-            "Source": "worldcup",
-            "tournament": "FIFA World Cup",
-            "is_worldcup_match": True,
-        },
-        {
-            "Date": "2022-09-01",
-            "Year": 2022,
-            "Home": "Mexico",
-            "Away": "Canada",
-            "HG": 2,
-            "AG": 1,
-            "Label": "H",
-            "Source": "all_matches.csv",
-            "tournament": "Friendly",
-        },
-        {
-            "Date": "2022-11-20",
-            "Year": 2022,
-            "Home": "Qatar",
-            "Away": "Ecuador",
-            "HG": 0,
-            "AG": 2,
-            "Label": "A",
-            "Source": "worldcup",
-            "tournament": "FIFA World Cup",
-            "is_worldcup_match": True,
-        },
-        {
-            "Date": "2023-03-01",
-            "Year": 2023,
-            "Home": "Mexico",
-            "Away": "Canada",
-            "HG": 4,
-            "AG": 0,
-            "Label": "H",
-            "Source": "all_matches.csv",
-            "tournament": "Friendly",
-        },
-    ]))
+def test_last_30_international_split_excludes_worldcups_from_train_and_test():
+    matches = make_international_matches(rows=35, include_worldcup=True)
+    rows = training.international_match_rows(international_provider.normalize_international_matches(matches))
 
-    train, test, final_year, warning = training.split_latest_worldcup_test(rows)
+    train, test, warning = training.split_last_30_international_test(rows)
 
-    assert final_year == "2022"
-    assert set(test["Home"]) == {"Qatar"}
-    assert set(train["Home"]) == {"Russia", "Mexico"}
-    assert "posteriores" in warning
-    assert pd.to_datetime(train["Date"]).max() < pd.Timestamp("2022-11-20")
+    assert train.shape[0] == 5
+    assert test.shape[0] == 30
+    assert not train["is_worldcup_match"].map(bool).any()
+    assert not test["is_worldcup_match"].map(bool).any()
+    assert pd.to_datetime(train["Date"]).max() < pd.to_datetime(test["Date"]).min()
+    assert "FIFA World Cup quedaron fuera" in warning
 
 
-def test_latest_worldcup_split_ignores_futsal_2024_and_2026_target_labels():
-    rows = training.sanitize_match_rows(pd.DataFrame([
-        {
-            "Date": "2018-06-15",
-            "Year": 2018,
-            "Home": "Russia",
-            "Away": "Saudi Arabia",
-            "HG": 5,
-            "AG": 0,
-            "Label": "H",
-            "Source": "all_matches.csv",
-            "tournament": "FIFA World Cup",
-        },
-        {
-            "Date": "2022-11-20",
-            "Year": 2022,
-            "Home": "Qatar",
-            "Away": "Ecuador",
-            "HG": 0,
-            "AG": 2,
-            "Label": "A",
-            "Source": "all_matches.csv",
-            "tournament": "FIFA World Cup",
-        },
-        {
-            "Date": "2024-09-14",
-            "Year": 2024,
-            "Home": "Uzbekistan",
-            "Away": "Netherlands",
-            "HG": 3,
-            "AG": 3,
-            "Label": "D",
-            "Source": "all_matches.csv",
-            "tournament": "FIFA Futsal World Cup",
-        },
-        {
-            "Date": "2026-06-11",
-            "Year": 2026,
-            "Home": "Mexico",
-            "Away": "South Africa",
-            "HG": 2,
-            "AG": 1,
-            "Label": "H",
-            "Source": "all_matches.csv",
-            "tournament": "FIFA World Cup",
-        },
-    ]))
+def test_last_30_international_split_requires_31_non_worldcup_rows():
+    rows = training.international_match_rows(international_provider.normalize_international_matches(make_international_matches(rows=30)))
 
-    train, test, final_year, warning = training.split_latest_worldcup_test(rows)
-
-    assert final_year == "2022"
-    assert set(test["tournament"]) == {"FIFA World Cup"}
-    assert set(test["Home"]) == {"Qatar"}
-    assert set(train["Home"]) == {"Russia"}
-    assert "2022" in warning
+    with pytest.raises(training.WorldCupTrainingError, match="al menos 31"):
+        training.split_last_30_international_test(rows)
 
 
-def test_prepared_dataset_metadata_uses_2022_benchmark_and_policy_notes(tmp_path, monkeypatch):
-    matches = pd.DataFrame([
-        {"date": "2018-06-15", "home_team": "Russia", "away_team": "Saudi Arabia", "home_score": 5, "away_score": 0, "tournament": "FIFA World Cup", "country": "Russia", "neutral": False},
-        {"date": "2021-09-02", "home_team": "Mexico", "away_team": "Canada", "home_score": 1, "away_score": 0, "tournament": "Friendly", "country": "Mexico", "neutral": False},
-        {"date": "2022-11-20", "home_team": "Qatar", "away_team": "Ecuador", "home_score": 0, "away_score": 2, "tournament": "FIFA World Cup", "country": "Qatar", "neutral": False},
-        {"date": "2024-09-14", "home_team": "Uzbekistan", "away_team": "Netherlands", "home_score": 3, "away_score": 3, "tournament": "FIFA Futsal World Cup", "country": "Uzbekistan", "neutral": False},
-        {"date": "2026-06-11", "home_team": "Mexico", "away_team": "South Africa", "home_score": 2, "away_score": 1, "tournament": "FIFA World Cup", "country": "Mexico", "neutral": False},
-    ])
+def test_prepared_dataset_metadata_uses_last_30_international_test_and_policy_notes(tmp_path, monkeypatch):
+    matches = make_international_matches(rows=35, include_worldcup=True)
 
     monkeypatch.setattr(training, "load_historical_matches", lambda refresh=False: (pd.DataFrame(), "none"))
     monkeypatch.setattr(training, "load_market_data", lambda **kwargs: empty_market_bundle())
@@ -294,15 +235,34 @@ def test_prepared_dataset_metadata_uses_2022_benchmark_and_policy_notes(tmp_path
 
     assert prepared["prepared_schema_version"] == training.PREPARED_SCHEMA_VERSION
     assert prepared["target_worldcup_year"] == "2026"
-    assert prepared["benchmark_worldcup_year"] == "2022"
-    assert prepared["final_test_year"] == "2022"
+    assert prepared["benchmark_worldcup_year"] == ""
+    assert prepared["final_test_year"] == ""
     assert prepared["benchmark_policy"] == training.BENCHMARK_POLICY
     assert prepared["worldcup_rows"] == 2
-    assert int(pd.to_numeric(prepared["train"]["Year"]).max()) == 2021
-    assert set(prepared["test"]["Home"]) == {"Qatar"}
-    assert any("Year >= 2026" in note for note in prepared["label_policy_notes"])
+    assert prepared["label_source"] == "all_matches.csv"
+    assert prepared["split_policy"] == training.EVAL_STRATEGY_LAST_30
+    assert prepared["test"].shape[0] == 30
+    assert not prepared["train"]["is_worldcup_match"].map(bool).any()
+    assert not prepared["test"]["is_worldcup_match"].map(bool).any()
+    assert pd.to_datetime(prepared["train"]["Date"]).max() < pd.to_datetime(prepared["test"]["Date"]).min()
+    assert any("Mundiales historicos" in note for note in prepared["label_policy_notes"])
     assert not any("Test final bloqueado" in warning for warning in prepared["warnings"])
     assert not any("anti-leakage" in warning and "2026" in warning for warning in prepared["warnings"])
+
+
+def test_prepared_dataset_requires_all_matches_csv(monkeypatch):
+    monkeypatch.setattr(training, "load_historical_matches", lambda refresh=False: (pd.DataFrame(), "none"))
+    monkeypatch.setattr(training, "load_market_data", lambda **kwargs: empty_market_bundle())
+    monkeypatch.setattr(training, "load_api_football_data", lambda **kwargs: empty_api_football_bundle())
+    monkeypatch.setattr(training, "load_international_matches", lambda required=True: (_ for _ in ()).throw(RuntimeError("No existe all_matches.csv")))
+    monkeypatch.setattr(training, "international_results_status", lambda: {"available": False, "reason": "No existe all_matches.csv"})
+
+    with pytest.raises(training.WorldCupTrainingError, match="all_matches.csv es obligatorio"):
+        training.build_prepared_dataset(
+            files=[],
+            normalized=minimal_normalized_dataset(),
+            refresh_history=False,
+        )
 
 
 def test_prepared_dataset_status_marks_old_schema_stale_without_old_warnings(tmp_path, monkeypatch):
@@ -357,6 +317,8 @@ def test_ensure_prepared_dataset_current_regenerates_old_schema(tmp_path, monkey
     prepared_path.parent.mkdir(parents=True, exist_ok=True)
     with prepared_path.open("wb") as handle:
         pickle.dump(old_dataset, handle)
+    rows = training.international_match_rows(international_provider.normalize_international_matches(make_international_matches(rows=36)))
+    train_rows, test_rows, _ = training.split_last_30_international_test(rows)
     regenerated = {
         **minimal_normalized_dataset(),
         "prepared_schema_version": training.PREPARED_SCHEMA_VERSION,
@@ -364,10 +326,9 @@ def test_ensure_prepared_dataset_current_regenerates_old_schema(tmp_path, monkey
         "trainable": True,
         "over_under_ready": True,
         "goals_distribution_ready": True,
-        "train": pd.DataFrame([
-            {"Home": "Mexico", "Away": "Canada", "Label": "H", "HG": 1, "AG": 0, "OverUnder05": 1, "OverUnder15": 0, "OverUnder25": 0, "OverUnder35": 0},
-            {"Home": "Canada", "Away": "Mexico", "Label": "A", "HG": 0, "AG": 2, "OverUnder05": 1, "OverUnder15": 1, "OverUnder25": 0, "OverUnder35": 0},
-        ]),
+        "train": train_rows,
+        "test": test_rows,
+        "split_policy": training.EVAL_STRATEGY_LAST_30,
     }
     calls = {"prepare": 0}
 

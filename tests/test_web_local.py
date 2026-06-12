@@ -7,6 +7,38 @@ import pandas as pd
 import pytest
 
 
+def worldcup_international_sample(rows=42):
+    teams = ["Mexico", "South Africa", "Canada", "Japan", "Brazil", "France"]
+    scores = [(0, 0), (1, 0), (0, 2), (2, 1), (3, 1), (1, 3), (4, 2), (2, 2)]
+    return pd.DataFrame([
+        {
+            "date": pd.Timestamp("2018-01-01") + pd.Timedelta(days=index),
+            "home_team": teams[index % len(teams)],
+            "away_team": teams[(index + 1) % len(teams)],
+            "home_score": scores[index % len(scores)][0],
+            "away_score": scores[index % len(scores)][1],
+            "tournament": "Friendly" if index % 3 else "FIFA World Cup qualification",
+            "country": teams[index % len(teams)],
+            "neutral": False,
+        }
+        for index in range(rows)
+    ])
+
+
+def patch_worldcup_international(monkeypatch, training, matches=None):
+    matches = matches if matches is not None else worldcup_international_sample()
+    monkeypatch.setattr(training, "load_international_matches", lambda required=False: matches)
+    monkeypatch.setattr(training, "international_results_status", lambda: {
+        "available": True,
+        "source_path": "storage/worldcup/international/all_matches.csv",
+        "file_path": "storage/worldcup/international/all_matches.csv",
+        "rows": int(matches.shape[0]),
+        "all_matches_rows": int(matches.shape[0]),
+        "worldcup_rows": int(matches["tournament"].astype(str).str.contains("FIFA World Cup$", regex=True).sum()),
+    })
+    return matches
+
+
 def test_web_server_binds_localhost_only():
     from src.web.config import LOCAL_HOST, LOCAL_PORT
 
@@ -53,12 +85,12 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/health" in paths
     assert "/api/mundial/overview" in paths
     assert "/api/mundial/simulate" in paths
-    assert "/api/mundial/lineups" in paths
-    assert "/api/mundial/fixtures/{fixture_id}/lineups" in paths
-    assert "/api/mundial/fixtures/{fixture_id}/autodetect" in paths
-    assert "/api/mundial/lineups/auto-refresh" in paths
-    assert "/api/mundial/fixtures/{fixture_id}/player-stats" in paths
-    assert "/api/mundial/player-features" in paths
+    assert "/api/mundial/lineups" not in paths
+    assert "/api/mundial/fixtures/{fixture_id}/lineups" not in paths
+    assert "/api/mundial/fixtures/{fixture_id}/autodetect" not in paths
+    assert "/api/mundial/lineups/auto-refresh" not in paths
+    assert "/api/mundial/fixtures/{fixture_id}/player-stats" not in paths
+    assert "/api/mundial/player-features" not in paths
     assert "/api/mundial/training/download-kaggle" in paths
     assert "/api/mundial/training/prepare-etl" in paths
     assert "/api/mundial/training/dataset" in paths
@@ -182,16 +214,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Mundial 2026" in html_source
     assert "worldcup-view active" in html_source
     nav_source = html_source.split("<nav>", 1)[1].split("</nav>", 1)[0]
-    nav_order = [
-        "Resumen",
-        "Grupos",
-        "Calendario",
-        "11 Iniciales",
-        "Entrenamiento y Modelo",
-        "Predicciones Futuras",
-        "Datos",
-    ]
+    nav_order = ["Resumen", "Grupos", "Calendario", "Entrenamiento y Modelo", "Predicciones Futuras", "Datos"]
     assert [nav_source.index(label) for label in nav_order] == sorted(nav_source.index(label) for label in nav_order)
+    assert "11 Iniciales" not in nav_source
     assert "scrollIntoView" not in app_source
     assert "switchWorldcupView" in app_source
     assert "data-section=\"predicciones\"" in html_source
@@ -213,16 +238,16 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-history-weight" in html_source
     assert "sim-recency-weight" in html_source
     assert "sim-host-advantage" in html_source
-    assert "lineup-fixture" in html_source
-    assert "lineup-stage" in html_source
-    assert "lineup-autodetect" in html_source
-    assert "sim-use-player-features" in html_source
+    assert "lineup-fixture" not in html_source
+    assert "lineup-stage" not in html_source
+    assert "lineup-autodetect" not in html_source
+    assert "sim-use-player-features" not in html_source
     assert "sim-use-ml-model" in html_source
     assert "training-train" in html_source
     assert "worldcup-training-progress" in html_source
     assert "worldcup-simulation-progress" in html_source
     assert "training-retrain-base" in html_source
-    assert "training-retrain-players" in html_source
+    assert "training-retrain-players" not in html_source
     assert "training-walkforward-notice" in html_source
     assert "worldcup-model-type" in html_source
     assert "worldcup-tuning-enabled" in html_source
@@ -255,9 +280,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "totals-list" in app_source
     assert "predict-match-btn" not in html_source
     assert "worldcup-target" not in html_source
-    assert "lineup-features-table" in html_source
+    assert "lineup-features-table" not in html_source
     assert "/api/mundial/simulate" in app_source
-    assert "/api/mundial/player-features" in app_source
+    assert "/api/mundial/player-features" not in app_source
     assert "/api/mundial/models" in app_source
     assert "/api/mundial/models/train" in app_source
     assert "/api/mundial/training/prepare-etl" in app_source
@@ -270,9 +295,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Ingresa un nombre para el nuevo modelo" not in app_source
     assert "paramsTable" in app_source
     assert "evalStrategyLabel" in app_source
-    assert "benchmarkWorldcupYear" in app_source
-    assert "Benchmark histórico" in app_source
-    assert "benchmark historico" in app_source
+    assert "benchmarkWorldcupYear" not in app_source
+    assert "Benchmark histórico" not in app_source
+    assert "benchmark historico" not in app_source
     assert "ultimo Mundial test" not in app_source
     assert "Test final bloqueado" not in app_source
     assert "model.warnings" not in app_source
@@ -304,7 +329,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "/api/mundial/predict-upcoming" in app_source
     assert "renderHeroCountdown" in app_source
     assert "heroNextCardHtml" in app_source
-    assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" in app_source
+    assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" not in app_source
     assert "/api/worldcup/simulate" not in app_source
     assert "player-photo" in app_source
 
@@ -935,12 +960,50 @@ def test_mundial_simulation_config_is_clamped():
     assert config["recency_weight"] == 1.0
     assert config["host_advantage"] == 0.0
     assert config["max_goals"] == 14
-    assert config["lineup_weight"] == 2.0
-    assert config["player_feature_weight"] == 2.0
     assert config["ml_weight"] == 1.0
-    assert config["use_lineups"] is True
-    assert config["use_player_features"] is True
+    assert "lineup_weight" not in config
+    assert "player_feature_weight" not in config
+    assert "use_lineups" not in config
+    assert "use_player_features" not in config
     assert config["use_ml_model"] is True
+
+
+def test_mundial_overview_features_all_matches_at_next_kickoff(monkeypatch):
+    from datetime import datetime, timezone
+    from src.web import mundial_services
+
+    fixtures = pd.DataFrame([
+        {"No.": 1, "Fecha": "2026-06-11", "Hora": "18:00 UTC+0", "Ronda": "Matchday 1", "Grupo": "Group A", "Equipo 1": "Mexico", "Equipo 2": "South Korea", "Sede": "A", "Goles 1": 1, "Goles 2": 0, "Finalizado": "si"},
+        {"No.": 2, "Fecha": "2026-06-13", "Hora": "16:00 UTC+0", "Ronda": "Matchday 1", "Grupo": "Group B", "Equipo 1": "Canada", "Equipo 2": "Japan", "Sede": "B", "Goles 1": "", "Goles 2": "", "Finalizado": ""},
+        {"No.": 3, "Fecha": "2026-06-13", "Hora": "16:00 UTC+0", "Ronda": "Matchday 1", "Grupo": "Group C", "Equipo 1": "Brazil", "Equipo 2": "France", "Sede": "C", "Goles 1": "", "Goles 2": "", "Finalizado": ""},
+        {"No.": 4, "Fecha": "2026-06-14", "Hora": "18:00 UTC+0", "Ronda": "Matchday 2", "Grupo": "Group B", "Equipo 1": "Mexico", "Equipo 2": "Canada", "Sede": "D", "Goles 1": "", "Goles 2": "", "Finalizado": ""},
+    ])
+    monkeypatch.setattr(mundial_services, "_now_utc", lambda: datetime(2026, 6, 12, tzinfo=timezone.utc))
+
+    payload = mundial_services.fixture_overview_payload(fixtures)
+
+    assert [match["id"] for match in payload["featured_matches"]] == ["2", "3"]
+    assert payload["highlight"]["id"] == "2"
+    assert [match["id"] for match in payload["next_matches"]] == ["4"]
+
+
+def test_mundial_group_standings_use_real_scores_and_seed_tiebreaker():
+    from src.web import mundial_services
+
+    fixtures = pd.DataFrame([
+        {"No.": 1, "Grupo": "Group A", "Equipo 1": "Mexico", "Equipo 2": "Canada", "Goles 1": 2, "Goles 2": 0},
+        {"No.": 2, "Grupo": "Group A", "Equipo 1": "South Africa", "Equipo 2": "Japan", "Goles 1": 1, "Goles 2": 1},
+        {"No.": 3, "Grupo": "Group A", "Equipo 1": "Mexico", "Equipo 2": "Japan", "Goles 1": "", "Goles 2": ""},
+    ])
+
+    standings = mundial_services.group_standing_rows("Group A", ["Mexico", "Canada", "South Africa", "Japan"], fixtures)
+
+    assert [(row["team"], row["PJ"], row["Pts"], row["GF"], row["GC"], row["DG"]) for row in standings] == [
+        ("Mexico", 1, 3, 2, 0, 2),
+        ("South Africa", 1, 1, 1, 1, 0),
+        ("Japan", 1, 1, 1, 1, 0),
+        ("Canada", 1, 0, 0, 2, -2),
+    ]
 
 
 def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch):
@@ -954,6 +1017,7 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
     monkeypatch.setattr(training, "PREPARED_DATASET_FILE", tmp_path / "cache" / "prepared.pkl")
     monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
+    patch_worldcup_international(monkeypatch, training)
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
         {"date": "2018-06-11", "home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
@@ -983,16 +1047,16 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert status["trainable"] is True
     assert prepared["etl_ready"] is True
     assert status["etl_ready"] is True
-    assert status["test_rows"] == 2
+    assert status["test_rows"] == 30
     assert status["prediction_rows"] == 0
-    assert status["eval_strategy"] == "final_worldcup_test"
-    assert status["final_test_year"] == "2022"
+    assert status["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
+    assert status["final_test_year"] == ""
     assert result["model"]["trained"] is True
     assert result["model"]["bundle"] is True
     assert result["model"]["model_id"] == "mex-test"
     assert result["model"]["model_type"] == "xgboost"
-    assert result["model"]["eval_strategy"] == "final_worldcup_test"
-    assert result["model"]["final_test_year"] == "2022"
+    assert result["model"]["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
+    assert result["model"]["final_test_year"] == ""
     assert result["model"]["confusion_matrix"]["matrix"]
     assert set(result["model"]["market_models"]) == expected_markets
     assert set(result["model"]["markets"]) == expected_markets
@@ -1001,7 +1065,7 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["enabled"] is False
     assert result["model"]["hardware"]["actual_device"] in {"cpu", "cuda"}
-    assert result["eval_rows"] == 2
+    assert result["eval_rows"] == 30
     assert prediction["fixture"]["home"] == "Mexico"
     assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over05", "under05", "over15", "under15", "over25", "under25", "over35", "under35"}
     assert prediction["model_probs"]["ml_weight"] == 0.5
@@ -1050,6 +1114,7 @@ def test_worldcup_training_rejects_single_market_requests(tmp_path, monkeypatch)
     monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
     monkeypatch.setattr(training, "PREPARED_DATASET_FILE", tmp_path / "cache" / "prepared.pkl")
     monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
+    patch_worldcup_international(monkeypatch, training)
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
         {"date": "2018-06-11", "home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},
@@ -1077,6 +1142,7 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
     monkeypatch.setattr(training, "PREPARED_DATASET_FILE", tmp_path / "cache" / "prepared.pkl")
     monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
+    patch_worldcup_international(monkeypatch, training)
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
         {"version": 2022, "team": "Mexico", "fifa_rank_pre_tournament": 12, "fifa_points_pre_tournament": 1600, "wins_last_4y": 20, "quarter_finalist": 1},
@@ -1101,18 +1167,18 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert prepared["etl_ready"] is True
     assert status["raw_training_mode"] == "team_strength"
     assert status["training_mode"] == "match_result"
-    assert status["prepared_label_source"] == "historical_worldcup"
+    assert status["prepared_label_source"] == "all_matches.csv"
     assert status["target_column"] == "Label + GoalsDistribution + OverUnder05/15/25/35"
     assert status["test_rows"] > 0
     assert status["prediction_rows"] == 2
     assert status["eval_rows"] > 0
-    assert status["eval_strategy"] == "final_worldcup_test"
-    assert status["final_test_year"]
+    assert status["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
+    assert status["final_test_year"] == ""
     assert result["mode"] == "match_result"
-    assert result["eval_strategy"] == "final_worldcup_test"
+    assert result["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
     assert result["prediction_rows"] == 2
     assert result["model"]["target_column"] == "Label + GoalsDistribution + OverUnder05/15/25/35"
-    assert result["model"]["eval_strategy"] == "final_worldcup_test"
+    assert result["model"]["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
     expected_markets = {"result", "over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"}
     assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
     assert set(result["model"]["markets"]) == expected_markets
@@ -1140,9 +1206,11 @@ def test_worldcup_predict_upcoming_returns_future_predictions(tmp_path, monkeypa
     assert "Fuente O/U" in result["table"]["columns"]
 
 
-def test_mundial_overview_exposes_highlight_countdown_and_next_grid():
+def test_mundial_overview_exposes_highlight_countdown_and_next_grid(monkeypatch):
+    from datetime import datetime, timezone
     from src.web import mundial_services
 
+    monkeypatch.setattr(mundial_services, "_now_utc", lambda: datetime(2026, 6, 10, 12, tzinfo=timezone.utc))
     result = mundial_services.overview()
 
     assert result["opener"]["home"]["name"] == "Mexico"
@@ -1150,6 +1218,44 @@ def test_mundial_overview_exposes_highlight_countdown_and_next_grid():
     assert result["countdown_state"] in {"ready", "pending"}
     assert isinstance(result["next_matches"], list)
     assert len(result["next_matches"]) >= 1
+
+
+def test_mundial_overview_skips_started_match_on_same_day(monkeypatch):
+    from datetime import datetime, timezone
+    from src.web import mundial_services
+
+    fixture_df = pd.DataFrame([
+        {
+            "No.": 1,
+            "Fecha": "2026-06-11",
+            "Hora": "13:00 UTC-6",
+            "Ronda": "Matchday 1",
+            "Grupo": "Group A",
+            "Equipo 1": "Mexico",
+            "Equipo 2": "South Africa",
+            "Sede": "Mexico City",
+            "Finalizado": "No",
+        },
+        {
+            "No.": 2,
+            "Fecha": "2026-06-11",
+            "Hora": "20:00 UTC-6",
+            "Ronda": "Matchday 1",
+            "Grupo": "Group A",
+            "Equipo 1": "South Korea",
+            "Equipo 2": "Czech Republic",
+            "Sede": "Guadalajara",
+            "Finalizado": "No",
+        },
+    ])
+
+    monkeypatch.setattr(mundial_services, "_now_utc", lambda: datetime(2026, 6, 11, 21, 30, tzinfo=timezone.utc))
+
+    result = mundial_services.fixture_overview_payload(fixture_df)
+
+    assert result["opener"]["home"]["name"] == "Mexico"
+    assert result["highlight"]["home"]["name"] == "South Korea"
+    assert result["highlight"]["id"] == "2"
 
 
 def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp_path, monkeypatch):
@@ -1206,23 +1312,27 @@ def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp
     assert result["models"]["models"] == []
 
 
-def test_worldcup_latest_year_is_final_test_and_never_train():
+def test_worldcup_last_30_international_test_never_uses_worldcup_labels():
     from src.worldcup import training
+    from src.worldcup import international_provider
 
-    rows = training.sanitize_match_rows(pd.DataFrame([
-        {"Date": "2014-06-11", "Home": "Mexico", "Away": "Cameroon", "Label": "H", "HG": 1, "AG": 0, "OverUnder25": 0, "Source": "fixture"},
-        {"Date": "2018-06-11", "Home": "Mexico", "Away": "Germany", "Label": "H", "HG": 1, "AG": 0, "OverUnder25": 0, "Source": "fixture"},
-        {"Date": "2018-06-12", "Home": "South Africa", "Away": "Mexico", "Label": "A", "HG": 0, "AG": 2, "OverUnder25": 0, "Source": "fixture"},
-        {"Date": "2022-06-11", "Home": "Mexico", "Away": "Poland", "Label": "D", "HG": 1, "AG": 1, "OverUnder25": 0, "Source": "fixture"},
-        {"Date": "2022-06-12", "Home": "Argentina", "Away": "Mexico", "Label": "H", "HG": 2, "AG": 0, "OverUnder25": 0, "Source": "fixture"},
-    ]))
+    matches = worldcup_international_sample(rows=35)
+    matches = pd.concat([
+        matches,
+        pd.DataFrame([
+            {"date": "2018-06-15", "home_team": "Russia", "away_team": "Saudi Arabia", "home_score": 5, "away_score": 0, "tournament": "FIFA World Cup"},
+            {"date": "2022-11-20", "home_team": "Qatar", "away_team": "Ecuador", "home_score": 0, "away_score": 2, "tournament": "FIFA World Cup"},
+        ]),
+    ], ignore_index=True)
+    rows = training.international_match_rows(international_provider.normalize_international_matches(matches))
 
-    train, test, final_year, warning = training.split_latest_worldcup_test(rows)
+    train, test, warning = training.split_last_30_international_test(rows)
 
-    assert warning == ""
-    assert final_year == "2022"
-    assert set(train["Year"].astype(int)) == {2014, 2018}
-    assert set(test["Year"].astype(int)) == {2022}
+    assert train.shape[0] == 5
+    assert test.shape[0] == 30
+    assert "FIFA World Cup quedaron fuera" in warning
+    assert not train["is_worldcup_match"].map(bool).any()
+    assert not test["is_worldcup_match"].map(bool).any()
 
 
 def test_worldcup_temporal_features_exclude_current_and_future_matches():
@@ -1309,6 +1419,7 @@ def test_worldcup_ngboost_dual_training_with_tuning_completes(tmp_path, monkeypa
     monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", tmp_path / "models" / "hybrid.json")
     monkeypatch.setattr(training, "PREPARED_DATASET_FILE", tmp_path / "cache" / "prepared.pkl")
     monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", tmp_path / "cache" / "prepared.json")
+    patch_worldcup_international(monkeypatch, training)
     training.KAGGLE_ROOT.mkdir(parents=True)
     pd.DataFrame([
         {"home_team": "Mexico", "away_team": "South Africa", "home_goals": 2, "away_goals": 0},

@@ -276,10 +276,25 @@ h3 { font-size: 16px; }
 
 .hero-match {
   display: grid;
+  gap: 14px;
+  align-items: center;
+  max-width: 980px;
+}
+.hero-featured-card {
+  display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(260px, 0.95fr) minmax(0, 1fr);
   gap: 18px;
   align-items: center;
-  max-width: 980px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+}
+.hero-featured-card.empty {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  text-align: center;
 }
 .match-team {
   display: flex;
@@ -337,6 +352,45 @@ h3 { font-size: 16px; }
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+.overview-standings {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.overview-standing-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+}
+.overview-standing-card header,
+.overview-standing-card div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px 38px;
+  gap: 8px;
+  align-items: center;
+}
+.overview-standing-card header {
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 12px;
+}
+.overview-standing-card div span {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.overview-standing-card b,
+.overview-standing-card small {
+  text-align: right;
 }
 .hero-next-card {
   display: grid;
@@ -432,15 +486,12 @@ h3 { font-size: 16px; }
 .subheading {
   margin-top: 22px;
 }
-.filters,
-.lineup-toolbar {
+.filters {
   display: flex;
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
 }
-.lineup-toolbar select { min-width: min(460px, 100%); }
-.lineup-toolbar input { min-width: min(420px, 100%); }
 
 .groups-grid {
   display: grid;
@@ -455,7 +506,6 @@ h3 { font-size: 16px; }
 .group-card,
 .fixture-card,
 .team-card,
-.lineup-side,
 .player-row,
 .champion-card,
 .procedure-step {
@@ -522,6 +572,15 @@ h3 { font-size: 16px; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.standings-line {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto auto auto;
+}
+.standings-line span,
+.standings-line small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .flag-wrap,
@@ -598,90 +657,10 @@ h3 { font-size: 16px; }
   border-radius: 999px;
   background: #fff;
 }
-.lineup-stage {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(320px, 1fr));
-  gap: 16px;
-}
-.lineup-side {
-  padding: 14px;
-}
-.lineup-side header {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-.lineup-title {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  min-width: 0;
-}
-.formation-badge {
-  flex: 0 0 auto;
-  padding: 5px 8px;
-  border-radius: 999px;
-  background: #eef7f3;
-  color: var(--green);
-  font-size: 12px;
-}
-.pitch {
-  position: relative;
-  height: 520px;
-  border-radius: 8px;
-  overflow: hidden;
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.12) 2px, transparent 2px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.12) 2px, transparent 2px),
-    var(--field);
-  background-size: 100% 25%, 25% 100%, auto;
-  border: 2px solid rgba(255, 255, 255, 0.8);
-}
-.pitch::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 118px;
-  height: 118px;
-  transform: translate(-50%, -50%);
-  border: 2px solid rgba(255, 255, 255, 0.55);
-  border-radius: 50%;
-}
-.player-token {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  width: 112px;
-  display: grid;
-  justify-items: center;
-  gap: 4px;
-  color: #fff;
-  text-align: center;
-}
 .player-photo {
   width: 46px;
   height: 46px;
   border-radius: 50%;
-  border-color: rgba(255, 255, 255, 0.75);
-}
-.player-token strong,
-.player-token small {
-  max-width: 112px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
-}
-.player-token strong { font-size: 12px; }
-.player-token small { font-size: 11px; color: rgba(255, 255, 255, 0.84); }
-
-.lineups-summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(250px, 1fr));
-  gap: 10px;
-  margin-top: 16px;
 }
 
 .champion-strip {
@@ -1669,14 +1648,14 @@ th {
   .groups-grid,
   .teams-grid,
   .fixtures-list,
-  .lineups-summary,
   .champion-strip {
     grid-template-columns: repeat(2, minmax(240px, 1fr));
   }
   .upcoming-grid {
     grid-template-columns: repeat(2, minmax(240px, 1fr));
   }
-  .hero-next-grid {
+  .hero-next-grid,
+  .overview-standings {
     grid-template-columns: 1fr;
   }
   .hero-hardware {
@@ -1719,12 +1698,11 @@ th {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .hero-match,
+  .hero-featured-card,
   .hero-metrics,
   .groups-grid,
   .teams-grid,
   .fixtures-list,
-  .lineup-stage,
-  .lineups-summary,
   .prediction-grid,
   .prediction-grid.compact,
   .dataset-summary,

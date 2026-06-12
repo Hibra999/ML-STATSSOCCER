@@ -79,38 +79,6 @@ def create_mundial_app() -> FastAPI:
     def players(refresh: bool = False):
         return _wrap(services.players, refresh)
 
-    @app.get("/api/mundial/lineups")
-    def lineups(refresh: bool = False):
-        return _wrap(services.lineups, refresh)
-
-    @app.get("/api/mundial/fixtures/{fixture_id}/lineups")
-    def fixture_lineup(fixture_id: str, refresh: bool = False):
-        return _wrap(services.fixture_lineup, fixture_id, refresh)
-
-    @app.post("/api/mundial/fixtures/{fixture_id}/autodetect")
-    def autodetect_fixture(fixture_id: str, payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.autodetect_fixture, fixture_id, payload)
-
-    @app.post("/api/mundial/fixtures/{fixture_id}/lineups/refresh")
-    def refresh_fixture_lineup(fixture_id: str, payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.refresh_fixture_lineup, fixture_id, payload)
-
-    @app.post("/api/mundial/fixtures/{fixture_id}/lineups/link")
-    def link_lineup(fixture_id: str, payload: Dict[str, Any] = Body(...)):
-        return _wrap(services.link_lineup, fixture_id, payload)
-
-    @app.post("/api/mundial/lineups/auto-refresh")
-    def auto_refresh_lineups(payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.auto_refresh, payload)
-
-    @app.get("/api/mundial/fixtures/{fixture_id}/player-stats")
-    def fixture_player_stats(fixture_id: str, refresh: bool = False):
-        return _wrap(services.fixture_player_stats, fixture_id, refresh)
-
-    @app.get("/api/mundial/player-features")
-    def player_features(refresh: bool = False):
-        return _wrap(services.player_features, refresh)
-
     @app.post("/api/mundial/training/download-kaggle")
     def training_download(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.training_download, payload)

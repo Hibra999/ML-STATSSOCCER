@@ -4,8 +4,6 @@ const state = {
   fixtures: [],
   teams: [],
   players: [],
-  lineups: [],
-  playerFeatures: [],
   models: [],
   activeModelId: "",
   training: null,
@@ -55,19 +53,12 @@ function bindEvents() {
   document.getElementById("upcoming-model-select").addEventListener("change", syncModelSelects);
   document.getElementById("fixture-group-filter").addEventListener("change", renderFixtures);
   document.getElementById("fixture-search").addEventListener("input", renderFixtures);
-  document.getElementById("lineup-load").addEventListener("click", () => loadSelectedLineup(false));
-  document.getElementById("lineup-autodetect").addEventListener("click", autodetectSelectedLineup);
-  document.getElementById("lineup-auto-refresh").addEventListener("click", autoRefreshLineups);
-  document.getElementById("lineup-refresh").addEventListener("click", refreshSelectedLineup);
-  document.getElementById("lineup-link").addEventListener("click", linkSelectedLineup);
-  document.getElementById("lineup-fixture").addEventListener("change", () => loadSelectedLineup(false));
   document.getElementById("players-refresh").addEventListener("click", () => loadPlayers(true));
   document.getElementById("training-refresh").addEventListener("click", loadTrainingStatus);
   document.getElementById("training-download").addEventListener("click", downloadTrainingDataset);
   document.getElementById("training-prepare-etl").addEventListener("click", prepareTrainingEtl);
   document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
   document.getElementById("training-retrain-base").addEventListener("click", () => trainWorldCupModel("result_only"));
-  document.getElementById("training-retrain-players").addEventListener("click", () => trainWorldCupModel("result_plus_players"));
   document.getElementById("upcoming-predict-btn").addEventListener("click", runUpcomingPredictions);
   document.getElementById("worldcup-model-type").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
   document.getElementById("worldcup-model-id").addEventListener("input", (event) => { event.target.dataset.autofilled = "false"; });
@@ -86,14 +77,12 @@ async function loadAll(refresh) {
   clearAlert();
   setLoading();
   try {
-    const [overview, groups, fixtures, teams, lineups, players, playerFeatures, training, models, procedure] = await Promise.all([
+    const [overview, groups, fixtures, teams, players, training, models, procedure] = await Promise.all([
       api(`/api/mundial/overview?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/groups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/fixtures?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/teams?refresh=${refresh ? "true" : "false"}`),
-      api(`/api/mundial/lineups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/players?refresh=${refresh ? "true" : "false"}`),
-      api(`/api/mundial/player-features?refresh=${refresh ? "true" : "false"}`),
       api("/api/mundial/training/status"),
       api("/api/mundial/models"),
       api("/api/mundial/procedure"),
@@ -102,9 +91,7 @@ async function loadAll(refresh) {
     state.groups = groups.groups || [];
     state.fixtures = fixtures.fixtures || [];
     state.teams = teams.teams || [];
-    state.lineups = lineups.lineups || [];
     state.players = players.players || [];
-    state.playerFeatures = playerFeatures.rows || [];
     state.training = training;
     state.models = models.models || [];
     state.activeModelId = models.active_model_id || "";
@@ -117,13 +104,10 @@ async function loadAll(refresh) {
     renderFixtureFilters();
     renderFixtures();
     fillUpcomingGroupFilter();
-    renderLineupsSummary(lineups);
     renderPlayers(players);
-    renderPlayerFeatures(playerFeatures);
     renderTrainingStatus(training);
     renderModelsCatalog(models);
     renderProcedure(procedure);
-    fillLineupSelect();
   } catch (error) {
     showError(error.message);
   }
@@ -133,10 +117,7 @@ function setLoading() {
   document.getElementById("groups-grid").innerHTML = loadingHtml("Cargando grupos");
   document.getElementById("teams-grid").innerHTML = loadingHtml("Cargando equipos");
   document.getElementById("fixtures-list").innerHTML = loadingHtml("Cargando fixtures");
-  document.getElementById("lineup-stage").innerHTML = loadingHtml("Cargando alineaciones");
   document.getElementById("players-list").innerHTML = loadingHtml("Cargando jugadores");
-  document.getElementById("lineup-features-table").innerHTML = loadingHtml("Features pendientes");
-  document.getElementById("player-features-table").innerHTML = loadingHtml("Features pendientes");
   document.getElementById("training-summary").innerHTML = loadingHtml("Dataset pendiente");
   document.getElementById("training-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("training-etl-flow").innerHTML = loadingHtml("ETL pendiente");
@@ -162,16 +143,12 @@ function applyDefaultConfig(config) {
     "sim-recency-weight": config.recency_weight,
     "sim-host-advantage": config.host_advantage,
     "sim-max-goals": config.max_goals,
-    "sim-lineup-weight": config.lineup_weight,
-    "sim-player-feature-weight": config.player_feature_weight,
     "sim-ml-weight": config.ml_weight,
   };
   Object.entries(pairs).forEach(([id, value]) => {
     const input = document.getElementById(id);
     if (input && value !== undefined) input.value = value;
   });
-  document.getElementById("sim-use-lineups").checked = Boolean(config.use_lineups);
-  document.getElementById("sim-use-player-features").checked = Boolean(config.use_player_features);
   document.getElementById("sim-use-ml-model").checked = Boolean(config.use_ml_model);
   state.defaultsApplied = true;
 }
@@ -182,24 +159,19 @@ function renderOverview(overview) {
   document.getElementById("metric-fixtures").textContent = overview.fixtures || 0;
   document.getElementById("metric-players").textContent = overview.players || 0;
   document.getElementById("model-source").textContent = `${overview.model || "Modelo"} - ${overview.fixture_source || ""}`;
-  const highlight = overview.highlight || overview.opener || {};
-  const kickoffLabel = `${highlight.date || "2026-06-11"} ${highlight.time || ""}`.trim();
-  document.getElementById("hero-meta").textContent = highlight.group || highlight.round || "Partido inaugural";
-  document.getElementById("hero-match").innerHTML = `
-    ${matchTeamHtml(highlight.home || {}, "home")}
-    <div class="hero-vs-block">
-      <span class="versus">VS</span>
-      <div id="hero-countdown" class="hero-countdown hero-countdown-vs"></div>
-      <div class="hero-kickoff">
-        <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
-        <small>${escapeHtml(highlight.venue || "Sede por confirmar")}</small>
-      </div>
-    </div>
-    ${matchTeamHtml(highlight.away || {}, "away")}`;
+  const featured = overview.featured_matches || [];
+  const highlight = overview.highlight || featured[0] || {};
+  document.getElementById("hero-meta").textContent = featured.length
+    ? `${featured.length} partido${featured.length === 1 ? "" : "s"} en el próximo kickoff`
+    : "Sin próximos partidos futuros";
+  document.getElementById("hero-match").innerHTML = featured.length
+    ? featured.map((fixture, index) => heroFeaturedMatchHtml(fixture, index === 0)).join("")
+    : `<article class="hero-featured-card empty"><strong>Sin próximos partidos</strong><small>Todos los partidos cargados ya iniciaron o finalizaron.</small><div id="hero-countdown" class="hero-countdown hero-countdown-vs"></div></article>`;
   renderHeroCountdown(overview.countdown_target, overview.countdown_state, highlight);
   renderHeroHardware((state.trainingOptions || {}).hardware || {});
   document.getElementById("hero-next-grid").innerHTML = (overview.next_matches || []).map((fixture) => heroNextCardHtml(fixture)).join("")
     || `<article class="hero-next-card empty"><strong>Sin más partidos cargados</strong><small>El calendario adicional aparecerá aquí.</small></article>`;
+  renderOverviewStandings(overview.group_standings || []);
 }
 
 function matchTeamHtml(asset, side) {
@@ -210,12 +182,43 @@ function matchTeamHtml(asset, side) {
   </div>`;
 }
 
+function heroFeaturedMatchHtml(fixture, withCountdown) {
+  const kickoffLabel = `${fixture.date || ""} ${fixture.time || ""}`.trim();
+  return `<article class="hero-featured-card">
+    ${matchTeamHtml(fixture.home || {}, "home")}
+    <div class="hero-vs-block">
+      <span class="versus">VS</span>
+      ${withCountdown ? `<div id="hero-countdown" class="hero-countdown hero-countdown-vs"></div>` : ""}
+      <div class="hero-kickoff">
+        <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
+        <small>${escapeHtml(fixture.venue || "Sede por confirmar")}</small>
+      </div>
+      <small>${escapeHtml(fixture.group || fixture.round || "")}</small>
+    </div>
+    ${matchTeamHtml(fixture.away || {}, "away")}
+  </article>`;
+}
+
+function renderOverviewStandings(groups) {
+  const rows = (groups || []).slice(0, 8);
+  document.getElementById("overview-standings").innerHTML = rows.map((group) => `
+    <article class="overview-standing-card">
+      <header><strong>${escapeHtml(group.letter || group.name || "")}</strong><span>Pts</span><span>DG</span></header>
+      ${(group.rows || []).map((row) => `
+        <div>
+          <span>${flagHtml(row)}${escapeHtml(row.team || row.name || "")}</span>
+          <b>${escapeHtml(row.Pts ?? 0)}</b>
+          <small>${escapeHtml(row.DG ?? 0)}</small>
+        </div>`).join("")}
+    </article>`).join("");
+}
+
 function renderGroups(payload) {
   document.getElementById("groups-source").textContent = payload.source || "";
   document.getElementById("groups-grid").innerHTML = state.groups.map((group) => `
     <article class="group-card">
       <header><h3>${escapeHtml(group.name)}</h3><strong>${escapeHtml(group.letter)}</strong></header>
-      <ol>${(group.teams || []).map((team) => `<li class="team-line">${flagHtml(team)}<strong>${escapeHtml(team.name)}</strong><small>${escapeHtml(team.seed)}</small></li>`).join("")}</ol>
+      <ol>${(group.standings || []).map((team) => `<li class="team-line standings-line">${flagHtml(team)}<strong>${escapeHtml(team.team || team.name)}</strong><span>${escapeHtml(team.PJ ?? 0)} PJ</span><span>${escapeHtml(team.Pts ?? 0)} pts</span><small>${escapeHtml(team.DG ?? 0)} DG</small></li>`).join("")}</ol>
     </article>`).join("");
 }
 
@@ -257,13 +260,6 @@ function renderFixtures() {
       </div>
       <small>${escapeHtml(fixture.venue || "Sede por confirmar")}</small>
     </article>`).join("") || loadingHtml("Sin fixtures para ese filtro");
-}
-
-function fillLineupSelect() {
-  const groupFixtures = state.fixtures.filter((fixture) => fixture.group);
-  document.getElementById("lineup-fixture").innerHTML = groupFixtures.map((fixture) => `
-    <option value="${escapeAttr(fixture.id)}">${escapeHtml(fixture.id)} - ${escapeHtml(fixture.group)} - ${escapeHtml(fixture.label)}</option>
-  `).join("");
 }
 
 function fillUpcomingGroupFilter() {
@@ -498,183 +494,10 @@ async function clearWorldcupMaintenance() {
     state.training = result.training || state.training;
     renderModelsCatalog(result.models || {});
     renderTrainingStatus(result.training || state.training || {});
-    document.getElementById("lineup-status").innerHTML = "";
-    document.getElementById("lineup-stage").innerHTML = loadingHtml("11 iniciales limpiados");
-    document.getElementById("lineups-summary").innerHTML = loadingHtml("Cache de alineaciones limpiado");
     document.getElementById("simulation-summary").textContent = `Limpieza completa: ${((result.removed || []).length)} rutas procesadas.`;
   } catch (error) {
     showError(error.message);
   }
-}
-
-async function loadSelectedLineup(refresh) {
-  const fixtureId = document.getElementById("lineup-fixture").value;
-  if (!fixtureId) return;
-  document.getElementById("lineup-status").innerHTML = `<span>Cargando 11...</span>`;
-  try {
-    const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/lineups?refresh=${refresh ? "true" : "false"}`);
-    renderLineup(result);
-    await loadFixturePlayerStats(fixtureId, false);
-  } catch (error) {
-    document.getElementById("lineup-status").innerHTML = "";
-    showError(error.message);
-  }
-}
-
-async function autodetectSelectedLineup() {
-  const fixtureId = document.getElementById("lineup-fixture").value;
-  if (!fixtureId) return;
-  document.getElementById("lineup-status").innerHTML = `<span>Buscando evento SofaScore...</span>`;
-  try {
-    const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect`, jsonOptions({ fetch_lineup: true }));
-    const event = result.event || {};
-    if (event.match_url) document.getElementById("lineup-url").value = event.match_url;
-    if (result.lineup && result.lineup.lineup) renderLineup(result.lineup);
-    await loadFixturePlayerStats(fixtureId, true);
-    await reloadLineupsSummary();
-    await loadPlayerFeatures(false);
-    document.getElementById("lineup-status").insertAdjacentHTML("beforeend", `<span>Auto match ${escapeHtml(event.confidence || 0)}</span>`);
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function autoRefreshLineups() {
-  clearAlert();
-  document.getElementById("lineup-status").innerHTML = `<span>Detectando eventos y 11 iniciales...</span>`;
-  try {
-    const result = await api("/api/mundial/lineups/auto-refresh", jsonOptions({ refresh_events: true }));
-    await reloadLineupsSummary();
-    await loadPlayerFeatures(false);
-    await loadSelectedLineup(false);
-    document.getElementById("lineup-status").innerHTML = `
-      <span>Calendario revisado: ${escapeHtml(result.attempted || 0)}</span>
-      <span>Con 11 completo: ${escapeHtml(result.refreshed || 0)}</span>
-      <span>Sin detectar: ${escapeHtml(result.failures || 0)}</span>`;
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function refreshSelectedLineup() {
-  const fixtureId = document.getElementById("lineup-fixture").value;
-  if (!fixtureId) return;
-  const matchUrl = document.getElementById("lineup-url").value;
-  try {
-    const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/lineups/refresh`, jsonOptions({ match_url: matchUrl }));
-    renderLineup(result);
-    await loadFixturePlayerStats(fixtureId, true);
-    await reloadLineupsSummary();
-    await loadPlayerFeatures(false);
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function linkSelectedLineup() {
-  const fixtureId = document.getElementById("lineup-fixture").value;
-  const matchUrl = document.getElementById("lineup-url").value.trim();
-  if (!fixtureId || !matchUrl) {
-    showError("Pega la URL SofaScore del partido");
-    return;
-  }
-  try {
-    const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/lineups/link`, jsonOptions({ match_url: matchUrl, refresh: true }));
-    renderLineup(result);
-    await loadFixturePlayerStats(fixtureId, true);
-    await reloadLineupsSummary();
-    await loadPlayerFeatures(false);
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function loadFixturePlayerStats(fixtureId, refresh) {
-  try {
-    const result = await api(`/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/player-stats?refresh=${refresh ? "true" : "false"}`);
-    renderTable("lineup-features-table", result.features);
-    return result;
-  } catch (error) {
-    document.getElementById("lineup-features-table").innerHTML = loadingHtml("Features no disponibles");
-    return null;
-  }
-}
-
-async function loadPlayerFeatures(refresh) {
-  const result = await api(`/api/mundial/player-features?refresh=${refresh ? "true" : "false"}`);
-  state.playerFeatures = result.rows || [];
-  renderPlayerFeatures(result);
-  return result;
-}
-
-function renderPlayerFeatures(payload) {
-  renderTable("player-features-table", payload.features);
-}
-
-async function reloadLineupsSummary() {
-  const payload = await api("/api/mundial/lineups");
-  state.lineups = payload.lineups || [];
-  renderLineupsSummary(payload);
-}
-
-function renderLineup(result) {
-  const lineup = result.lineup || {};
-  document.getElementById("lineup-url").value = lineup.match_url || document.getElementById("lineup-url").value || "";
-  document.getElementById("lineup-source").textContent = lineup.source || "";
-  document.getElementById("lineup-status").innerHTML = `
-    <span>${escapeHtml(lineup.status || "Pendiente")}</span>
-    <span>${escapeHtml(lineup.home || "")}: ${escapeHtml(lineup.starters_home || 0)}/11</span>
-    <span>${escapeHtml(lineup.away || "")}: ${escapeHtml(lineup.starters_away || 0)}/11</span>
-    ${lineup.error ? `<span>${escapeHtml(lineup.error)}</span>` : ""}`;
-  document.getElementById("lineup-stage").innerHTML = `
-    ${lineupSideHtml(lineup, "home", lineup.home, lineup.formation_home, lineup.home_asset)}
-    ${lineupSideHtml(lineup, "away", lineup.away, lineup.formation_away, lineup.away_asset)}`;
-  renderTable("lineup-table", result.players);
-}
-
-function lineupSideHtml(lineup, side, team, formation, asset) {
-  const starters = (lineup.players || []).filter((player) => player.team === team && player.starter).slice(0, 11);
-  return `<article class="lineup-side">
-    <header>
-      <div class="lineup-title">${flagHtml(asset || assetFor(team))}<div><strong>${escapeHtml(team || "Equipo")}</strong><small>${escapeHtml(side === "home" ? "Local" : "Visitante")}</small></div></div>
-      <span class="formation-badge">${escapeHtml(formation || "Sin 11")}</span>
-    </header>
-    <div class="pitch">
-      ${starters.map((player) => playerTokenHtml(player)).join("") || `<div class="player-token" style="left:50%;top:50%"><strong>11 pendiente</strong><small>Vincula SofaScore</small></div>`}
-    </div>
-  </article>`;
-}
-
-function playerTokenHtml(player) {
-  const x = Number(player.x || 50);
-  const y = Number(player.y || 50);
-  const detail = [player.shirt_number, player.position, player.rating ? `R ${player.rating}` : ""].filter(Boolean).join(" - ");
-  const stats = player.stats || {};
-  const statDetail = [
-    stats.minutesPlayed ? `${stats.minutesPlayed} min` : "",
-    stats.goals ? `${stats.goals} gol` : "",
-    stats.goalAssist ? `${stats.goalAssist} ast` : "",
-  ].filter(Boolean).join(" - ");
-  return `<div class="player-token" style="left:${escapeAttr(x)}%;top:${escapeAttr(y)}%">
-    ${playerPhotoHtml(player)}
-    <strong>${escapeHtml(shortName(player.name || ""))}</strong>
-    <small>${escapeHtml(detail)}</small>
-    ${statDetail ? `<small>${escapeHtml(statDetail)}</small>` : ""}
-  </div>`;
-}
-
-function renderLineupsSummary(payload) {
-  const rows = payload.lineups || state.lineups;
-  document.getElementById("lineups-summary").innerHTML = rows.slice(0, 24).map((row) => `
-    <article class="fixture-card">
-      <div class="fixture-meta"><span>${escapeHtml(row.date)}</span><span>${escapeHtml(row.status)}</span></div>
-      <div class="fixture-teams">
-        <div class="fixture-team">${flagHtml(row.home)}<strong>${escapeHtml(row.home.name)}</strong></div>
-        <span>${escapeHtml(row.starters_home)}/11</span>
-        <div class="fixture-team">${flagHtml(row.away)}<strong>${escapeHtml(row.away.name)}</strong></div>
-        <span>${escapeHtml(row.starters_away)}/11</span>
-      </div>
-    </article>`).join("");
 }
 
 async function loadPlayers(refresh) {
@@ -757,9 +580,7 @@ async function trainWorldCupModel(walkForwardMode = "none") {
     showError("No se pudo generar el nombre del nuevo modelo.");
     return;
   }
-  const modeLabel = walkForwardMode === "result_plus_players"
-    ? "Reentrenando con partido + jugadores..."
-    : walkForwardMode === "result_only"
+  const modeLabel = walkForwardMode === "result_only"
       ? "Reentrenando con partido nuevo..."
       : "Entrenando híbrido Mundial...";
   document.getElementById("training-status").textContent = modeLabel;
@@ -778,10 +599,11 @@ function renderTrainingStatus(payload) {
   renderTrainingControls(state.trainingOptions, model);
   const hardware = (model.hardware && model.trained) ? model.hardware : ((state.trainingOptions || {}).hardware || {});
   renderHeroHardware(hardware);
-  document.getElementById("training-status").textContent = payload.available
+  const sourceAvailable = payload.available || payload.etl_ready || Boolean((payload.international_recent || {}).available);
+  document.getElementById("training-status").textContent = sourceAvailable
     ? `${payload.train_rows || 0} train listo - ${etlStatusLabel(payload)} - ${evalStrategyLabel(payload.eval_strategy, payload)}`
-    : "Dataset Kaggle no descargado";
-  document.getElementById("training-source").textContent = `${payload.dataset_slug || "Kaggle"} - ${payload.training_mode || "sin modo"} - ${payload.prepared_label_source || "fuente pendiente"}`;
+    : "all_matches.csv no disponible";
+  document.getElementById("training-source").textContent = `all_matches.csv - ${payload.training_mode || "sin modo"} - ${payload.prepared_label_source || "fuente pendiente"}`;
   document.getElementById("training-summary").innerHTML = datasetSummaryHtml(payload);
   const trainDisabled = !payload.etl_ready || payload.etl_stale;
   document.getElementById("training-train").disabled = trainDisabled;
@@ -840,11 +662,10 @@ function trainingMarketSections(model, payload) {
 }
 
 function datasetSummaryHtml(payload) {
-  const benchmarkYear = benchmarkWorldcupYear(payload);
   const targetYear = targetWorldcupYear(payload);
-  const finalBenchmark = payload.eval_strategy === "final_worldcup_test";
-  const evalValue = finalBenchmark && benchmarkYear
-    ? `benchmark ${benchmarkYear}`
+  const last30Eval = payload.eval_strategy === "last_30_international_test";
+  const evalValue = last30Eval
+    ? `${payload.test_rows || 30} partidos`
     : payload.test_rows
     ? `${payload.test_rows} filas test`
     : `${payload.eval_rows || 0} holdout`;
@@ -854,7 +675,7 @@ function datasetSummaryHtml(payload) {
   const internationalReady = Boolean(international.available);
   return [
     datasetCard("Objetivo", `Mundial ${targetYear}`, "torneo operativo"),
-    datasetCard("Benchmark histórico", benchmarkYear ? `Mundial ${benchmarkYear}` : "pendiente", "último Mundial FIFA senior completo"),
+    datasetCard("Labels", "Internacionales no Mundial", payload.prepared_label_source || "all_matches.csv"),
     datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
     datasetCard("ETL", etlStatusShort(payload), payload.prepared_label_source || "preparar artifact"),
     datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
@@ -862,7 +683,7 @@ function datasetSummaryHtml(payload) {
     datasetCard(`Predicción ${targetYear}`, payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
     datasetCard("All matches", internationalReady ? international.rows || 0 : "faltante", internationalStatusDetail(international)),
-    datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} base / ${refresh.ready_with_players || 0} con jugadores`),
+    datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} con resultado listo`),
     datasetCard("Target", targetDisplayLabel(payload.target_column || "-"), "label entrenable"),
   ].join("");
 }
@@ -935,7 +756,6 @@ function modelMarketLabel(model) {
 }
 
 function walkForwardModeLabel(mode) {
-  if (mode === "result_plus_players") return "Partido + jugadores";
   if (mode === "result_only") return "Partido base";
   return "Sin incremental";
 }
@@ -949,19 +769,16 @@ function marketLabel(key) {
 }
 
 function evalStrategyLabel(strategy, payload) {
+  if (strategy === "last_30_international_test") return "ultimos 30 internacionales";
   if (strategy === "final_worldcup_test") {
-    const year = benchmarkWorldcupYear(payload);
-    return year ? `benchmark ${year}` : "benchmark historico";
+    const year = String((payload && payload.final_test_year) || "").trim();
+    return year ? `Mundial ${year}` : "Mundial historico";
   }
   if (strategy === "test_file") return "test etiquetado";
   if (strategy === "holdout_temporal") return "holdout temporal";
   if (strategy === "holdout_from_train") return "holdout desde train";
   if (strategy === "unavailable") return "sin evaluacion";
   return strategy || "pendiente";
-}
-
-function benchmarkWorldcupYear(payload) {
-  return String((payload && (payload.benchmark_worldcup_year || payload.final_test_year)) || "").trim();
 }
 
 function targetWorldcupYear(payload) {
@@ -1086,12 +903,9 @@ function renderWalkForwardNotice(refresh) {
   const items = [];
   if (refresh.requires_reload) items.push(`Recarga pendiente: ${refresh.stale_match_ids?.length || 0} partidos jugados sin snapshot.`);
   if (refresh.ready_result_only) items.push(`Reentreno base listo: ${refresh.ready_result_only}`);
-  if (refresh.ready_with_players) items.push(`Reentreno + jugadores listo: ${refresh.ready_with_players}`);
   if (refresh.latest_played_fixture) items.push(`Último jugado: ${refresh.latest_played_fixture}`);
   if (refresh.note && !items.includes(refresh.note)) items.push(refresh.note);
   container.innerHTML = items.map((item) => `<span>${escapeHtml(item)}</span>`).join("") || `<span>Sin alertas de walk-forward.</span>`;
-  const playersButton = document.getElementById("training-retrain-players");
-  if (playersButton) playersButton.disabled = !(refresh.ready_with_players > 0);
 }
 
 function renderEtlFlow(steps) {
@@ -1747,7 +1561,7 @@ function isTerminalJob(job) {
 function setWorldcupJobBusy(kind, busy) {
   const ids = kind === "simulation"
     ? ["simulate-btn"]
-    : ["training-train", "training-retrain-base", "training-retrain-players"];
+    : ["training-train", "training-retrain-base"];
   ids.forEach((id) => {
     const button = document.getElementById(id);
     if (button) button.disabled = Boolean(busy);
@@ -1829,11 +1643,7 @@ function simulationPayload() {
     recency_weight: Number(document.getElementById("sim-recency-weight").value || 0),
     host_advantage: Number(document.getElementById("sim-host-advantage").value || 45),
     max_goals: Number(document.getElementById("sim-max-goals").value || 10),
-    lineup_weight: Number(document.getElementById("sim-lineup-weight").value || 1),
-    player_feature_weight: Number(document.getElementById("sim-player-feature-weight").value || 1),
     ml_weight: Number(document.getElementById("sim-ml-weight").value || 0.5),
-    use_lineups: document.getElementById("sim-use-lineups").checked,
-    use_player_features: document.getElementById("sim-use-player-features").checked,
     use_ml_model: document.getElementById("sim-use-ml-model").checked,
   };
 }
@@ -1841,12 +1651,10 @@ function simulationPayload() {
 function renderSimulation(result) {
   const summary = result.summary || {};
   const config = summary.config || {};
-  const lineupState = config.use_lineups ? "11 activo" : "11 off";
-  const featureState = config.use_player_features ? "features XI activas" : "features XI off";
   const mlState = config.use_ml_model ? "ML híbrido activo" : "ML híbrido off";
   const layers = (summary.hybrid_layers || []).join(" + ");
   document.getElementById("simulation-summary").textContent =
-    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${lineupState} - ${featureState} - ${mlState} - ${layers}`;
+    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${mlState} - ${layers}`;
   const rows = (result.advancement && result.advancement.rows) || [];
   const topChampions = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 8);
   document.getElementById("champion-strip").innerHTML = topChampions.map((row) => {
