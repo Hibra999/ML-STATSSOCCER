@@ -34,7 +34,7 @@
           <p id="hero-meta">Cargando fixture inaugural...</p>
           <div class="hero-match" id="hero-match"></div>
         </div>
-        <div id="hero-countdown" class="dashboard-countdown"></div>
+        <div id="hero-countdown" class="dashboard-countdown"><span id="hero-countdown-vs"></span></div>
       </div>
       <aside class="hero-metrics dashboard-metrics">
         <div class="metric"><span>Equipos</span><strong id="metric-teams">0</strong></div>
@@ -226,6 +226,7 @@
           <div class="control-grid compact-controls simulation-grid">
             <label>N próximos<input id="sim-match-limit" type="number" min="1" max="72" step="1" value="8"></label>
             <label>Grupo<select id="sim-group-filter"></select></label>
+            <label>Modelo marcador<select id="sim-score-model"></select></label>
             <label>N simulaciones<input id="sim-iterations" type="number" min="100" max="100000" step="1000" value="5000"></label>
             <label>Seed<input id="sim-seed" type="number" value="2026"></label>
             <label>Partidos recientes<input id="sim-poisson-recent-matches" type="number" min="3" max="50" step="1" value="15"></label>

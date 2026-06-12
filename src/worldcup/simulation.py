@@ -67,7 +67,12 @@ def simulate_worldcup(
     group_specs = _group_match_specs(group_matches, group_lookup, group_infos, team_index, model, skip_keys=confirmed_keys)
     group_lambda_home = np.asarray([spec[3] for spec in group_specs], dtype=float)
     group_lambda_away = np.asarray([spec[4] for spec in group_specs], dtype=float)
-    pair_cache: Dict[Tuple[Any, ...], Tuple[float, float, float]] = {}
+    group_score_samplers = [
+        _model_score_sampler(model, str(spec[6]), str(spec[7]), spec[5])
+        for spec in group_specs
+    ]
+    uses_score_samplers = any(sampler is not None for sampler in group_score_samplers)
+    pair_cache: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     report_every = max(1, iterations // 100)
     _emit_progress(progress_callback, "simulation", 0, iterations, "Monte Carlo en ejecucion")
 
@@ -87,10 +92,38 @@ def simulate_worldcup(
             else:
                 points[group_idx][pos1] += 1
                 points[group_idx][pos2] += 1
-        if group_specs:
+        if group_specs and uses_score_samplers:
+            sampled_home_values = []
+            sampled_away_values = []
+            for spec_index, spec in enumerate(group_specs):
+                sampler = group_score_samplers[spec_index]
+                if sampler is None:
+                    goals1 = int(rng.poisson(group_lambda_home[spec_index]))
+                    goals2 = int(rng.poisson(group_lambda_away[spec_index]))
+                else:
+                    goals1, goals2 = _sample_from_score_sampler(sampler, rng)
+                sampled_home_values.append(goals1)
+                sampled_away_values.append(goals2)
+            sampled_home = np.asarray(sampled_home_values, dtype=int)
+            sampled_away = np.asarray(sampled_away_values, dtype=int)
+            for spec_index, (group_idx, pos1, pos2, _, _, _, _, _) in enumerate(group_specs):
+                goals1 = int(sampled_home[spec_index])
+                goals2 = int(sampled_away[spec_index])
+                goals_for[group_idx][pos1] += goals1
+                goals_against[group_idx][pos1] += goals2
+                goals_for[group_idx][pos2] += goals2
+                goals_against[group_idx][pos2] += goals1
+                if goals1 > goals2:
+                    points[group_idx][pos1] += 3
+                elif goals2 > goals1:
+                    points[group_idx][pos2] += 3
+                else:
+                    points[group_idx][pos1] += 1
+                    points[group_idx][pos2] += 1
+        elif group_specs:
             sampled_home = rng.poisson(group_lambda_home)
             sampled_away = rng.poisson(group_lambda_away)
-            for spec_index, (group_idx, pos1, pos2, _, _, _) in enumerate(group_specs):
+            for spec_index, (group_idx, pos1, pos2, _, _, _, _, _) in enumerate(group_specs):
                 goals1 = int(sampled_home[spec_index])
                 goals2 = int(sampled_away[spec_index])
                 goals_for[group_idx][pos1] += goals1
@@ -203,8 +236,8 @@ def _group_match_specs(
         team_index: Dict[str, int],
         model: WorldCupModel,
         skip_keys: set[Tuple[str, str, str]] | None = None,
-) -> List[Tuple[int, int, int, float, float, Dict[str, Any]]]:
-    specs: List[Tuple[int, int, int, float, float, Dict[str, Any]]] = []
+) -> List[Tuple[int, int, int, float, float, Dict[str, Any], str, str]]:
+    specs: List[Tuple[int, int, int, float, float, Dict[str, Any], str, str]] = []
     skip_keys = skip_keys or set()
     for match in group_matches:
         group = str(match.get("group") or "")
@@ -221,7 +254,7 @@ def _group_match_specs(
         if team1_idx not in positions or team2_idx not in positions:
             continue
         lambda1, lambda2 = _model_expected_goals(model, team1, team2, match)
-        specs.append((int(group_idx), int(positions[team1_idx]), int(positions[team2_idx]), float(lambda1), float(lambda2), match))
+        specs.append((int(group_idx), int(positions[team1_idx]), int(positions[team2_idx]), float(lambda1), float(lambda2), match, team1, team2))
     return specs
 
 
@@ -237,6 +270,34 @@ def _model_match_probabilities(model: WorldCupModel, team1: str, team2: str, mat
     if callable(method):
         return method(team1, team2, match=match)
     return model.match_probabilities(team1, team2)
+
+
+def _model_score_sampler(model: WorldCupModel, team1: str, team2: str, match: Dict[str, Any] | None = None):
+    method = getattr(model, "score_grid", None)
+    if not callable(method):
+        return None
+    try:
+        grid = method(team1, team2, match=match, max_goals=getattr(model, "max_goals", 10))
+    except Exception:
+        return None
+    grid = np.asarray(grid, dtype=float)
+    if grid.ndim != 2 or grid.size == 0:
+        return None
+    flat = np.maximum(np.nan_to_num(grid.ravel(), nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+    total = float(flat.sum())
+    if total <= 0:
+        return None
+    flat /= total
+    cdf = np.cumsum(flat)
+    cdf[-1] = 1.0
+    home, away = np.unravel_index(np.arange(flat.shape[0]), grid.shape)
+    return home.astype(int), away.astype(int), cdf
+
+
+def _sample_from_score_sampler(sampler, rng: np.random.Generator) -> Tuple[int, int]:
+    home, away, cdf = sampler
+    index = int(np.searchsorted(cdf, rng.random(), side="right"))
+    return int(home[index]), int(away[index])
 
 
 def _confirmed_group_result_specs(
@@ -340,7 +401,7 @@ def _sample_knockout_winner_index(
         teams: List[str],
         model: WorldCupModel,
         rng: np.random.Generator,
-        pair_cache: Dict[Tuple[Any, ...], Tuple[float, float, float]],
+        pair_cache: Dict[Tuple[Any, ...], Dict[str, Any]],
         match: Dict[str, Any] | None = None,
 ) -> Tuple[int, int]:
     cache_key = (int(team1_idx), int(team2_idx), str((match or {}).get("date", "")))
@@ -354,10 +415,19 @@ def _sample_knockout_winner_index(
             float(probabilities.get("home", 0.0)) + float(probabilities.get("away", 0.0)),
             1e-9,
         )
-        pair_cache[cache_key] = (lambda1, lambda2, win_share)
-    lambda1, lambda2, win_share = pair_cache[cache_key]
-    goals1 = int(rng.poisson(lambda1))
-    goals2 = int(rng.poisson(lambda2))
+        pair_cache[cache_key] = {
+            "lambda1": lambda1,
+            "lambda2": lambda2,
+            "win_share": win_share,
+            "sampler": _model_score_sampler(model, team1, team2, match),
+        }
+    cached = pair_cache[cache_key]
+    win_share = float(cached["win_share"])
+    if cached.get("sampler") is not None:
+        goals1, goals2 = _sample_from_score_sampler(cached["sampler"], rng)
+    else:
+        goals1 = int(rng.poisson(float(cached["lambda1"])))
+        goals2 = int(rng.poisson(float(cached["lambda2"])))
     if goals1 > goals2:
         return team1_idx, team2_idx
     if goals2 > goals1:

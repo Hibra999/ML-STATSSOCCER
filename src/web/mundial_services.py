@@ -23,6 +23,13 @@ from src.worldcup import (
     tournament_fixtures_dataframe,
 )
 from src.worldcup.model import TOTAL_GOAL_LINES, total_line_suffix
+from src.worldcup.score_models import (
+    DEFAULT_SCORE_MODEL,
+    build_score_model,
+    normalize_score_model_key,
+    sample_scores_from_grid,
+    score_model_options,
+)
 from src.worldcup.data import CACHE_ROOT, fixture_results_status, group_letter, groups_from_tournament
 from src.worldcup.international_provider import (
     contextual_poisson_for_match,
@@ -81,6 +88,12 @@ DEFAULT_CONFIG = {
     "host_advantage": 45.0,
     "max_goals": 10,
     "poisson_recent_matches": 15,
+    "score_model": DEFAULT_SCORE_MODEL,
+    "stat_model_cache": True,
+    "stat_model_refit": False,
+    "bayes_draws": 500,
+    "bayes_tune": 500,
+    "bayes_chains": 2,
     "refresh": False,
 }
 LAST_SIMULATION_RESULT: Dict[str, Any] = {}
@@ -410,7 +423,8 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
         "countdown_state": fixture_summary["countdown_state"],
         "group_standings": standings,
         "default_config": DEFAULT_CONFIG,
-        "model": "Elo + Poisson Monte Carlo",
+        "score_models": score_model_options(),
+        "model": "Elo + modelos de marcador Monte Carlo",
         "last_simulation": LAST_SIMULATION_RESULT,
         "assets_policy": "Banderas locales/publicas y fotos publicas de SofaScore con fallback visual.",
     }
@@ -745,6 +759,7 @@ def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     config = simulation_config(payload)
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     model, history_source = build_model(tournament, config)
+    model = apply_configured_score_model(model, tournament, config)
     result = predict_match_payload(
         tournament=tournament,
         base_model=model,
@@ -759,6 +774,7 @@ def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     result["fixture_source"] = fixture_source
     result["history_source"] = history_source
     result["active_model"] = read_model_metadata(model_id=config["model_id"] or None)
+    result["score_model"] = score_model_metadata(model)
     return result
 
 
@@ -767,6 +783,7 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     config = simulation_config(payload)
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     model, history_source = build_model(tournament, config)
+    model = apply_configured_score_model(model, tournament, config)
 
     limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
     group_filter = str(payload.get("group") or "").strip()
@@ -797,6 +814,8 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "use_ml_model": config["use_ml_model"],
             "model_id": config["model_id"],
             "poisson_recent_matches": config["poisson_recent_matches"],
+            "score_model": config["score_model"],
+            "score_model_label": score_model_metadata(model).get("label", ""),
             "active_model": read_model_metadata(model_id=config["model_id"] or None),
         },
     }
@@ -808,6 +827,7 @@ def predict_upcoming_monte_carlo(payload: Dict[str, Any] | None = None) -> Dict[
     config["iterations"] = monte_carlo_match_iterations(payload.get("iterations", DEFAULT_CONFIG["iterations"]))
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     model, history_source = build_model(tournament, config)
+    model = apply_configured_score_model(model, tournament, config)
     international_matches = load_international_matches(required=False)
     limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
     group_filter = str(payload.get("group") or "").strip()
@@ -836,9 +856,11 @@ def predict_upcoming_monte_carlo(payload: Dict[str, Any] | None = None) -> Dict[
             "iterations": config["iterations"],
             "seed": config["seed"],
             "poisson_recent_matches": config["poisson_recent_matches"],
+            "score_model": config["score_model"],
+            "score_model_label": score_model_metadata(model).get("label", ""),
             "fixture_source": fixture_source,
             "history_source": history_source,
-            "source": "Poisson contextual + simulacion de marcador por fixture",
+            "source": "Modelo de marcador contextual + simulacion por fixture",
         },
     }
 
@@ -863,6 +885,8 @@ def monte_carlo_match_prediction(
     )
     lambda_home, lambda_away = contextual_lambdas(context, base_model, home_team, away_team)
     iterations = int(config["iterations"])
+    score_grid = match_score_grid_for_lambdas(base_model, lambda_home, lambda_away, max_goals=int(config["max_goals"]))
+    score_metadata = score_model_metadata(base_model)
     counts = {
         "home": 0,
         "draw": 0,
@@ -876,8 +900,11 @@ def monte_carlo_match_prediction(
     remaining = iterations
     while remaining > 0:
         size = min(chunk_size, remaining)
-        sampled_home = rng.poisson(lambda_home, size=size)
-        sampled_away = rng.poisson(lambda_away, size=size)
+        if score_grid is None:
+            sampled_home = rng.poisson(lambda_home, size=size)
+            sampled_away = rng.poisson(lambda_away, size=size)
+        else:
+            sampled_home, sampled_away = sample_scores_from_grid(score_grid, rng, size=size)
         total_goals = sampled_home + sampled_away
         counts["home"] += int(np.sum(sampled_home > sampled_away))
         counts["draw"] += int(np.sum(sampled_home == sampled_away))
@@ -922,8 +949,9 @@ def monte_carlo_match_prediction(
         "iterations": iterations,
         "seed": int(config["seed"]),
         "poisson_recent_matches": int(config["poisson_recent_matches"]),
+        "score_model": score_metadata,
         "contextual_poisson": context,
-        "source": "Poisson contextual" if context.get("available") else "Poisson base",
+        "source": score_metadata.get("label") or ("Poisson contextual" if context.get("available") else "Poisson base"),
     }
 
 
@@ -986,6 +1014,7 @@ def monte_carlo_match_row(result: Dict[str, Any]) -> Dict[str, Any]:
         "Lambda Visita": expected.get("away", ""),
         "Top score": top_score.get("score", ""),
         "Top score %": top_score.get("probability", ""),
+        "Modelo marcador": (result.get("score_model") or {}).get("label", ""),
         "Iteraciones": result.get("iterations", ""),
         "Fuente": result.get("source", ""),
     }
@@ -1075,6 +1104,10 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     if config["mode"] == "poisson_live":
         model = RecentPoissonWorldCupModel(model, recent_match_limit=int(config["poisson_recent_matches"]))
         hybrid_layers.append(f"Poisson ultimos {config['poisson_recent_matches']}")
+    model = apply_configured_score_model(model, tournament, config)
+    score_metadata = score_model_metadata(model)
+    if score_metadata.get("key") != DEFAULT_SCORE_MODEL:
+        hybrid_layers.append(str(score_metadata.get("label") or score_metadata.get("key")))
     if config["use_ml_model"] and active_model.get("trained"):
         model = BlendedWorldCupModel(model, model_id=config["model_id"], ml_weight=float(config["ml_weight"]))
         hybrid_layers.extend(["ML blend 1X2", "ML ajuste lambdas"])
@@ -1091,7 +1124,7 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     emit_job_progress(progress_callback, "rendering", 100, 100, "Preparando resultados")
     output = {
         "summary": {
-            "model": "Elo + Poisson Monte Carlo",
+            "model": "Elo + modelos de marcador Monte Carlo",
             "config": config,
             "mode": config["mode"],
             "fixture_source": fixture_source,
@@ -1099,6 +1132,7 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
             "use_ml_model": config["use_ml_model"],
             "model_id": config["model_id"],
             "active_model": active_model,
+            "score_model": score_metadata,
             "hybrid_layers": hybrid_layers,
             "confirmed_results": len(confirmed_results),
             "result_policy": (
@@ -1200,6 +1234,44 @@ def build_model(tournament: Dict[str, Any], config: Dict[str, Any]) -> Tuple[Wor
     return model, history_source
 
 
+def apply_configured_score_model(model: Any, tournament: Dict[str, Any], config: Dict[str, Any]) -> Any:
+    if normalize_score_model_key(config.get("score_model")) == DEFAULT_SCORE_MODEL:
+        return model
+    group_map = groups_from_tournament(tournament)
+    team_names = [team for group_teams in group_map.values() for team in group_teams]
+    history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    return build_score_model(model, history_df=history_df, teams=team_names, config=config)
+
+
+def score_model_metadata(model: Any) -> Dict[str, Any]:
+    method = getattr(model, "score_model_metadata", None)
+    if callable(method):
+        return method()
+    base_model = getattr(model, "base_model", None)
+    if base_model is not None and base_model is not model:
+        return score_model_metadata(base_model)
+    return {
+        "key": DEFAULT_SCORE_MODEL,
+        "label": "Poisson independiente",
+        "available": True,
+        "params": {},
+        "warnings": [],
+    }
+
+
+def match_score_grid_for_lambdas(model: Any, lambda_home: float, lambda_away: float, max_goals: int) -> np.ndarray | None:
+    method = getattr(model, "score_grid_from_lambdas", None)
+    if callable(method):
+        try:
+            return method(lambda_home, lambda_away, max_goals=max_goals)
+        except Exception:
+            return None
+    base_model = getattr(model, "base_model", None)
+    if base_model is not None and base_model is not model:
+        return match_score_grid_for_lambdas(base_model, lambda_home, lambda_away, max_goals=max_goals)
+    return None
+
+
 def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload = payload or {}
     mode = str(payload.get("mode") or "hybrid").strip().lower()
@@ -1219,6 +1291,12 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "host_advantage": _clamp_float(payload.get("host_advantage", DEFAULT_CONFIG["host_advantage"]), 0.0, 120.0),
         "max_goals": int(_clamp_int(payload.get("max_goals", DEFAULT_CONFIG["max_goals"]), 6, 14)),
         "poisson_recent_matches": int(_clamp_int(payload.get("poisson_recent_matches", DEFAULT_CONFIG["poisson_recent_matches"]), 3, 50)),
+        "score_model": normalize_score_model_key(payload.get("score_model", DEFAULT_CONFIG["score_model"])),
+        "stat_model_cache": bool(payload.get("stat_model_cache", DEFAULT_CONFIG["stat_model_cache"])),
+        "stat_model_refit": bool(payload.get("stat_model_refit", DEFAULT_CONFIG["stat_model_refit"])),
+        "bayes_draws": int(_clamp_int(payload.get("bayes_draws", DEFAULT_CONFIG["bayes_draws"]), 100, 10000)),
+        "bayes_tune": int(_clamp_int(payload.get("bayes_tune", DEFAULT_CONFIG["bayes_tune"]), 100, 10000)),
+        "bayes_chains": int(_clamp_int(payload.get("bayes_chains", DEFAULT_CONFIG["bayes_chains"]), 1, 8)),
         "refresh": bool(payload.get("refresh", DEFAULT_CONFIG["refresh"])),
         "model_id": str(payload.get("model_id") or "").strip(),
         "include_confirmed_results": bool(payload.get("include_confirmed_results", mode == "poisson_live")),
@@ -1567,7 +1645,8 @@ def future_fixture_rows(df: pd.DataFrame) -> pd.DataFrame:
     has_time = df["_has_kickoff_time"].astype(bool)
     future_by_time = has_time & df["_kickoff"].notna() & (df["_kickoff"] > now)
     future_by_date = ~has_time & df["_date"].notna() & (df["_date"] >= today)
-    return df[~finished & (future_by_time | future_by_date)].sort_values(["_sort_time", "No."], kind="stable").copy()
+    effective_finished = finished & ~future_by_time
+    return df[~effective_finished & (future_by_time | future_by_date)].sort_values(["_sort_time", "No."], kind="stable").copy()
 
 
 def drop_internal_fixture_columns(df: pd.DataFrame) -> pd.DataFrame:

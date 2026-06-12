@@ -105,6 +105,7 @@ async function loadAll(refresh) {
     state.trainingOptions = training.options || null;
     state.lastSimulation = overview.last_simulation || state.lastSimulation;
     rebuildTeamAssets();
+    renderScoreModelOptions(overview.score_models || []);
     applyDefaultConfig(overview.default_config || {});
     renderOverview(overview);
     renderGroups(groups);
@@ -157,6 +158,7 @@ function applyDefaultConfig(config) {
     "sim-ml-weight": config.ml_weight,
     "sim-poisson-recent-matches": config.poisson_recent_matches,
     "upcoming-poisson-recent-matches": config.poisson_recent_matches,
+    "sim-score-model": config.score_model,
   };
   Object.entries(pairs).forEach(([id, value]) => {
     const input = document.getElementById(id);
@@ -165,6 +167,15 @@ function applyDefaultConfig(config) {
   const simMlToggle = document.getElementById("sim-use-ml-model");
   if (simMlToggle) simMlToggle.checked = Boolean(config.use_ml_model);
   state.defaultsApplied = true;
+}
+
+function renderScoreModelOptions(options) {
+  const select = document.getElementById("sim-score-model");
+  if (!select) return;
+  const rows = options.length ? options : [{ key: "independent_poisson", label: "Poisson independiente" }];
+  select.innerHTML = rows.map((option) => (
+    `<option value="${escapeAttr(option.key || "")}">${escapeHtml(option.label || option.key || "")}</option>`
+  )).join("");
 }
 
 function renderOverview(overview) {
@@ -362,7 +373,7 @@ function dashboardCountdownHtml(label, matchLine, kickoffLine, remaining) {
   return `
     <div class="countdown-head">
       <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(matchLine || "Partido pendiente")}</strong>
+      <strong id="hero-countdown-vs">${escapeHtml(matchLine || "Partido pendiente")}</strong>
       <small>${escapeHtml(kickoffLine || "Horario pendiente")}</small>
     </div>
     <div class="hero-countdown">${cells}</div>`;
@@ -1449,8 +1460,9 @@ async function runMatchMonteCarlo() {
 
 function renderMatchMonteCarlo(result) {
   const summary = result.summary || {};
+  const scoreLabel = summary.score_model_label || summary.score_model || "Poisson independiente";
   document.getElementById("simulation-summary").textContent =
-    `${summary.method || "Monte Carlo Poisson por partido"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${formatInteger(summary.iterations || 0)} simulaciones - seed ${summary.seed || ""} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()}`;
+    `${summary.method || "Monte Carlo por partido"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${formatInteger(summary.iterations || 0)} simulaciones - seed ${summary.seed || ""} - ${scoreLabel} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()}`;
   document.getElementById("match-simulation-grid").innerHTML = (result.predictions || [])
     .map((prediction) => monteCarloMatchCardHtml(prediction))
     .join("") || loadingHtml("Sin fixtures para simular");
@@ -1462,6 +1474,7 @@ function monteCarloMatchCardHtml(prediction) {
   const probs = prediction.probabilities || {};
   const expected = prediction.expected_goals || {};
   const simulated = prediction.simulated_goals || {};
+  const scoreModel = prediction.score_model || {};
   const topScores = prediction.top_scores || [];
   const homeAsset = assetFor(fixture.home || "");
   const awayAsset = assetFor(fixture.away || "");
@@ -1511,7 +1524,7 @@ function monteCarloMatchCardHtml(prediction) {
       <span>λ ${escapeHtml(expected.home ?? "-")} / ${escapeHtml(expected.away ?? "-")}</span>
       <span>Media sim ${escapeHtml(simulated.home ?? "-")} / ${escapeHtml(simulated.away ?? "-")}</span>
       <span>N=${escapeHtml(formatInteger(prediction.iterations || 0))}</span>
-      <span>${escapeHtml(prediction.source || "Poisson")}</span>
+      <span>${escapeHtml(scoreModel.label || prediction.source || "Poisson")}</span>
     </div>
     ${contextualPoissonHtml(prediction.contextual_poisson || {}, fixture)}
   </article>`;
@@ -1854,6 +1867,7 @@ function simulationPayload(overrides = {}) {
     recency_weight: Number(document.getElementById("sim-recency-weight").value || 0),
     host_advantage: Number(document.getElementById("sim-host-advantage").value || 45),
     max_goals: Number(document.getElementById("sim-max-goals").value || 10),
+    score_model: (document.getElementById("sim-score-model") || {}).value || "independent_poisson",
     ml_weight: Number((mlWeightInput && mlWeightInput.value) || 0.5),
     use_ml_model: Boolean(mlToggle && mlToggle.checked),
     ...overrides,
@@ -1892,8 +1906,9 @@ function renderSimulation(result) {
   const mlState = config.use_ml_model ? "ML híbrido activo" : "ML híbrido off";
   const layers = (summary.hybrid_layers || []).join(" + ");
   const recentLimit = config.poisson_recent_matches || currentPoissonRecentMatches();
+  const scoreModel = summary.score_model || {};
   document.getElementById("simulation-summary").textContent =
-    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - Poisson ultimos ${recentLimit} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${mlState} - ${layers}`;
+    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - ${scoreModel.label || config.score_model || "Poisson independiente"} - Poisson ultimos ${recentLimit} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${mlState} - ${layers}`;
   if (!document.getElementById("champion-strip")) return;
   const rows = (result.advancement && result.advancement.rows) || [];
   const topChampions = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 8);
