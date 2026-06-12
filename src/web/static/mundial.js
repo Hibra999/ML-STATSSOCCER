@@ -1311,9 +1311,13 @@ function renderUpcomingReport(report) {
       ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
     </div>
     ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
-    <div class="upcoming-grid">
-      ${fixtures.map((fixtureReport) => reportFixtureCardHtml(fixtureReport)).join("") || loadingHtml("Sin fixtures futuros")}
-    </div>`;
+    ${clientReportHtml(fixtures)}
+    <details class="technical-report-drawer">
+      <summary>Vista técnica completa</summary>
+      <div class="upcoming-grid">
+        ${fixtures.map((fixtureReport) => reportFixtureCardHtml(fixtureReport)).join("") || loadingHtml("Sin fixtures futuros")}
+      </div>
+    </details>`;
   renderTable("upcoming-predictions-table", report.table);
 }
 
@@ -1329,6 +1333,153 @@ function globalConsensusStrength(fixtures) {
   });
   if (!counts.size) return "-";
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
+function clientReportHtml(fixtures) {
+  const items = fixtures || [];
+  return `<section class="client-report-shell">
+    <header>
+      <div>
+        <h3>Reporte cliente</h3>
+        <small>Resultados listos para apuestas, sin detalle técnico de modelos</small>
+      </div>
+      <span>${escapeHtml(items.length)} partido${items.length === 1 ? "" : "s"}</span>
+    </header>
+    <div class="client-report-grid">
+      ${items.map((fixtureReport) => clientFixtureCardHtml(fixtureReport)).join("") || loadingHtml("Sin resultados para cliente")}
+    </div>
+  </section>`;
+}
+
+function clientFixtureCardHtml(report) {
+  const fixture = report.fixture || {};
+  const consensus = report.consensus || {};
+  const stats = report.model_statistics || {};
+  const distribution = report.consensus_score_distribution || {};
+  const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
+  const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
+  const pickTeam = consensus.outcome === "draw" ? "Empate" : consensus.outcome === "home" ? fixture.home : consensus.outcome === "away" ? fixture.away : "-";
+  const pickLabel = consensus.outcome_label || "-";
+  const pickConfidence = clientOutcomeConfidence(stats, consensus);
+  const confidenceClass = pickConfidence >= 70 ? "high" : pickConfidence >= 55 ? "medium" : "low";
+  return `<article class="client-fixture-card confidence-${escapeAttr(confidenceClass)}">
+    <header>
+      <span>${escapeHtml([fixture.date || "", fixture.time || ""].filter(Boolean).join(" · "))}</span>
+      <strong>${escapeHtml(fixture.group || "")}</strong>
+    </header>
+    <div class="client-match-row">
+      <div>${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
+      <b>vs</b>
+      <div>${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
+    </div>
+    <div class="client-main-pick">
+      <span>Pronóstico principal</span>
+      <strong>${escapeHtml(pickLabel)} · ${escapeHtml(pickTeam || "-")}</strong>
+      <small>${escapeHtml(formatNumber(pickConfidence))}% confianza · ${escapeHtml(consensus.strength || "Baja")}</small>
+    </div>
+    ${clientOutcomeChartHtml(stats, consensus, fixture)}
+    ${clientBetCardsHtml(report)}
+    ${clientScorePanelHtml(distribution)}
+  </article>`;
+}
+
+function clientOutcomeConfidence(stats, consensus) {
+  const outcome = (consensus || {}).outcome || "";
+  const summary = (((stats || {}).outcomes || {})[outcome]) || {};
+  if (Number.isFinite(Number(summary.avg))) return Number(summary.avg);
+  return Number((consensus || {}).outcome_share || 0) * 100;
+}
+
+function clientOutcomeChartHtml(stats, consensus, fixture) {
+  const outcomeStats = (stats && stats.outcomes) || {};
+  const outcomeCounts = (consensus && consensus.outcome_counts) || {};
+  const eligible = Math.max(Number((stats && stats.model_count) || (consensus && consensus.eligible_models) || 0), 1);
+  const rows = [
+    { key: "home", label: "1", team: fixture.home || "Local" },
+    { key: "draw", label: "X", team: "Empate" },
+    { key: "away", label: "2", team: fixture.away || "Visitante" },
+  ];
+  return `<div class="client-outcome-chart">
+    ${rows.map((item) => {
+      const summary = outcomeStats[item.key] || {};
+      const value = Number.isFinite(Number(summary.avg)) ? Number(summary.avg) : (Number(outcomeCounts[item.key] || 0) / eligible) * 100;
+      return `<div class="${escapeAttr(item.key === ((consensus || {}).outcome || "") ? "active" : "")}">
+        <span>${escapeHtml(item.label)}</span>
+        <strong>${escapeHtml(formatNumber(value))}%</strong>
+        <small>${escapeHtml(item.team)}</small>
+        <i style="height:${escapeAttr(clampPercent(value))}%"></i>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function clientBetCardsHtml(report) {
+  const bets = clientBestBets(report).slice(0, 4);
+  if (!bets.length) return "";
+  return `<section class="client-bets-panel">
+    <header><strong>Mejores señales</strong><small>Ordenadas por acuerdo</small></header>
+    <div class="client-bet-grid">
+      ${bets.map((bet) => `<div class="client-bet-card">
+        <span>${escapeHtml(bet.market)}</span>
+        <strong>${escapeHtml(bet.pick)}</strong>
+        <b>${escapeHtml(formatNumber(bet.probability))}%</b>
+        <small>${escapeHtml(bet.detail)}</small>
+      </div>`).join("")}
+    </div>
+  </section>`;
+}
+
+function clientBestBets(report) {
+  const fixture = report.fixture || {};
+  const consensus = report.consensus || {};
+  const stats = report.model_statistics || {};
+  const distribution = report.consensus_score_distribution || {};
+  const bets = [];
+  const pickConfidence = clientOutcomeConfidence(stats, consensus);
+  const pickTeam = consensus.outcome === "draw" ? "Empate" : consensus.outcome === "home" ? fixture.home : consensus.outcome === "away" ? fixture.away : "";
+  bets.push({
+    market: "1X2",
+    pick: `${consensus.outcome_label || "-"} ${pickTeam || ""}`.trim(),
+    probability: pickConfidence,
+    agreement: Number(consensus.outcome_share || 0),
+    detail: `${Math.round(Number(consensus.outcome_share || 0) * 100)}% acuerdo`,
+  });
+  Object.entries((stats && stats.totals) || {}).forEach(([line, item]) => {
+    const pick = item.pick || "";
+    const label = item.label || (pick === "over" ? "Over" : pick === "under" ? "Under" : "");
+    const summary = pick === "over" ? item.over || {} : item.under || {};
+    bets.push({
+      market: `U/O ${line}`,
+      pick: label || "-",
+      probability: Number(summary.avg || 0),
+      agreement: Number(item.share || 0),
+      detail: `${Math.round(Number(item.share || 0) * 100)}% acuerdo · σ ${formatNumber(summary.std || 0)}`,
+    });
+  });
+  const topScore = ((distribution || {}).top_scores || [])[0];
+  if (topScore) {
+    bets.push({
+      market: "Marcador exacto",
+      pick: topScore.score || "-",
+      probability: Number(topScore.probability || 0),
+      agreement: 0,
+      detail: "score más probable",
+    });
+  }
+  return bets.sort((a, b) => (Number(b.agreement || 0) - Number(a.agreement || 0)) || (Number(b.probability || 0) - Number(a.probability || 0)));
+}
+
+function clientScorePanelHtml(distribution) {
+  const payload = distribution || {};
+  if (!payload.available) return "";
+  const topScores = payload.top_scores || [];
+  return `<section class="client-score-panel">
+    <header><strong>Marcadores probables</strong><small>Matriz consenso</small></header>
+    <div class="top-scores compact">
+      ${topScores.slice(0, 4).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
+    </div>
+    ${scoreHeatmapHtml(payload)}
+  </section>`;
 }
 
 function reportFixtureCardHtml(report) {

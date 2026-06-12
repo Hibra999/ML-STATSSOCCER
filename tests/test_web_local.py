@@ -343,6 +343,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "reportTopModelsHtml" in app_source
     assert "reportConsensusScoreHtml" in app_source
     assert "Todos los modelos" in app_source
+    assert "clientReportHtml" in app_source
+    assert "Reporte cliente" in app_source
+    assert "Pronóstico principal" in app_source
     assert "setInterval(pollWorldcupJobs, 1000)" not in app_source
     assert "setTimeout(pollWorldcupJobs" in app_source
     assert "jobPollingInFlight" in app_source
