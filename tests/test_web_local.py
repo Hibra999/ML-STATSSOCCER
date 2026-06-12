@@ -398,6 +398,34 @@ def test_job_manager_captures_progress_and_failure():
         manager._executor.shutdown(wait=True)
 
 
+def test_job_manager_rejects_duplicate_active_lock_key():
+    from threading import Event
+
+    from src.web.jobs import JobManager
+
+    manager = JobManager(max_workers=1)
+    started = Event()
+    release = Event()
+
+    def waits(progress_callback=None):
+        started.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    try:
+        first = manager.submit("train", waits, with_progress=True, lock_key="mundial-training")
+        assert first["lock_key"] == "mundial-training"
+        assert started.wait(timeout=2)
+        with pytest.raises(RuntimeError, match="Ya hay un entrenamiento Mundial"):
+            manager.submit("train again", waits, with_progress=True, lock_key="mundial-training")
+        release.set()
+        first_job = wait_for_manager_job(manager, first["job_id"])
+        assert first_job["status"] == "succeeded"
+    finally:
+        release.set()
+        manager._executor.shutdown(wait=True)
+
+
 def test_worldcup_training_progress_prints_optuna_details(capsys):
     from src.worldcup.training import emit_training_progress
 

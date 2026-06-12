@@ -1401,10 +1401,26 @@ function renderUpcomingPredictions(result) {
         <span>${marketBadgeText(sources.result, "1X2: Poisson")}</span>
         ${goalMarketLines.map((line) => `<span>${marketBadgeText(sources[line.key], `${line.label}: Poisson`)}</span>`).join("")}
       </div>
+      ${marketReadoutHtml(prediction.market_readout || {})}
       <small>${escapeHtml((prediction.notes || []).join(" - "))}</small>
     </article>`;
   }).join("") || loadingHtml("Sin fixtures futuros");
   renderTable("upcoming-predictions-table", result.table);
+}
+
+function marketReadoutHtml(readout) {
+  const lines = (readout && readout.lines) || [];
+  if (lines.length) {
+    const ranked = [...lines].sort((a, b) => Math.abs(Number(b.raw_edge || 0)) - Math.abs(Number(a.raw_edge || 0))).slice(0, 4);
+    return `<div class="market-readout">
+      ${ranked.map((line) => `
+        <span>${escapeHtml(line.market || "")} ${escapeHtml(line.label || "")}: modelo ${escapeHtml(line.model_probability ?? "-")}% · mercado ${escapeHtml(line.market_probability ?? "-")}% · edge ${escapeHtml(line.raw_edge ?? "-")}pp</span>
+      `).join("")}
+    </div>`;
+  }
+  const missing = (readout && readout.missing_sources) || [];
+  if (!missing.length) return "";
+  return `<div class="market-readout muted">${missing.map((item) => `<span>Fuente faltante: ${escapeHtml(item)}</span>`).join("")}</div>`;
 }
 
 function contextualPoissonHtml(contextual, fixture) {

@@ -340,6 +340,54 @@ def test_prepared_dataset_status_marks_old_schema_stale_without_old_warnings(tmp
     assert status["dataset"] is normalized
 
 
+def test_ensure_prepared_dataset_current_regenerates_old_schema(tmp_path, monkeypatch):
+    prepared_path = tmp_path / "prepared.pkl"
+    meta_path = tmp_path / "prepared.json"
+    kaggle_root = tmp_path / "kaggle"
+    kaggle_root.mkdir(parents=True)
+    (kaggle_root / "train.csv").write_text("home_team,away_team,home_goals,away_goals\nMexico,Canada,1,0\n", encoding="utf-8")
+    old_dataset = {
+        **minimal_normalized_dataset(),
+        "prepared_at": "2026-06-01T00:00:00+00:00",
+        "prepared_schema_version": "",
+        "training_mode": "match_result",
+        "source_files": [],
+        "trainable": True,
+    }
+    prepared_path.parent.mkdir(parents=True, exist_ok=True)
+    with prepared_path.open("wb") as handle:
+        pickle.dump(old_dataset, handle)
+    regenerated = {
+        **minimal_normalized_dataset(),
+        "prepared_schema_version": training.PREPARED_SCHEMA_VERSION,
+        "target_column": "Label + GoalsDistribution + OverUnder05/15/25/35",
+        "trainable": True,
+        "over_under_ready": True,
+        "goals_distribution_ready": True,
+        "train": pd.DataFrame([
+            {"Home": "Mexico", "Away": "Canada", "Label": "H", "HG": 1, "AG": 0, "OverUnder05": 1, "OverUnder15": 0, "OverUnder25": 0, "OverUnder35": 0},
+            {"Home": "Canada", "Away": "Mexico", "Label": "A", "HG": 0, "AG": 2, "OverUnder05": 1, "OverUnder15": 1, "OverUnder25": 0, "OverUnder35": 0},
+        ]),
+    }
+    calls = {"prepare": 0}
+
+    def fake_prepare_training_dataset(force=False, refresh_history=False):
+        calls["prepare"] += 1
+        training.save_prepared_dataset(regenerated)
+        return {"etl_ready": True}
+
+    monkeypatch.setattr(training, "KAGGLE_ROOT", kaggle_root)
+    monkeypatch.setattr(training, "PREPARED_DATASET_FILE", prepared_path)
+    monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", meta_path)
+    monkeypatch.setattr(training, "international_results_status", lambda: {"available": False})
+    monkeypatch.setattr(training, "prepare_training_dataset", fake_prepare_training_dataset)
+
+    current = training.ensure_prepared_dataset_current({}, progress_callback=None)
+
+    assert calls["prepare"] == 1
+    assert current["prepared_schema_version"] == training.PREPARED_SCHEMA_VERSION
+
+
 def test_build_training_matrix_recent15_uses_match_date_not_year_cache():
     rows = training.sanitize_match_rows(pd.DataFrame([
         {"Date": "2022-02-01", "Year": 2022, "Home": "Mexico", "Away": "Canada", "HG": 1, "AG": 0, "Label": "H", "Source": "train"},
@@ -411,3 +459,42 @@ def test_preferred_over_under_sources_keep_binary_unless_goals_distribution_is_b
 
     assert training.preferred_over_under_sources(markets, weaker_goals)["over_under_25"]["kind"] == "binary_ml"
     assert training.preferred_over_under_sources(markets, stronger_goals)["over_under_25"]["kind"] == "goal_distribution_ml"
+
+
+def test_build_training_matrix_cache_reuses_features_across_market_targets(monkeypatch):
+    rows = training.sanitize_match_rows(pd.DataFrame([
+        {"Date": "2022-02-01", "Year": 2022, "Home": "Mexico", "Away": "Canada", "HG": 1, "AG": 0, "Label": "H", "Source": "train"},
+        {"Date": "2022-05-01", "Year": 2022, "Home": "Canada", "Away": "Mexico", "HG": 2, "AG": 1, "Label": "H", "Source": "train"},
+    ]))
+    model = training.WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "Canada"])
+    cache = training.WorldCupFeatureBuildCache()
+    calls = {"count": 0}
+    original = training.match_feature_row
+
+    def counted_match_feature_row(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(training, "match_feature_row", counted_match_feature_row)
+
+    x_result, y_result, feature_columns = training.build_training_matrix(
+        rows,
+        base_model=model,
+        team_features=pd.DataFrame(),
+        target="result",
+        feature_cache=cache,
+    )
+    x_ou, y_ou, ou_columns = training.build_training_matrix(
+        rows,
+        base_model=model,
+        team_features=pd.DataFrame(),
+        target="over_under_25",
+        feature_cache=cache,
+    )
+
+    assert calls["count"] == rows.shape[0]
+    assert cache.summary()["matrix_hits"] == 1
+    assert feature_columns == ou_columns
+    assert x_result.equals(x_ou)
+    assert y_result.tolist() == ["H", "H"]
+    assert y_ou.tolist() == [0, 1]

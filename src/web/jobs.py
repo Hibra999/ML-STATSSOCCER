@@ -20,6 +20,7 @@ class Job:
     message: str
     created_at: str
     updated_at: str
+    lock_key: str = ""
     result: Any = field(default_factory=dict)
     progress: Any = field(default_factory=dict)
     error: str = ""
@@ -32,6 +33,7 @@ class Job:
             "message": self.message,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "lock_key": self.lock_key,
             "result": self.result,
             "progress": self.progress,
             "error": self.error,
@@ -44,11 +46,18 @@ class JobManager:
         self._jobs: Dict[str, Job] = {}
         self._lock = Lock()
 
-    def submit(self, message: str, fn: Callable, *args, with_progress: bool = False, **kwargs) -> Dict[str, Any]:
+    def submit(self, message: str, fn: Callable, *args, with_progress: bool = False, lock_key: str = "", **kwargs) -> Dict[str, Any]:
         job_id = uuid.uuid4().hex
         now = self._now()
-        job = Job(id=job_id, status="queued", message=message, created_at=now, updated_at=now)
+        job = Job(id=job_id, status="queued", message=message, created_at=now, updated_at=now, lock_key=str(lock_key or ""))
         with self._lock:
+            if lock_key:
+                active = [
+                    item for item in self._jobs.values()
+                    if item.lock_key == lock_key and item.status in {"queued", "running"}
+                ]
+                if active:
+                    raise RuntimeError("Ya hay un entrenamiento Mundial en ejecucion. Espera a que termine antes de iniciar otro.")
             self._jobs[job_id] = job
         self._executor.submit(self._run, job_id, fn, args, kwargs, with_progress)
         return job.to_dict()

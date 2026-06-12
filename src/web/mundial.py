@@ -125,7 +125,7 @@ def create_mundial_app() -> FastAPI:
 
     @app.post("/api/mundial/training/train")
     def training_train(payload: Dict[str, Any] = Body(default={})):
-        return _submit("Entrenando modelo Mundial", services.training_train, payload, with_progress=True)
+        return _submit("Entrenando modelo Mundial", services.training_train, payload, with_progress=True, lock_key="mundial-training")
 
     @app.get("/api/mundial/training/status")
     def training_status():
@@ -141,7 +141,7 @@ def create_mundial_app() -> FastAPI:
 
     @app.post("/api/mundial/models/train")
     def models_train(payload: Dict[str, Any] = Body(default={})):
-        return _submit("Entrenando modelo Mundial", services.training_train, payload, with_progress=True)
+        return _submit("Entrenando modelo Mundial", services.training_train, payload, with_progress=True, lock_key="mundial-training")
 
     @app.post("/api/mundial/models/select")
     def models_select(payload: Dict[str, Any] = Body(default={})):

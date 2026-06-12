@@ -1389,6 +1389,20 @@ h3 { font-size: 16px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.market-readout {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  color: var(--ink);
+  font-size: 12px;
+}
+.market-readout span {
+  display: block;
+  line-height: 1.35;
+}
+.market-readout.muted {
+  color: var(--muted);
+}
 .context-poisson {
   display: grid;
   gap: 8px;

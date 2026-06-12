@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, log_loss, precision_score, recall_score
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
 from src.models.classifiers.boosting import catboost_device_params, lightgbm_device_params, xgboost_cuda_params
@@ -161,6 +161,27 @@ class WorldCupTrainingError(RuntimeError):
     pass
 
 
+class WorldCupFeatureBuildCache:
+    def __init__(self):
+        self.market_lookup: Dict[int, Dict[Tuple[str, str], pd.DataFrame]] = {}
+        self.team_features_asof: Dict[Tuple[int, str], pd.DataFrame] = {}
+        self.static_features: Dict[Tuple[Any, ...], Tuple[pd.DataFrame, pd.DataFrame]] = {}
+        self.snapshots: Dict[Tuple[Any, ...], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
+        self.recent15_features: Dict[Tuple[str, str, str, str], pd.DataFrame] = {}
+        self.matrices: Dict[Tuple[Any, ...], pd.DataFrame] = {}
+        self.stats: Dict[str, int] = {
+            "matrix_hits": 0,
+            "matrix_misses": 0,
+            "snapshot_hits": 0,
+            "snapshot_misses": 0,
+            "recent15_hits": 0,
+            "recent15_misses": 0,
+        }
+
+    def summary(self) -> Dict[str, int]:
+        return dict(self.stats)
+
+
 class ConstantProbabilityClassifier:
     def __init__(self, constant_class: int = 0, classes: Optional[List[int]] = None):
         self.constant_class = int(constant_class)
@@ -213,6 +234,10 @@ def emit_training_progress(callback, stage: str, current: int, total: int, messa
         details.append(f"trials_per_market={extra['trials_per_market']}")
     if extra.get("total_trial_budget"):
         details.append(f"total_trials={extra['total_trial_budget']}")
+    if extra.get("overall_trial_current") not in {None, ""} and extra.get("total_trial_budget"):
+        details.append(f"overall_trial={extra['overall_trial_current']}/{extra['total_trial_budget']}")
+    if extra.get("elapsed_seconds") not in {None, ""}:
+        details.append(f"elapsed={extra['elapsed_seconds']}s")
     if extra.get("rows") not in {None, ""}:
         details.append(f"rows={extra['rows']}")
     if extra.get("features") not in {None, ""}:
@@ -227,8 +252,8 @@ def emit_training_progress(callback, stage: str, current: int, total: int, messa
         "stage": stage,
         "current": current,
         "total": total,
-        "current_trial": current if stage == "tuning" else "",
-        "total_trials": total if stage == "tuning" else "",
+        "current_trial": extra.get("overall_trial_current", current) if stage == "tuning" else "",
+        "total_trials": extra.get("total_trial_budget", total) if stage == "tuning" else "",
         "percent": percent,
         "message": message,
         **extra,
@@ -391,6 +416,7 @@ def dataset_status() -> Dict[str, Any]:
         "worldcup_rows": int(prepared.get("worldcup_rows", 0)),
         "class_distribution": prepared.get("class_distribution", {}),
         "sample_weight_policy": prepared.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
+        "data_quality": prepared.get("data_quality", {}),
         "market_rows": int(prepared.get("market_rows", 0)),
         "qualifier_feature_rows": int(prepared.get("qualifier_feature_rows", 0)),
         "market_status": prepared.get("market_status", {}),
@@ -434,12 +460,61 @@ def prepare_training_dataset(force: bool = False, refresh_history: bool = False)
     return dataset_status()
 
 
+def ensure_prepared_dataset_current(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+    files = list(discover_dataset_files(KAGGLE_ROOT))
+    normalized = normalize_dataset_files(files)
+    current = prepared_dataset_status(files=files, normalized=normalized)
+    if current["ready"] and not current["stale"]:
+        dataset = current.get("dataset") or {}
+        if prepared_dataset_schema_valid(dataset):
+            return dataset
+    if not files:
+        if current["ready"]:
+            raise WorldCupTrainingError(
+                "El artifact ETL Mundial esta desactualizado y no hay archivos Kaggle locales para regenerarlo."
+            )
+        raise WorldCupTrainingError("Primero ejecuta Preparar ETL para construir el dataset de entrenamiento Mundial.")
+    reason = "schema/targets desactualizados" if current["ready"] else "artifact ausente"
+    emit_training_progress(
+        progress_callback,
+        "prepare_etl",
+        0,
+        1,
+        f"Regenerando ETL Mundial antes de entrenar ({reason})",
+    )
+    prepare_training_dataset(force=True, refresh_history=bool(payload.get("refresh_history", False)))
+    dataset = load_prepared_dataset(required=True)
+    if not prepared_dataset_schema_valid(dataset or {}):
+        raise WorldCupTrainingError("El ETL regenerado no contiene el schema actual de targets Mundial.")
+    emit_training_progress(progress_callback, "prepare_etl", 1, 1, "ETL Mundial vigente")
+    return dataset
+
+
+def prepared_dataset_schema_valid(dataset: Dict[str, Any]) -> bool:
+    if not isinstance(dataset, dict):
+        return False
+    if str(dataset.get("prepared_schema_version") or "") != PREPARED_SCHEMA_VERSION:
+        return False
+    if not bool(dataset.get("trainable", False)):
+        return False
+    train_rows = dataset.get("train", pd.DataFrame())
+    if not isinstance(train_rows, pd.DataFrame) or train_rows.empty:
+        return False
+    required_columns = {"Label", "HG", "AG", *[f"OverUnder{suffix}" for suffix in TOTAL_GOAL_LINE_SUFFIXES]}
+    if not required_columns.issubset(train_rows.columns):
+        return False
+    if str(dataset.get("target_column") or "") != "Label + GoalsDistribution + OverUnder05/15/25/35":
+        return False
+    return bool(dataset.get("over_under_ready", False)) and bool(dataset.get("goals_distribution_ready", False))
+
+
 def train_hybrid_model(tournament: Dict[str, Any], payload: Optional[Dict[str, Any]] = None, progress_callback=None) -> Dict[str, Any]:
     payload = payload or {}
     train_config = training_config(payload)
     if train_config["market_mode"] != "dual_markets":
         raise WorldCupTrainingError("Mundial 2026 entrena el bundle principal 1X2 + U/O 0.5-3.5.")
     emit_training_progress(progress_callback, "preparing", 0, 8, "Preparando entrenamiento Mundial")
+    ensure_prepared_dataset_current(payload, progress_callback=progress_callback)
     return train_dual_market_model(
         tournament=tournament,
         payload=payload,
@@ -453,6 +528,8 @@ def train_single_hybrid_model(
         payload: Optional[Dict[str, Any]] = None,
         progress_callback=None,
         market_label: str = "",
+        shared_context: Optional[Dict[str, Any]] = None,
+        feature_cache: Optional[WorldCupFeatureBuildCache] = None,
 ) -> Dict[str, Any]:
     payload = payload or {}
     train_config = training_config(payload)
@@ -460,8 +537,9 @@ def train_single_hybrid_model(
     label = market_label or market_label_for_progress(train_config["training_target"])
     single_total_steps = 7
     emit_training_progress(progress_callback, "loading", 1, single_total_steps, f"Cargando artifact/contexto {label}", market=label, model_id=model_id)
-    files = list(discover_dataset_files(KAGGLE_ROOT))
-    normalized = load_prepared_dataset(required=True)
+    shared_context = shared_context or {}
+    files = shared_context.get("files") or list(discover_dataset_files(KAGGLE_ROOT))
+    normalized = shared_context.get("normalized") or load_prepared_dataset(required=True)
     train_rows = normalized["train"].copy()
     test_rows = normalized["test"].copy()
     if not normalized["trainable"]:
@@ -478,15 +556,27 @@ def train_single_hybrid_model(
 
     group_teams = teams_from_tournament(tournament)
     model_teams = sorted(set(group_teams) | set(teams_from_rows(train_rows)) | set(teams_from_rows(test_rows)))
-    history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
+    history_df = shared_context.get("history_df")
+    history_source = shared_context.get("history_source", "")
+    if history_df is None:
+        history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
     feature_store = normalized["team_features"]
     market_rows = normalized.get("market_data", pd.DataFrame())
     qualifier_rows = normalized.get("qualifier_matches", pd.DataFrame())
     api_football = normalized.get("api_football", {}) if isinstance(normalized.get("api_football", {}), dict) else {}
     dc_rho = float(normalized.get("dc_rho", 0.0) or 0.0)
-    international_matches = load_international_matches(required=False)
-    recent15_match_index = build_recent15_match_index(international_matches)
-    fixture_feature_rows = read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
+    international_matches = shared_context.get("international_matches")
+    if international_matches is None:
+        international_matches = load_international_matches(required=False)
+    recent15_match_index = shared_context.get("recent15_match_index")
+    if recent15_match_index is None:
+        recent15_match_index = build_recent15_match_index(international_matches)
+    fixture_feature_rows = (
+        shared_context.get("fixture_feature_rows")
+        if "fixture_feature_rows" in shared_context
+        else read_fixture_feature_rows() if walk_forward_mode == "result_plus_players" else pd.DataFrame()
+    )
+    feature_cache = feature_cache or WorldCupFeatureBuildCache()
     target_warning = ""
     eval_strategy = "unavailable"
     effective_target = train_config["training_target"]
@@ -533,6 +623,12 @@ def train_single_hybrid_model(
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
             max_goals=int(payload.get("max_goals", 10) or 10),
             target=effective_target,
+            feature_cache=feature_cache,
+            progress_callback=progress_callback,
+            progress_stage="features_train",
+            progress_message=f"Construyendo features train {label}",
+            progress_market=label,
+            progress_model_id=model_id,
         )
         emit_training_progress(progress_callback, "features_train", 4, single_total_steps, f"Features train {label} listas", market=label, model_id=model_id, rows=int(x_train.shape[0]), features=int(x_train.shape[1]))
         emit_training_progress(progress_callback, "features_eval", 5, single_total_steps, f"Construyendo features eval {label}", market=label, model_id=model_id, rows=int(split_eval_rows.shape[0]))
@@ -555,6 +651,12 @@ def train_single_hybrid_model(
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
             max_goals=int(payload.get("max_goals", 10) or 10),
             target=effective_target,
+            feature_cache=feature_cache,
+            progress_callback=progress_callback,
+            progress_stage="features_eval",
+            progress_message=f"Construyendo features eval {label}",
+            progress_market=label,
+            progress_model_id=model_id,
         )
         emit_training_progress(progress_callback, "features_eval", 6, single_total_steps, f"Features eval {label} listas", market=label, model_id=model_id, rows=int(x_eval.shape[0]), features=int(x_eval.shape[1]))
     else:
@@ -579,6 +681,12 @@ def train_single_hybrid_model(
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
             max_goals=int(payload.get("max_goals", 10) or 10),
             target=effective_target,
+            feature_cache=feature_cache,
+            progress_callback=progress_callback,
+            progress_stage="features_train",
+            progress_message=f"Construyendo features train {label}",
+            progress_market=label,
+            progress_model_id=model_id,
         )
         emit_training_progress(progress_callback, "features_train", 4, single_total_steps, f"Features train {label} listas", market=label, model_id=model_id, rows=int(x_train.shape[0]), features=int(x_train.shape[1]))
         emit_training_progress(progress_callback, "features_eval", 5, single_total_steps, f"Construyendo features eval {label}", market=label, model_id=model_id, rows=int(test_rows.shape[0]))
@@ -601,6 +709,12 @@ def train_single_hybrid_model(
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
             max_goals=int(payload.get("max_goals", 10) or 10),
             target=effective_target,
+            feature_cache=feature_cache,
+            progress_callback=progress_callback,
+            progress_stage="features_eval",
+            progress_message=f"Construyendo features eval {label}",
+            progress_market=label,
+            progress_model_id=model_id,
         )
         emit_training_progress(progress_callback, "features_eval", 6, single_total_steps, f"Features eval {label} listas", market=label, model_id=model_id, rows=int(x_eval.shape[0]), features=int(x_eval.shape[1]))
 
@@ -634,8 +748,31 @@ def train_single_hybrid_model(
     clf = fit_result["classifier"]
     y_train_pred = classifier_predict(clf, x_train)
     y_eval_pred = classifier_predict(clf, x_eval)
+    y_train_proba = classifier_predict_proba(clf, x_train)
+    y_eval_proba = classifier_predict_proba(clf, x_eval)
     emit_training_progress(progress_callback, "metrics", 7, single_total_steps, f"Calculando metricas {label}", market=label, model_id=model_id)
-    metrics = classification_metrics_from_predictions(y_train_encoded, y_train_pred, y_eval_encoded, y_eval_pred)
+    metrics = classification_metrics_from_predictions(
+        y_train_encoded,
+        y_train_pred,
+        y_eval_encoded,
+        y_eval_pred,
+        y_train_proba=y_train_proba,
+        y_eval_proba=y_eval_proba,
+        classes=label_classes,
+        target=effective_target,
+        x_train=x_train,
+        x_eval=x_eval,
+    )
+    calibration = calibration_payload(
+        y_train_encoded,
+        y_train_proba,
+        y_eval_encoded,
+        y_eval_proba,
+        classes=label_classes,
+        target=effective_target,
+        x_train=x_train,
+        x_eval=x_eval,
+    )
     metrics["split_support"] = split_support_payload(y_train, y_eval, effective_target)
     confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes, target=effective_target)
     derived_total_markets = derived_total_market_metrics(
@@ -676,11 +813,13 @@ def train_single_hybrid_model(
         "class_distribution": normalized.get("class_distribution", {}),
         "sample_weight_policy": normalized.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "sample_weight_summary": sample_weight_summary(train_sample_weight),
+        "data_quality": normalized.get("data_quality", {}),
         "dc_rho": dc_rho,
         "kaggle_files": [str(path) for path in files],
         "history_source": normalized.get("history_source", history_source),
         "metrics": metrics,
         "confusion_matrix": confusion,
+        "calibration": calibration,
         "derived_total_markets": derived_total_markets,
         "classes": label_classes,
         "encoded_classes": list(range(len(label_classes))),
@@ -703,6 +842,7 @@ def train_single_hybrid_model(
         "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *normalized.get("api_football_warnings", []), *fit_result.get("warnings", [])] if warning]),
         "top_features": top_feature_importances(clf, feature_columns),
         "feature_inventory": feature_inventory_payload(feature_columns, x_train=x_train, x_eval=x_eval),
+        "feature_cache": feature_cache.summary(),
         "walk_forward_mode": walk_forward_mode,
         "walk_forward_summary": walk_forward_summary,
         "prepared_schema_version": normalized.get("prepared_schema_version", ""),
@@ -722,6 +862,7 @@ def train_single_hybrid_model(
         "model": read_model_metadata(),
         "metrics": metrics,
         "confusion_matrix": confusion,
+        "calibration": calibration,
         "features": feature_columns,
         "feature_inventory": record["feature_inventory"],
         "train_rows": int(len(y_train)),
@@ -751,6 +892,7 @@ def train_single_hybrid_model(
         "worldcup_rows": int(normalized.get("worldcup_rows", 0) or 0),
         "class_distribution": normalized.get("class_distribution", {}),
         "sample_weight_summary": record["sample_weight_summary"],
+        "data_quality": record["data_quality"],
     }
 
 
@@ -766,8 +908,25 @@ def train_dual_market_model(
     bundle_name = train_config["model_name"]
     files = list(discover_dataset_files(KAGGLE_ROOT))
     normalized = load_prepared_dataset(required=True)
+    if not prepared_dataset_schema_valid(normalized):
+        normalized = ensure_prepared_dataset_current(payload, progress_callback=progress_callback)
+        files = list(discover_dataset_files(KAGGLE_ROOT))
     if not normalized["trainable"]:
         raise WorldCupTrainingError("El ETL preparado no dejo filas entrenables para el modelo 1X2.")
+    history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
+    international_matches = load_international_matches(required=False)
+    shared_context = {
+        "files": files,
+        "normalized": normalized,
+        "history_df": history_df,
+        "history_source": history_source,
+        "international_matches": international_matches,
+        "recent15_match_index": build_recent15_match_index(international_matches),
+        "fixture_feature_rows": read_fixture_feature_rows()
+        if normalize_walk_forward_mode(payload.get("walk_forward_mode", "none")) == "result_plus_players"
+        else pd.DataFrame(),
+    }
+    feature_cache = WorldCupFeatureBuildCache()
 
     common_payload = dict(payload)
     market_plan: List[Tuple[str, str]] = [
@@ -796,6 +955,11 @@ def train_dual_market_model(
             "model_id": child_id,
             "model_name": f"{bundle_name} - {label}",
             "hidden_from_catalog": True,
+            "market_index": index,
+            "market_total": len(market_plan),
+            "trials_per_market": trials_per_market,
+            "total_trial_budget": total_trial_budget,
+            "trial_offset": (index - 1) * trials_per_market,
         }
         emit_training_progress(
             progress_callback,
@@ -820,6 +984,8 @@ def train_dual_market_model(
             payload=child_payload,
             progress_callback=progress_callback,
             market_label=label,
+            shared_context=shared_context,
+            feature_cache=feature_cache,
         )
         child_record = load_hybrid_model(child_id) or {}
         market_results[target] = market_training_summary(child_record, child_result, label)
@@ -864,11 +1030,13 @@ def train_dual_market_model(
         "class_distribution": result_record.get("class_distribution", normalized.get("class_distribution", {})),
         "sample_weight_policy": result_record.get("sample_weight_policy", normalized.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY)),
         "sample_weight_summary": result_record.get("sample_weight_summary", {}),
+        "data_quality": result_record.get("data_quality", normalized.get("data_quality", {})),
         "dc_rho": float(result_record.get("dc_rho", 0.0) or 0.0),
         "kaggle_files": [str(path) for path in files],
         "history_source": result_record.get("history_source", ""),
         "metrics": result_record.get("metrics", {}),
         "confusion_matrix": result_record.get("confusion_matrix", {}),
+        "calibration": result_record.get("calibration", {}),
         "classes": result_record.get("classes", []),
         "mode": normalized["training_mode"],
         "eval_strategy": result_record.get("eval_strategy", ""),
@@ -888,6 +1056,7 @@ def train_dual_market_model(
         "warnings": warnings,
         "top_features": result_record.get("top_features", []),
         "feature_inventory": result_record.get("feature_inventory", {}),
+        "feature_cache": feature_cache.summary(),
         "derived_total_markets": derived_total_markets,
         "markets": market_results,
         "market_models": market_models,
@@ -911,6 +1080,7 @@ def train_dual_market_model(
         "model": model_meta,
         "metrics": bundle_record["metrics"],
         "confusion_matrix": bundle_record["confusion_matrix"],
+        "calibration": bundle_record["calibration"],
         "features": bundle_record["feature_columns"],
         "feature_inventory": bundle_record["feature_inventory"],
         "train_rows": int(result_result.get("train_rows", 0)),
@@ -942,6 +1112,7 @@ def train_dual_market_model(
         "worldcup_rows": bundle_record["worldcup_rows"],
         "class_distribution": bundle_record["class_distribution"],
         "sample_weight_summary": bundle_record["sample_weight_summary"],
+        "data_quality": bundle_record["data_quality"],
     }
 
 
@@ -1009,6 +1180,16 @@ def predict_match_payload(
         "prediction": label_display(max(blended, key=blended.get), home_team, away_team),
         "notes": ml_outputs.get("notes", []),
     }
+    return_payload["market_readout"] = prediction_market_readout(
+        home=home_team,
+        away=away_team,
+        fixture=fixture.to_dict(),
+        result_probs=blended,
+        total_probs=blended_totals,
+        model_id=model_id,
+    )
+    if return_payload["market_readout"].get("data_quality"):
+        return_payload["data_quality"] = return_payload["market_readout"]["data_quality"]
     if ml_outputs.get("goal_distribution_ml"):
         return_payload["model_probs"]["goal_distribution_ml"] = {
             key: round(value * 100.0, 2)
@@ -1022,6 +1203,74 @@ def predict_match_payload(
         max_goals=base_model.max_goals,
     )
     return return_payload
+
+
+def prediction_market_readout(
+        home: str,
+        away: str,
+        fixture: Dict[str, Any],
+        result_probs: Dict[str, float],
+        total_probs: Dict[str, float],
+        model_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    record = load_hybrid_model(model_id=model_id)
+    if not record:
+        return {"available": False, "missing_sources": ["modelo", "odds"], "lines": [], "data_quality": {}}
+    market_rows = pd.DataFrame(record.get("market_data", []))
+    match_date = fixture.get("Fecha") or fixture.get("date")
+    market_match = market_for_match(
+        market_rows,
+        home,
+        away,
+        match_date=match_date,
+        year=2026,
+    )
+    features = build_market_feature_row(
+        market_match,
+        model_probs=result_probs,
+        model_totals=total_probs,
+    )
+    lines: List[Dict[str, Any]] = []
+    if features.get("market_has_1x2"):
+        for label, key, market_key in (
+            ("1", "H", "market_prob_home"),
+            ("X", "D", "market_prob_draw"),
+            ("2", "A", "market_prob_away"),
+        ):
+            model_probability = float(result_probs.get(key, 0.0))
+            market_probability = float(features.get(market_key, 0.0))
+            lines.append({
+                "market": "1X2",
+                "label": label,
+                "model_probability": round(model_probability * 100.0, 2),
+                "market_probability": round(market_probability * 100.0, 2),
+                "raw_edge": round((model_probability - market_probability) * 100.0, 2),
+            })
+    for line in TRAIN_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        if not features.get(f"market_has_ou{suffix}"):
+            continue
+        for side, key in (("Over", f"over{suffix}"), ("Under", f"under{suffix}")):
+            market_key = f"market_prob_{key}"
+            model_probability = float(total_probs.get(key, 0.0))
+            market_probability = float(features.get(market_key, 0.0))
+            lines.append({
+                "market": f"U/O {line:.1f}",
+                "label": side,
+                "model_probability": round(model_probability * 100.0, 2),
+                "market_probability": round(market_probability * 100.0, 2),
+                "raw_edge": round((model_probability - market_probability) * 100.0, 2),
+            })
+    data_quality = record.get("data_quality", {}) or {}
+    missing = list(data_quality.get("missing_sources", []))
+    if not lines and "odds" not in missing:
+        missing.append("odds")
+    return {
+        "available": bool(lines),
+        "lines": lines,
+        "missing_sources": unique_strings(missing),
+        "data_quality": data_quality,
+    }
 
 
 def normalize_dataset_files(files: Iterable[Path]) -> Dict[str, Any]:
@@ -1181,6 +1430,36 @@ def build_prepared_dataset(
     class_distribution = split_class_distribution(train_df, test_df)
     all_matches_rows_count = int(all_matches_label_rows.shape[0])
     worldcup_rows_count = int(labeled_rows["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in labeled_rows.columns else 0
+    market_status_payload = {
+        "status": "ok" if combined_has_1x2 or combined_has_ou25 else market_bundle.get("status", "missing"),
+        "has_1x2": combined_has_1x2,
+        "has_ou25": combined_has_ou25,
+        "sources": [*market_bundle.get("sources", []), *api_football_bundle.get("sources", [])],
+        "loaded_at": market_bundle.get("loaded_at", ""),
+    }
+    api_football_payload = {
+        "fixtures": api_football_bundle.get("fixtures", pd.DataFrame()),
+        "statistics": api_football_bundle.get("statistics", pd.DataFrame()),
+        "team_stats": api_football_bundle.get("team_stats", pd.DataFrame()),
+        "lineups": api_football_bundle.get("lineups", pd.DataFrame()),
+        "injuries": api_football_bundle.get("injuries", pd.DataFrame()),
+        "odds": api_football_bundle.get("odds", pd.DataFrame()),
+        "market_rows": api_market_rows,
+    }
+    data_quality = data_quality_payload(
+        prepared_at=prepared_at,
+        international_status=international_status,
+        all_matches_rows=all_matches_rows_count,
+        worldcup_rows=worldcup_rows_count,
+        market_rows=market_data,
+        market_status=market_status_payload,
+        api_football=api_football_payload,
+        api_status={
+            "status": api_football_bundle.get("status", "missing"),
+            "sources": api_football_bundle.get("sources", []),
+            "loaded_at": api_football_bundle.get("loaded_at", ""),
+        },
+    )
     return {
         "prepared_schema_version": PREPARED_SCHEMA_VERSION,
         "prepared_at": prepared_at,
@@ -1197,23 +1476,9 @@ def build_prepared_dataset(
         "qualifier_matches": qualifier_matches,
         "market_rows": int(market_data.shape[0]),
         "qualifier_feature_rows": int(market_bundle.get("qualifier_rows", 0)),
-        "market_status": {
-            "status": "ok" if combined_has_1x2 or combined_has_ou25 else market_bundle.get("status", "missing"),
-            "has_1x2": combined_has_1x2,
-            "has_ou25": combined_has_ou25,
-            "sources": [*market_bundle.get("sources", []), *api_football_bundle.get("sources", [])],
-            "loaded_at": market_bundle.get("loaded_at", ""),
-        },
+        "market_status": market_status_payload,
         "market_warnings": market_bundle.get("warnings", []),
-        "api_football": {
-            "fixtures": api_football_bundle.get("fixtures", pd.DataFrame()),
-            "statistics": api_football_bundle.get("statistics", pd.DataFrame()),
-            "team_stats": api_football_bundle.get("team_stats", pd.DataFrame()),
-            "lineups": api_football_bundle.get("lineups", pd.DataFrame()),
-            "injuries": api_football_bundle.get("injuries", pd.DataFrame()),
-            "odds": api_football_bundle.get("odds", pd.DataFrame()),
-            "market_rows": api_market_rows,
-        },
+        "api_football": api_football_payload,
         "api_football_status": {
             "status": api_football_bundle.get("status", "missing"),
             "sources": api_football_bundle.get("sources", []),
@@ -1228,6 +1493,7 @@ def build_prepared_dataset(
         "worldcup_rows": worldcup_rows_count,
         "class_distribution": class_distribution,
         "sample_weight_policy": SAMPLE_WEIGHT_POLICY,
+        "data_quality": data_quality,
         "dc_rho": float(dc_rho),
         "target_column": "Label + GoalsDistribution + OverUnder05/15/25/35",
         "team_columns": normalized["team_columns"],
@@ -1609,6 +1875,7 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
             "worldcup_rows": 0,
             "class_distribution": {},
             "sample_weight_policy": SAMPLE_WEIGHT_POLICY,
+            "data_quality": {},
             "warnings": [],
         }
     current_international_status = international_results_status()
@@ -1617,7 +1884,7 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
     artifact_time = PREPARED_DATASET_FILE.stat().st_mtime if PREPARED_DATASET_FILE.exists() else 0.0
     source_times = [Path(path).stat().st_mtime for path in source_files if Path(path).exists()]
     schema_version = str(dataset.get("prepared_schema_version") or "")
-    schema_stale = schema_version != PREPARED_SCHEMA_VERSION
+    schema_stale = schema_version != PREPARED_SCHEMA_VERSION or not prepared_dataset_schema_valid(dataset)
     stale = bool(source_times and max(source_times) > artifact_time) or bool(source_files != artifact_sources) or schema_stale
     status_dataset = normalized if schema_stale else dataset
     return {
@@ -1651,6 +1918,7 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "worldcup_rows": int(dataset.get("worldcup_rows", 0)),
         "class_distribution": dataset.get("class_distribution", {}),
         "sample_weight_policy": dataset.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
+        "data_quality": {} if schema_stale else dataset.get("data_quality", {}),
         "warnings": [] if schema_stale else dataset.get("warnings", []),
     }
 
@@ -1688,6 +1956,7 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "worldcup_rows": int(dataset.get("worldcup_rows", 0)),
         "class_distribution": dataset.get("class_distribution", {}),
         "sample_weight_policy": dataset.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
+        "data_quality": dataset.get("data_quality", {}),
         "dc_rho": float(dataset.get("dc_rho", 0.0) or 0.0),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
         "goals_distribution_ready": bool(dataset.get("goals_distribution_ready", dataset.get("over_under_ready", False))),
@@ -1696,6 +1965,74 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "history_source": dataset.get("history_source", ""),
         "final_test_year": dataset.get("final_test_year", ""),
         "split_policy": dataset.get("split_policy", ""),
+    }
+
+
+def data_quality_payload(
+        prepared_at: str,
+        international_status: Dict[str, Any],
+        all_matches_rows: int,
+        worldcup_rows: int,
+        market_rows: pd.DataFrame,
+        market_status: Dict[str, Any],
+        api_football: Dict[str, pd.DataFrame],
+        api_status: Dict[str, Any],
+) -> Dict[str, Any]:
+    api_football = api_football or {}
+    market_rows = market_rows if isinstance(market_rows, pd.DataFrame) else pd.DataFrame()
+    api_counts = {
+        key: int(value.shape[0]) if isinstance(value, pd.DataFrame) else 0
+        for key, value in api_football.items()
+    }
+    sources = {
+        "all_matches": {
+            "available": bool(international_status.get("available")),
+            "rows": int(all_matches_rows or international_status.get("rows", 0) or 0),
+            "worldcup_rows": int(worldcup_rows or international_status.get("worldcup_rows", 0) or 0),
+            "updated_at": international_status.get("updated_at") or international_status.get("loaded_at") or "",
+            "source_path": international_status.get("source_path") or international_status.get("file_path") or "",
+        },
+        "odds": {
+            "available": bool((market_status or {}).get("has_1x2") or (market_status or {}).get("has_ou25")),
+            "rows": int(market_rows.shape[0]),
+            "has_1x2": bool((market_status or {}).get("has_1x2")),
+            "has_ou25": bool((market_status or {}).get("has_ou25")),
+            "updated_at": (market_status or {}).get("loaded_at", ""),
+            "sources": (market_status or {}).get("sources", []),
+        },
+        "api_football": {
+            "available": str((api_status or {}).get("status", "")).lower() == "ok" or any(api_counts.values()),
+            "status": (api_status or {}).get("status", "missing"),
+            "fixtures": api_counts.get("fixtures", 0),
+            "team_stats": api_counts.get("team_stats", 0),
+            "odds": api_counts.get("odds", 0),
+            "market_rows": api_counts.get("market_rows", 0),
+            "updated_at": (api_status or {}).get("loaded_at", ""),
+            "sources": (api_status or {}).get("sources", []),
+        },
+        "lineups": {
+            "available": api_counts.get("lineups", 0) > 0,
+            "rows": api_counts.get("lineups", 0),
+            "updated_at": (api_status or {}).get("loaded_at", ""),
+        },
+        "injuries": {
+            "available": api_counts.get("injuries", 0) > 0,
+            "rows": api_counts.get("injuries", 0),
+            "updated_at": (api_status or {}).get("loaded_at", ""),
+        },
+        "player_stats": {
+            "available": api_counts.get("team_stats", 0) > 0,
+            "rows": api_counts.get("team_stats", 0),
+            "updated_at": (api_status or {}).get("loaded_at", ""),
+        },
+    }
+    missing = [key for key, value in sources.items() if not value.get("available")]
+    strength = "fuerte" if not missing else "media" if sources["all_matches"]["available"] and sources["odds"]["available"] else "debil"
+    return {
+        "prepared_at": prepared_at,
+        "strength": strength,
+        "sources": sources,
+        "missing_sources": missing,
     }
 
 
@@ -1911,6 +2248,73 @@ def rows_for_training_target(rows: pd.DataFrame, target: str) -> pd.DataFrame:
     return working.copy()
 
 
+def feature_rows_signature(rows: pd.DataFrame) -> Tuple[Any, ...]:
+    if rows is None or rows.empty:
+        return ("empty", 0)
+    columns = [column for column in ("FixtureId", "Date", "Year", "Home", "Away") if column in rows.columns]
+    if not columns:
+        return ("rows", int(rows.shape[0]), tuple(rows.index.astype(str).tolist()))
+    scoped = rows[columns].copy()
+    for column in columns:
+        if column == "Date":
+            scoped[column] = pd.to_datetime(scoped[column], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+        else:
+            scoped[column] = scoped[column].astype(str).fillna("")
+    return (
+        "rows",
+        int(rows.shape[0]),
+        tuple(columns),
+        tuple(tuple(item) for item in scoped.itertuples(index=False, name=None)),
+    )
+
+
+def feature_matrix_cache_key(
+        rows: pd.DataFrame,
+        base_model: Optional[WorldCupModel],
+        history_df: Optional[pd.DataFrame],
+        team_features: pd.DataFrame,
+        market_rows: pd.DataFrame,
+        qualifier_rows: pd.DataFrame,
+        api_football: Dict[str, pd.DataFrame],
+        international_matches: pd.DataFrame,
+        fixture_feature_rows: pd.DataFrame,
+        teams: Iterable[str],
+        frozen_years: set[int],
+        dc_rho: float,
+        history_weight: float,
+        recency_weight: float,
+        host_advantage: float,
+        max_goals: int,
+) -> Tuple[Any, ...]:
+    api_football = api_football or {}
+    return (
+        feature_rows_signature(rows),
+        id(base_model) if base_model is not None else None,
+        dataframe_cache_id(history_df),
+        dataframe_cache_id(team_features),
+        dataframe_cache_id(market_rows),
+        dataframe_cache_id(qualifier_rows),
+        dataframe_cache_id(api_football.get("team_stats")),
+        dataframe_cache_id(api_football.get("lineups")),
+        dataframe_cache_id(api_football.get("injuries")),
+        dataframe_cache_id(international_matches),
+        dataframe_cache_id(fixture_feature_rows),
+        tuple(sorted(str(team) for team in teams)),
+        tuple(sorted(int(year) for year in frozen_years)),
+        round(float(dc_rho or 0.0), 8),
+        round(float(history_weight or 0.0), 8),
+        round(float(recency_weight or 0.0), 8),
+        round(float(host_advantage or 0.0), 8),
+        int(max_goals),
+    )
+
+
+def dataframe_cache_id(frame: Optional[pd.DataFrame]) -> int:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return 0
+    return id(frame)
+
+
 def sample_weights_for_rows(rows: pd.DataFrame, target: str = "result") -> pd.Series:
     working = rows_for_training_target(rows, target)
     if working.empty:
@@ -1990,6 +2394,13 @@ def build_training_matrix(
         recency_weight: float = 0.35,
         host_advantage: float = 45.0,
         max_goals: int = 10,
+        feature_cache: Optional[WorldCupFeatureBuildCache] = None,
+        progress_callback=None,
+        progress_stage: str = "",
+        progress_message: str = "",
+        progress_market: str = "",
+        progress_model_id: str = "",
+        progress_every: int = 25,
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     working = rows_for_training_target(rows, target)
     if team_features is None:
@@ -2000,34 +2411,89 @@ def build_training_matrix(
         qualifier_rows = pd.DataFrame()
     elif not qualifier_rows.empty and not qualifier_rows.attrs.get("worldcup_market_normalized"):
         qualifier_rows = normalize_market_frame(qualifier_rows)
+    if fixture_feature_rows is None:
+        fixture_feature_rows = pd.DataFrame()
     api_football = api_football or {}
     if international_matches is None:
         international_matches = load_international_matches(required=False)
     if recent15_match_index is None:
         recent15_match_index = build_recent15_match_index(international_matches)
-    records = []
     static_model = base_model
     working_teams = list(teams or teams_from_rows(working))
     frozen_years = frozen_years or set()
     if static_model is None and history_df is None:
         static_model = WorldCupModel.from_history(pd.DataFrame(), teams=working_teams)
-    market_lookup = build_market_lookup(market_rows)
-    team_features_cache: Dict[Optional[int], pd.DataFrame] = {}
-    static_feature_cache: Dict[Tuple[str, str], Tuple[pd.DataFrame, pd.DataFrame]] = {}
-    snapshot_cache: Dict[Tuple[str, ...], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
-    recent15_feature_cache: Dict[Tuple[str, str, str, str], pd.DataFrame] = {}
-    for _, row in working.iterrows():
+    feature_cache = feature_cache or WorldCupFeatureBuildCache()
+    matrix_key = feature_matrix_cache_key(
+        rows=working,
+        base_model=static_model,
+        history_df=history_df,
+        team_features=team_features,
+        market_rows=market_rows,
+        qualifier_rows=qualifier_rows,
+        api_football=api_football,
+        international_matches=international_matches,
+        fixture_feature_rows=fixture_feature_rows,
+        teams=working_teams,
+        frozen_years=frozen_years,
+        dc_rho=dc_rho,
+        history_weight=history_weight,
+        recency_weight=recency_weight,
+        host_advantage=host_advantage,
+        max_goals=max_goals,
+    )
+    cached_x = feature_cache.matrices.get(matrix_key)
+    if cached_x is not None:
+        feature_cache.stats["matrix_hits"] += 1
+        return finalize_training_matrix_from_features(
+            cached_x.copy(),
+            working,
+            target,
+            feature_columns,
+            progress_callback=progress_callback,
+            progress_stage=progress_stage or "features",
+            progress_message=progress_message or "Features reutilizadas desde cache",
+            progress_market=progress_market,
+            progress_model_id=progress_model_id,
+            feature_cache_state="hit",
+        )
+
+    feature_cache.stats["matrix_misses"] += 1
+    market_key = dataframe_cache_id(market_rows)
+    if market_key not in feature_cache.market_lookup:
+        feature_cache.market_lookup[market_key] = build_market_lookup(market_rows)
+    market_lookup = feature_cache.market_lookup[market_key]
+    records = []
+    progress_total = int(max(working.shape[0], 1))
+    progress_every = max(1, int(progress_every or 25))
+    for row_index, (_, row) in enumerate(working.iterrows(), start=1):
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
         reference_date = reference_date_for_row(row_date, row_year)
         home_team = str(row["Home"])
         away_team = str(row["Away"])
-        if row_year not in team_features_cache:
-            team_features_cache[row_year] = team_features_asof(team_features, row_year)
+        team_features_key = (dataframe_cache_id(team_features), "" if row_year is None else str(row_year))
+        if team_features_key not in feature_cache.team_features_asof:
+            feature_cache.team_features_asof[team_features_key] = team_features_asof(team_features, row_year)
         if history_df is not None:
             frozen = row_year in frozen_years
-            cache_key = ("date", reference_date) if row_date is not None else ("year", str(int(row_year))) if row_year else ("date", reference_date)
-            if cache_key not in snapshot_cache:
+            snapshot_key = (
+                dataframe_cache_id(history_df),
+                dataframe_cache_id(qualifier_rows),
+                dataframe_cache_id(api_football.get("team_stats")),
+                dataframe_cache_id(api_football.get("lineups")),
+                dataframe_cache_id(api_football.get("injuries")),
+                tuple(sorted(str(team) for team in working_teams)),
+                "date" if row_date is not None else "year",
+                reference_date if row_date is not None else str(int(row_year)) if row_year else reference_date,
+                int(bool(frozen)),
+                round(float(history_weight or 0.0), 8),
+                round(float(recency_weight or 0.0), 8),
+                round(float(host_advantage or 0.0), 8),
+                int(max_goals),
+            )
+            if snapshot_key not in feature_cache.snapshots:
+                feature_cache.stats["snapshot_misses"] += 1
                 history_cutoff = history_before_row(history_df, row_date=row_date, row_year=row_year, freeze_year=frozen)
                 snapshot_model = WorldCupModel.from_history(
                     history_cutoff,
@@ -2037,7 +2503,7 @@ def build_training_matrix(
                     host_advantage=host_advantage,
                     max_goals=max_goals,
                 )
-                snapshot_cache[cache_key] = (
+                feature_cache.snapshots[snapshot_key] = (
                     snapshot_model,
                     build_history_feature_table(history_cutoff, reference_date=reference_date),
                     build_matchup_feature_table(history_cutoff, reference_date=reference_date),
@@ -2050,14 +2516,24 @@ def build_training_matrix(
                         injuries=api_football.get("injuries", pd.DataFrame()),
                     ),
                 )
-            row_model, row_history_features, row_matchup_features, row_qualifier_features, row_api_football_features = snapshot_cache[cache_key]
+            else:
+                feature_cache.stats["snapshot_hits"] += 1
+            row_model, row_history_features, row_matchup_features, row_qualifier_features, row_api_football_features = feature_cache.snapshots[snapshot_key]
         else:
             row_model = static_model
             row_history_features = history_team_features
             row_matchup_features = matchup_features
-            static_cache_key = (reference_date, str(int(row_year)) if row_year else "")
-            if static_cache_key not in static_feature_cache:
-                static_feature_cache[static_cache_key] = (
+            static_cache_key = (
+                dataframe_cache_id(qualifier_rows),
+                dataframe_cache_id(api_football.get("team_stats")),
+                dataframe_cache_id(api_football.get("lineups")),
+                dataframe_cache_id(api_football.get("injuries")),
+                tuple(sorted(str(team) for team in working_teams)),
+                reference_date,
+                str(int(row_year)) if row_year else "",
+            )
+            if static_cache_key not in feature_cache.static_features:
+                feature_cache.static_features[static_cache_key] = (
                     qualifier_feature_table(qualifier_rows, reference_date=reference_date, teams=working_teams),
                     api_football_feature_table(
                         api_football.get("team_stats", pd.DataFrame()),
@@ -2067,26 +2543,29 @@ def build_training_matrix(
                         injuries=api_football.get("injuries", pd.DataFrame()),
                     ),
                 )
-            row_qualifier_features, row_api_football_features = static_feature_cache[static_cache_key]
+            row_qualifier_features, row_api_football_features = feature_cache.static_features[static_cache_key]
         recent15_key = (
             normalize_team_key(home_team),
             normalize_team_key(away_team),
             reference_date,
             str(id(row_model)),
         )
-        if recent15_key not in recent15_feature_cache:
-            recent15_feature_cache[recent15_key] = recent15_feature_table(
+        if recent15_key not in feature_cache.recent15_features:
+            feature_cache.stats["recent15_misses"] += 1
+            feature_cache.recent15_features[recent15_key] = recent15_feature_table(
                 international_matches,
                 teams=[home_team, away_team],
                 before_date=reference_date,
                 base_model=row_model,
                 match_index=recent15_match_index,
             )
-        row_recent15_features = recent15_feature_cache[recent15_key]
+        else:
+            feature_cache.stats["recent15_hits"] += 1
+        row_recent15_features = feature_cache.recent15_features[recent15_key]
         records.append(
             match_feature_row(
                 row_model,
-                team_features_cache[row_year],
+                feature_cache.team_features_asof[team_features_key],
                 home_team,
                 away_team,
                 history_team_features=row_history_features,
@@ -2104,13 +2583,62 @@ def build_training_matrix(
                 dc_rho=dc_rho,
             )
         )
+        if progress_callback is not None and (row_index == 1 or row_index == progress_total or row_index % progress_every == 0):
+            emit_training_progress(
+                progress_callback,
+                progress_stage or "features",
+                row_index,
+                progress_total,
+                progress_message or "Construyendo features",
+                market=progress_market,
+                model_id=progress_model_id,
+                rows=row_index,
+                features=len(records[-1]) if records else 0,
+                feature_cache="miss",
+            )
     x = pd.DataFrame(records).fillna(0.0)
+    feature_cache.matrices[matrix_key] = x.copy()
+    return finalize_training_matrix_from_features(
+        x,
+        working,
+        target,
+        feature_columns,
+        progress_callback=None,
+        feature_cache_state="miss",
+    )
+
+
+def finalize_training_matrix_from_features(
+        x: pd.DataFrame,
+        working: pd.DataFrame,
+        target: str,
+        feature_columns: Optional[List[str]],
+        progress_callback=None,
+        progress_stage: str = "features",
+        progress_message: str = "",
+        progress_market: str = "",
+        progress_model_id: str = "",
+        feature_cache_state: str = "",
+) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     if feature_columns is None:
         feature_columns = list(x.columns)
     for column in feature_columns:
         if column not in x.columns:
             x[column] = 0.0
     x = x[feature_columns].astype(float)
+    if progress_callback is not None:
+        emit_training_progress(
+            progress_callback,
+            progress_stage,
+            int(working.shape[0]),
+            int(max(working.shape[0], 1)),
+            progress_message,
+            market=progress_market,
+            model_id=progress_model_id,
+            rows=int(working.shape[0]),
+            features=int(x.shape[1]),
+            feature_cache=feature_cache_state,
+        )
     if is_over_under_target(target):
         return x, working[over_under_column_for_target(target)].astype(int), feature_columns
     if target == GOALS_DISTRIBUTION_TARGET:
@@ -2889,6 +3417,11 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "optuna_pruner": str(payload.get("optuna_pruner") or "none"),
         "objective": str(payload.get("objective") or "F1"),
         "tune_params": payload.get("tune_params", payload.get("tune", "all")),
+        "market_index": int(payload.get("market_index") or 0),
+        "market_total": int(payload.get("market_total") or 0),
+        "trials_per_market": int(payload.get("trials_per_market") or 0),
+        "total_trial_budget": int(payload.get("total_trial_budget") or 0),
+        "trial_offset": int(payload.get("trial_offset") or 0),
     }
 
 
@@ -3557,9 +4090,14 @@ def tune_model_if_requested(
     )
     total_trials = int(config["n_trials"])
     label = market_label or market_label_for_progress(config["training_target"])
+    tuning_started_at = datetime.now(timezone.utc)
+    total_trial_budget = int(config.get("total_trial_budget") or total_trials)
+    trial_offset = int(config.get("trial_offset") or 0)
 
     def progress_after_trial(study_obj, trial):
         current = min(len(study_obj.trials), total_trials)
+        overall_current = trial_offset + current
+        elapsed_seconds = int((datetime.now(timezone.utc) - tuning_started_at).total_seconds())
         try:
             best_value = round(float(study_obj.best_value), 4)
             best_trial = int(study_obj.best_trial.number + 1)
@@ -3577,6 +4115,12 @@ def tune_model_if_requested(
             last_state=getattr(trial.state, "name", str(trial.state)),
             market=label,
             model_type=config["model_type"],
+            market_index=config.get("market_index"),
+            market_total=config.get("market_total"),
+            trials_per_market=config.get("trials_per_market") or total_trials,
+            total_trial_budget=total_trial_budget,
+            overall_trial_current=overall_current,
+            elapsed_seconds=elapsed_seconds,
         )
 
     emit_training_progress(
@@ -3587,6 +4131,12 @@ def tune_model_if_requested(
         f"Fine-tuning {label} 0/{total_trials}",
         market=label,
         model_type=config["model_type"],
+        market_index=config.get("market_index"),
+        market_total=config.get("market_total"),
+        trials_per_market=config.get("trials_per_market") or total_trials,
+        total_trial_budget=total_trial_budget,
+        overall_trial_current=trial_offset,
+        elapsed_seconds=0,
     )
     study.optimize(objective, n_trials=total_trials, show_progress_bar=False, callbacks=[progress_after_trial])
     try:
@@ -3606,6 +4156,12 @@ def tune_model_if_requested(
         "best_value": best_value,
         "best_trial": best_trial,
         "best_params": best_params,
+        "market_index": config.get("market_index"),
+        "market_total": config.get("market_total"),
+        "trials_per_market": config.get("trials_per_market") or total_trials,
+        "total_trial_budget": total_trial_budget,
+        "trial_offset": trial_offset,
+        "elapsed_seconds": int((datetime.now(timezone.utc) - tuning_started_at).total_seconds()),
     }
 
 
@@ -4177,6 +4733,7 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "requested_target": record.get("requested_target", result.get("requested_target", "")),
         "metrics": record.get("metrics", result.get("metrics", {})),
         "confusion_matrix": record.get("confusion_matrix", result.get("confusion_matrix", {})),
+        "calibration": record.get("calibration", result.get("calibration", {})),
         "classes": record.get("classes", []),
         "eval_strategy": record.get("eval_strategy", result.get("eval_strategy", "")),
         "train_rows": int(result.get("train_rows", 0) or 0),
@@ -4292,10 +4849,27 @@ def classification_metrics(clf, x_train, y_train, x_eval, y_eval) -> Dict[str, D
     return classification_metrics_from_predictions(y_train, classifier_predict(clf, x_train), y_eval, classifier_predict(clf, x_eval))
 
 
-def classification_metrics_from_predictions(y_train, y_train_pred, y_eval, y_eval_pred) -> Dict[str, Dict[str, float]]:
+def classification_metrics_from_predictions(
+        y_train,
+        y_train_pred,
+        y_eval,
+        y_eval_pred,
+        y_train_proba: Optional[np.ndarray] = None,
+        y_eval_proba: Optional[np.ndarray] = None,
+        classes: Optional[List[Any]] = None,
+        target: str = "result",
+        x_train: Optional[pd.DataFrame] = None,
+        x_eval: Optional[pd.DataFrame] = None,
+) -> Dict[str, Dict[str, float]]:
+    train_row = metric_row(y_train, y_train_pred)
+    eval_row = metric_row(y_eval, y_eval_pred)
+    if y_train_proba is not None and classes is not None:
+        train_row.update(calibration_metric_row(y_train, y_train_proba, classes, target=target, x=x_train))
+    if y_eval_proba is not None and classes is not None:
+        eval_row.update(calibration_metric_row(y_eval, y_eval_proba, classes, target=target, x=x_eval))
     return {
-        "train": metric_row(y_train, y_train_pred),
-        "eval": metric_row(y_eval, y_eval_pred),
+        "train": train_row,
+        "eval": eval_row,
     }
 
 
@@ -4306,6 +4880,173 @@ def metric_row(y_true, y_pred) -> Dict[str, float]:
         "Precision": round(float(precision_score(y_true, y_pred, average="macro", zero_division=0.0)), 3),
         "Recall": round(float(recall_score(y_true, y_pred, average="macro", zero_division=0.0)), 3),
     }
+
+
+def calibration_metric_row(
+        y_true,
+        probabilities: np.ndarray,
+        classes: List[Any],
+        target: str = "result",
+        x: Optional[pd.DataFrame] = None,
+) -> Dict[str, float]:
+    payload = probability_calibration_summary(y_true, probabilities, classes)
+    row = {
+        "Brier": round(float(payload.get("brier", 0.0)), 4),
+        "LogLoss": round(float(payload.get("log_loss", 0.0)), 4),
+        "ECE": round(float(payload.get("ece", 0.0)), 4),
+    }
+    market = market_calibration_summary(y_true, classes, target=target, x=x)
+    if market.get("available"):
+        row["MarketBrier"] = round(float(market.get("brier", 0.0)), 4)
+        row["ModelMinusMarketBrier"] = round(row["Brier"] - row["MarketBrier"], 4)
+    return row
+
+
+def calibration_payload(
+        y_train,
+        y_train_proba: np.ndarray,
+        y_eval,
+        y_eval_proba: np.ndarray,
+        classes: List[Any],
+        target: str,
+        x_train: Optional[pd.DataFrame] = None,
+        x_eval: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    train_summary = probability_calibration_summary(y_train, y_train_proba, classes)
+    eval_summary = probability_calibration_summary(y_eval, y_eval_proba, classes)
+    train_summary["market"] = market_calibration_summary(y_train, classes, target=target, x=x_train)
+    eval_summary["market"] = market_calibration_summary(y_eval, classes, target=target, x=x_eval)
+    return {
+        "target": target,
+        "classes": [str(item) for item in classes],
+        "train": train_summary,
+        "eval": eval_summary,
+    }
+
+
+def probability_calibration_summary(y_true, probabilities: np.ndarray, classes: List[Any], bins: int = 10) -> Dict[str, Any]:
+    y_series = pd.to_numeric(pd.Series(y_true).reset_index(drop=True), errors="coerce")
+    proba = normalize_probability_matrix(probabilities, len(classes))
+    valid = y_series.notna() & y_series.astype(float).between(0, max(len(classes) - 1, 0))
+    if not valid.any() or proba.shape[0] == 0:
+        return {"available": False, "rows": 0, "brier": 0.0, "log_loss": 0.0, "ece": 0.0, "reliability_bins": []}
+    y_int = y_series[valid].astype(int).to_numpy()
+    proba = proba[valid.to_numpy()]
+    one_hot = np.zeros_like(proba, dtype=float)
+    one_hot[np.arange(len(y_int)), y_int] = 1.0
+    brier = float(np.mean(np.sum((proba - one_hot) ** 2, axis=1)))
+    try:
+        loss = float(log_loss(y_int, proba, labels=list(range(len(classes)))))
+    except ValueError:
+        loss = 0.0
+    predicted = np.argmax(proba, axis=1)
+    confidence = np.max(proba, axis=1)
+    correct = (predicted == y_int).astype(float)
+    reliability_bins = reliability_bins_payload(confidence, correct, bins=bins)
+    ece = float(sum((item["count"] / max(len(y_int), 1)) * abs(item["accuracy"] - item["confidence"]) for item in reliability_bins))
+    return {
+        "available": True,
+        "rows": int(len(y_int)),
+        "brier": round(brier, 6),
+        "log_loss": round(loss, 6),
+        "ece": round(ece, 6),
+        "reliability_bins": reliability_bins,
+    }
+
+
+def reliability_bins_payload(confidence: np.ndarray, correct: np.ndarray, bins: int = 10) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    bins = max(1, int(bins or 10))
+    for index in range(bins):
+        low = index / bins
+        high = (index + 1) / bins
+        if index == bins - 1:
+            mask = (confidence >= low) & (confidence <= high)
+        else:
+            mask = (confidence >= low) & (confidence < high)
+        count = int(mask.sum())
+        rows.append({
+            "bin": index + 1,
+            "low": round(low, 3),
+            "high": round(high, 3),
+            "count": count,
+            "confidence": round(float(confidence[mask].mean()), 6) if count else 0.0,
+            "accuracy": round(float(correct[mask].mean()), 6) if count else 0.0,
+        })
+    return rows
+
+
+def normalize_probability_matrix(probabilities: np.ndarray, class_count: int) -> np.ndarray:
+    class_count = max(int(class_count or 1), 1)
+    matrix = np.asarray(probabilities, dtype=float)
+    if matrix.ndim == 1:
+        if class_count == 2:
+            matrix = np.column_stack([1.0 - matrix, matrix])
+        else:
+            matrix = np.reshape(matrix, (-1, class_count))
+    if matrix.shape[1] < class_count:
+        matrix = np.pad(matrix, ((0, 0), (0, class_count - matrix.shape[1])), constant_values=0.0)
+    matrix = matrix[:, :class_count]
+    matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)
+    matrix = np.clip(matrix, 0.0, None)
+    totals = matrix.sum(axis=1, keepdims=True)
+    totals[totals <= 0.0] = 1.0
+    return matrix / totals
+
+
+def market_calibration_summary(
+        y_true,
+        classes: List[Any],
+        target: str,
+        x: Optional[pd.DataFrame],
+) -> Dict[str, Any]:
+    if x is None or x.empty:
+        return {"available": False, "rows": 0}
+    market_proba = market_probability_matrix_from_features(x, classes, target)
+    if market_proba is None or market_proba.size == 0:
+        return {"available": False, "rows": 0}
+    has_market = np.sum(market_proba, axis=1) > 0.0
+    y_series = pd.to_numeric(pd.Series(y_true).reset_index(drop=True), errors="coerce")
+    valid = y_series.notna() & y_series.astype(float).between(0, max(len(classes) - 1, 0))
+    valid_mask = valid.to_numpy() & has_market
+    if not valid_mask.any():
+        return {"available": False, "rows": 0}
+    y_int = y_series[valid_mask].astype(int).to_numpy()
+    proba = normalize_probability_matrix(market_proba[valid_mask], len(classes))
+    one_hot = np.zeros_like(proba, dtype=float)
+    one_hot[np.arange(len(y_int)), y_int] = 1.0
+    brier = float(np.mean(np.sum((proba - one_hot) ** 2, axis=1)))
+    try:
+        loss = float(log_loss(y_int, proba, labels=list(range(len(classes)))))
+    except ValueError:
+        loss = 0.0
+    return {
+        "available": True,
+        "rows": int(len(y_int)),
+        "brier": round(brier, 6),
+        "log_loss": round(loss, 6),
+    }
+
+
+def market_probability_matrix_from_features(x: pd.DataFrame, classes: List[Any], target: str) -> Optional[np.ndarray]:
+    if target == "result":
+        columns_by_label = {"H": "market_prob_home", "D": "market_prob_draw", "A": "market_prob_away"}
+        if not all(column in x.columns for column in columns_by_label.values()):
+            return None
+        return np.column_stack([
+            pd.to_numeric(x.get(columns_by_label.get(str(label), ""), pd.Series(0.0, index=x.index)), errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            for label in classes
+        ])
+    if is_over_under_target(target):
+        suffix = total_line_suffix(OVER_UNDER_TARGET_LINES[target])
+        columns_by_label = {"0": f"market_prob_under{suffix}", "1": f"market_prob_over{suffix}"}
+        if not all(column in x.columns for column in columns_by_label.values()):
+            return None
+        return np.column_stack([
+            pd.to_numeric(x.get(columns_by_label.get(str(label), ""), pd.Series(0.0, index=x.index)), errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            for label in classes
+        ])
+    return None
 
 
 def decode_encoded_predictions(encoded: Iterable[Any], classes: List[Any]) -> pd.Series:
@@ -4579,10 +5320,16 @@ def tuning_trace(tuned: Dict[str, Any]) -> Dict[str, Any]:
         "best_value": tuned.get("best_value", ""),
         "best_trial": tuned.get("best_trial", ""),
         "best_params": best_params,
+        "market_index": tuned.get("market_index", ""),
+        "market_total": tuned.get("market_total", ""),
+        "trials_per_market": tuned.get("trials_per_market", ""),
+        "total_trial_budget": tuned.get("total_trial_budget", ""),
+        "elapsed_seconds": tuned.get("elapsed_seconds", ""),
         "steps": [
             {"name": "Sampler", "status": "ok", "detail": str(tuned.get("sampler", ""))},
             {"name": "Pruner", "status": "ok", "detail": str(tuned.get("pruner", ""))},
             {"name": "Trials", "status": "ok", "detail": str(tuned.get("trials", 0))},
+            {"name": "Presupuesto total", "status": "ok", "detail": str(tuned.get("total_trial_budget") or tuned.get("trials", 0))},
             {"name": "Mejor valor", "status": "ok", "detail": str(tuned.get("best_value", ""))},
             {"name": "Parametros", "status": "ok" if best_params else "info", "detail": ", ".join(best_params.keys()) or "Sin cambios"},
         ],
@@ -4639,6 +5386,7 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "classes": record.get("classes", []),
         "metrics": record.get("metrics", {}),
         "confusion_matrix": record.get("confusion_matrix", {}),
+        "calibration": record.get("calibration", {}),
         "mode": record.get("mode", ""),
         "eval_strategy": record.get("eval_strategy", ""),
         "prediction_rows": record.get("prediction_rows", 0),
@@ -4655,6 +5403,7 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "warnings": record.get("warnings", []),
         "top_features": record.get("top_features", []),
         "feature_inventory": record.get("feature_inventory", {}),
+        "feature_cache": record.get("feature_cache", {}),
         "derived_total_markets": record.get("derived_total_markets", {}),
         "kaggle_files": record.get("kaggle_files", []),
         "history_source": record.get("history_source", ""),
@@ -4673,6 +5422,7 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "class_distribution": record.get("class_distribution", {}),
         "sample_weight_policy": record.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "sample_weight_summary": record.get("sample_weight_summary", {}),
+        "data_quality": record.get("data_quality", {}),
         "dc_rho": float(record.get("dc_rho", 0.0) or 0.0),
         "prepared_schema_version": record.get("prepared_schema_version", ""),
         "target_worldcup_year": str(record.get("target_worldcup_year") or TARGET_WORLDCUP_YEAR),
@@ -4722,6 +5472,7 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "classes": [],
         "metrics": {},
         "confusion_matrix": {},
+        "calibration": {},
         "model_type": "",
         "model_label": "",
         "effective_target": "",
@@ -4740,9 +5491,11 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "api_football_stat_rows": 0,
         "api_football_market_rows": 0,
         "international_recent": international_results_status(),
+        "data_quality": {},
         "hidden_from_catalog": False,
         "markets": {},
         "market_models": {},
+        "feature_cache": {},
         "walk_forward_mode": "none",
         "walk_forward_summary": {},
         "prepared_schema_version": "",
