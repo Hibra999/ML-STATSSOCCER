@@ -25,7 +25,7 @@ from src.worldcup import (
     teams_dataframe,
     tournament_fixtures_dataframe,
 )
-from src.worldcup.model import TOTAL_GOAL_LINES, total_line_suffix
+from src.worldcup.model import TOTAL_GOAL_LINES, poisson_score_grid, total_line_suffix
 from src.worldcup.score_models import (
     DEFAULT_SCORE_MODEL,
     build_score_model,
@@ -94,6 +94,7 @@ SOTA_SCORE_MODEL_SEQUENCE = [
     "xg_poisson_local",
 ]
 REPORT_TOTAL_GOAL_LINES = (0.5, 1.5, 2.5, 3.5)
+REPORT_SCORE_MATRIX_GOALS = 6
 DEFAULT_CONFIG = {
     "iterations": 5000,
     "seed": 2026,
@@ -927,6 +928,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         )
     for report in fixture_reports:
         report["consensus"] = fixture_consensus(report.get("models", []))
+        report.update(fixture_model_analysis(report.get("models", [])))
         report["warnings"] = fixture_report_warnings(report)
     table = table_payload(pd.DataFrame(upcoming_report_table_rows(fixture_reports)), page=1, page_size=max(limit * 12, 1))
     summary = {
@@ -1083,7 +1085,6 @@ def upcoming_sota_fixture_reports(
                 "params": {},
                 "warnings": [f"{exc.__class__.__name__}: {exc}; se usa Poisson independiente."],
             }
-        metadata = score_model_report_metadata(metadata, hardware)
         for fixture_index, fixture in enumerate(fixtures, start=1):
             emit_report_progress(
                 progress_callback,
@@ -1098,16 +1099,19 @@ def upcoming_sota_fixture_reports(
                 message=f"{score_model_display_label(model_key)}: {fixture.get('Equipo 1', '')} vs {fixture.get('Equipo 2', '')}",
             )
             probabilities = model_probabilities_for_fixture(score_model, fixture, config)
-            fixture_reports[fixture_index - 1]["models"].append(
-                score_prediction_model_report(
-                    model_key=model_key,
-                    metadata=metadata,
-                    probabilities=probabilities,
-                    fixture=fixture,
-                    config=config,
-                    already_percent=False,
-                )
+            model_report = score_prediction_model_report(
+                model_key=model_key,
+                metadata=metadata,
+                probabilities=probabilities,
+                fixture=fixture,
+                config=config,
+                already_percent=False,
             )
+            score_distribution = score_distribution_for_fixture(score_model, fixture, probabilities, config)
+            model_report["score_distribution"] = score_distribution
+            model_report["top_scores"] = score_distribution.get("top_scores", [])
+            model_report["heatmap"] = score_distribution.get("heatmap", {})
+            fixture_reports[fixture_index - 1]["models"].append(model_report)
     return fixture_reports
 
 
@@ -1164,18 +1168,6 @@ def stat_report_hardware(requested_device: Any, pipeline_mode: str) -> Dict[str,
         "device_error": device_error,
         "warnings": warnings,
     }
-
-
-def score_model_report_metadata(metadata: Dict[str, Any], hardware: Dict[str, Any]) -> Dict[str, Any]:
-    if not hardware.get("cuda_available") or hardware.get("backend_supports_cuda"):
-        return metadata
-    if hardware.get("requested_device") != "cuda" or hardware.get("actual_device") != "cuda":
-        return metadata
-    warning = "Modelo estadistico CPU-bound: CUDA esta disponible, pero esta implementacion se ejecuta en CPU."
-    warnings = [str(item) for item in metadata.get("warnings", []) if str(item)]
-    if warning not in warnings:
-        warnings.append(warning)
-    return {**metadata, "warnings": warnings}
 
 
 def emit_report_progress(
@@ -1324,6 +1316,258 @@ def score_prediction_model_report(
     }
 
 
+def score_distribution_for_fixture(model: Any, fixture: pd.Series, probabilities: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    home = str(fixture.get("Equipo 1", fixture.get("home", "")))
+    away = str(fixture.get("Equipo 2", fixture.get("away", "")))
+    lambda_home = float_or_zero(probabilities.get("lambda1", 0.0))
+    lambda_away = float_or_zero(probabilities.get("lambda2", 0.0))
+    max_goals = int(config.get("max_goals") or DEFAULT_CONFIG["max_goals"])
+    grid = model_score_grid_for_fixture(model, home, away, fixture, lambda_home, lambda_away, max_goals=max_goals)
+    return score_distribution_payload(grid, lambda_home=lambda_home, lambda_away=lambda_away)
+
+
+def model_score_grid_for_fixture(
+        model: Any,
+        home: str,
+        away: str,
+        fixture: pd.Series,
+        lambda_home: float,
+        lambda_away: float,
+        max_goals: int,
+) -> np.ndarray:
+    record = fixture.to_dict() if hasattr(fixture, "to_dict") else dict(fixture)
+    method = getattr(model, "score_grid", None)
+    if callable(method):
+        try:
+            return normalize_score_grid_array(method(home, away, match=record, max_goals=max_goals))
+        except Exception:
+            pass
+    grid = match_score_grid_for_lambdas(model, lambda_home, lambda_away, max_goals=max_goals)
+    if grid is not None:
+        return normalize_score_grid_array(grid)
+    return normalize_score_grid_array(poisson_score_grid(lambda_home, lambda_away, max_goals=max_goals))
+
+
+def normalize_score_grid_array(grid: Any) -> np.ndarray:
+    array = np.asarray(grid, dtype=float)
+    if array.ndim != 2 or array.size == 0:
+        return poisson_score_grid(1.2, 1.0, max_goals=REPORT_SCORE_MATRIX_GOALS)
+    array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+    array = np.maximum(array, 0.0)
+    total = float(array.sum())
+    if total <= 0.0:
+        return poisson_score_grid(1.2, 1.0, max_goals=max(array.shape[0] - 1, REPORT_SCORE_MATRIX_GOALS))
+    return array / total
+
+
+def score_distribution_payload(grid: np.ndarray, lambda_home: float, lambda_away: float) -> Dict[str, Any]:
+    grid = normalize_score_grid_array(grid)
+    cells = score_distribution_cells(grid)
+    top_scores = sorted(cells, key=lambda item: item["probability_raw"], reverse=True)[:5]
+    visible_goals = min(REPORT_SCORE_MATRIX_GOALS, grid.shape[0] - 1, grid.shape[1] - 1)
+    visible_cells = [
+        cell for cell in cells
+        if cell["home_goals"] <= visible_goals and cell["away_goals"] <= visible_goals
+    ]
+    max_visible_probability = max((cell["probability"] for cell in visible_cells), default=0.0)
+    probabilities = score_grid_probabilities(grid)
+    return {
+        "available": True,
+        "lambdas": {"home": round(float(lambda_home), 3), "away": round(float(lambda_away), 3)},
+        "probabilities": probabilities,
+        "over_under": {
+            f"{line:.1f}": {
+                "over": probabilities.get(f"over{total_line_suffix(line)}", 0.0),
+                "under": probabilities.get(f"under{total_line_suffix(line)}", 0.0),
+            }
+            for line in REPORT_TOTAL_GOAL_LINES
+        },
+        "score_matrix": [
+            [round(float(grid[home_goals, away_goals]) * 100.0, 3) for away_goals in range(grid.shape[1])]
+            for home_goals in range(grid.shape[0])
+        ],
+        "heatmap": {
+            "home_goals": list(range(visible_goals + 1)),
+            "away_goals": list(range(visible_goals + 1)),
+            "max_probability": round(max_visible_probability, 3),
+            "cells": visible_cells,
+        },
+        "top_scores": top_scores,
+    }
+
+
+def score_distribution_cells(grid: np.ndarray) -> List[Dict[str, Any]]:
+    return [
+        {
+            "home_goals": int(home_goals),
+            "away_goals": int(away_goals),
+            "score": f"{home_goals}-{away_goals}",
+            "probability": round(float(grid[home_goals, away_goals]) * 100.0, 3),
+            "probability_raw": float(grid[home_goals, away_goals]),
+        }
+        for home_goals in range(grid.shape[0])
+        for away_goals in range(grid.shape[1])
+    ]
+
+
+def score_grid_probabilities(grid: np.ndarray) -> Dict[str, float]:
+    grid = normalize_score_grid_array(grid)
+    goals = np.arange(grid.shape[0], dtype=int)
+    home_goals, away_goals = np.meshgrid(goals, goals, indexing="ij")
+    margin = home_goals - away_goals
+    total_goals = home_goals + away_goals
+    output = {
+        "home": round(float(grid[margin > 0].sum()) * 100.0, 2),
+        "draw": round(float(grid[margin == 0].sum()) * 100.0, 2),
+        "away": round(float(grid[margin < 0].sum()) * 100.0, 2),
+    }
+    for line in REPORT_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        over = float(grid[total_goals > line].sum())
+        output[f"over{suffix}"] = round(over * 100.0, 2)
+        output[f"under{suffix}"] = round((1.0 - over) * 100.0, 2)
+    return output
+
+
+def fixture_model_analysis(model_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    eligible = [
+        model for model in model_reports
+        if model.get("consensus_eligible") and not model.get("fallback")
+    ]
+    return {
+        "top_models_1x2": top_models_1x2(eligible),
+        "consensus_score_distribution": consensus_score_distribution(eligible),
+        "model_statistics": model_statistics_payload(eligible),
+    }
+
+
+def top_models_1x2(model_reports: List[Dict[str, Any]], limit: int = 4) -> List[Dict[str, Any]]:
+    ranked: List[Dict[str, Any]] = []
+    for model in model_reports:
+        decision = model.get("decision") or {}
+        outcome = str(decision.get("outcome") or "")
+        probabilities = model.get("probabilities") or {}
+        confidence = float_or_zero(probabilities.get(outcome, 0.0))
+        ranked.append({
+            "model_key": model.get("model_key", ""),
+            "model_label": model.get("model_label", ""),
+            "pick": outcome,
+            "pick_label": decision.get("label", ""),
+            "team": decision.get("team", ""),
+            "confidence": round(confidence, 2),
+            "top_score": model.get("top_score", ""),
+            "expected_goals": model.get("expected_goals", {}),
+            "consensus_eligible": bool(model.get("consensus_eligible")),
+        })
+    ranked.sort(key=lambda item: float_or_zero(item.get("confidence")), reverse=True)
+    for index, item in enumerate(ranked[:limit], start=1):
+        item["rank"] = index
+    return ranked[:limit]
+
+
+def consensus_score_distribution(model_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    matrices: List[np.ndarray] = []
+    lambda_home: List[float] = []
+    lambda_away: List[float] = []
+    for model in model_reports:
+        distribution = model.get("score_distribution") or {}
+        matrix = distribution.get("score_matrix")
+        if not matrix:
+            continue
+        array = normalize_score_grid_array(np.asarray(matrix, dtype=float) / 100.0)
+        matrices.append(array)
+        lambdas = distribution.get("lambdas") or {}
+        lambda_home.append(float_or_zero(lambdas.get("home")))
+        lambda_away.append(float_or_zero(lambdas.get("away")))
+    if not matrices:
+        return {"available": False, "model_count": 0, "reason": "Sin matrices validas para consenso."}
+    rows = min(matrix.shape[0] for matrix in matrices)
+    cols = min(matrix.shape[1] for matrix in matrices)
+    stacked = np.stack([matrix[:rows, :cols] for matrix in matrices], axis=0)
+    consensus_grid = normalize_score_grid_array(stacked.mean(axis=0))
+    return {
+        "available": True,
+        "model_count": len(matrices),
+        "matrix_source": "consensus_average",
+        **score_distribution_payload(
+            consensus_grid,
+            lambda_home=float(np.mean(lambda_home)) if lambda_home else 0.0,
+            lambda_away=float(np.mean(lambda_away)) if lambda_away else 0.0,
+        ),
+    }
+
+
+def model_statistics_payload(model_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    probabilities = {key: [] for key in ("home", "draw", "away")}
+    lambdas = {key: [] for key in ("home", "away", "total")}
+    total_stats: Dict[str, Dict[str, Any]] = {}
+    top_score_counts: Counter[str] = Counter()
+    signature_counts: Counter[str] = Counter()
+    for model in model_reports:
+        probs = model.get("probabilities") or {}
+        expected = model.get("expected_goals") or {}
+        for key in probabilities:
+            probabilities[key].append(float_or_zero(probs.get(key)))
+        home_lambda = float_or_zero(expected.get("home"))
+        away_lambda = float_or_zero(expected.get("away"))
+        lambdas["home"].append(home_lambda)
+        lambdas["away"].append(away_lambda)
+        lambdas["total"].append(home_lambda + away_lambda)
+        top_score_counts.update([str(model.get("top_score") or "")])
+        signature_counts.update([str(model.get("signature") or "")])
+    for line in REPORT_TOTAL_GOAL_LINES:
+        line_key = f"{line:.1f}"
+        suffix = total_line_suffix(line)
+        over_values = [float_or_zero((model.get("probabilities") or {}).get(f"over{suffix}")) for model in model_reports]
+        under_values = [float_or_zero((model.get("probabilities") or {}).get(f"under{suffix}")) for model in model_reports]
+        picks = [str((model.get("totals") or {}).get(line_key) or "") for model in model_reports]
+        pick_counts = Counter(picks)
+        pick, count = most_common_item(pick_counts)
+        total_stats[line_key] = {
+            "over": numeric_summary(over_values),
+            "under": numeric_summary(under_values),
+            "pick": pick,
+            "label": "Over" if pick == "over" else "Under" if pick == "under" else "",
+            "count": count,
+            "share": round(count / len(model_reports), 3) if model_reports else 0.0,
+            "pick_counts": dict(pick_counts),
+        }
+    return {
+        "model_count": len(model_reports),
+        "outcomes": {key: numeric_summary(values) for key, values in probabilities.items()},
+        "lambdas": {key: numeric_summary(values) for key, values in lambdas.items()},
+        "totals": total_stats,
+        "top_scores": counter_rank_payload(top_score_counts, len(model_reports)),
+        "signatures": counter_rank_payload(signature_counts, len(model_reports)),
+    }
+
+
+def numeric_summary(values: Iterable[Any]) -> Dict[str, Any]:
+    numbers = [float_or_zero(value) for value in values if value is not None]
+    if not numbers:
+        return {"avg": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "spread": 0.0}
+    array = np.asarray(numbers, dtype=float)
+    return {
+        "avg": round(float(array.mean()), 2),
+        "std": round(float(array.std()), 2),
+        "min": round(float(array.min()), 2),
+        "max": round(float(array.max()), 2),
+        "spread": round(float(array.max() - array.min()), 2),
+    }
+
+
+def counter_rank_payload(counter: Counter[str], total: int, limit: int = 5) -> List[Dict[str, Any]]:
+    return [
+        {
+            "value": key,
+            "count": int(count),
+            "share": round(int(count) / total, 3) if total else 0.0,
+        }
+        for key, count in counter.most_common(limit)
+        if key
+    ]
+
+
 def round_half_up_int(value: Any) -> int:
     return int(math.floor(float_or_zero(value) + 0.5))
 
@@ -1452,12 +1696,22 @@ def float_or_zero(value: Any) -> float:
 
 
 def fixture_report_warnings(report: Dict[str, Any]) -> List[str]:
-    warnings: List[str] = []
+    warning_labels: Dict[str, List[str]] = {}
     for model in report.get("models", []):
         for warning in model.get("warnings", []):
+            warning_text = str(warning or "").strip()
+            if not warning_text:
+                continue
             label = model.get("model_label") or model.get("model_key") or "Modelo"
-            warnings.append(f"{label}: {warning}")
-    return unique_strings(warnings)
+            warning_labels.setdefault(warning_text, []).append(str(label))
+    warnings: List[str] = []
+    for warning, labels in warning_labels.items():
+        unique_labels = unique_strings(labels)
+        if len(unique_labels) > 1:
+            warnings.append(f"{warning} ({len(unique_labels)} modelos)")
+        elif unique_labels:
+            warnings.append(f"{unique_labels[0]}: {warning}")
+    return warnings
 
 
 def upcoming_report_table_rows(fixture_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

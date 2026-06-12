@@ -159,6 +159,10 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     assert result["summary"]["use_ml_model"] is False
     assert result["fixture_reports"][0]["models"][0]["model_key"] == "independent_poisson"
     assert result["fixture_reports"][0]["consensus"]["eligible_models"] == len(services.SOTA_SCORE_MODEL_SEQUENCE)
+    assert len(result["fixture_reports"][0]["top_models_1x2"]) == 4
+    assert result["fixture_reports"][0]["consensus_score_distribution"]["available"] is True
+    assert result["fixture_reports"][0]["model_statistics"]["model_count"] == len(services.SOTA_SCORE_MODEL_SEQUENCE)
+    assert result["fixture_reports"][0]["models"][0]["score_distribution"]["top_scores"]
     assert (tmp_path / "latest.json").exists()
     latest = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
     assert latest["report_id"] == result["report_id"]
@@ -183,12 +187,26 @@ def test_sota_report_honors_explicit_cuda_when_detected_and_warns_cpu_bound(monk
     })
 
     hardware = services.stat_report_hardware("cuda", "poisson_sota")
-    metadata = services.score_model_report_metadata({"warnings": []}, hardware)
-
     assert hardware["actual_device"] == "cuda"
     assert hardware["backend_supports_cuda"] is False
-    assert any("CPU-bound" in warning for warning in hardware["warnings"])
-    assert any("CPU-bound" in warning for warning in metadata["warnings"])
+    assert sum("CPU-bound" in warning for warning in hardware["warnings"]) == 1
+
+
+def test_fixture_report_warnings_groups_duplicate_model_warnings():
+    from src.web import mundial_services as services
+
+    report = {
+        "models": [
+            {"model_label": "A", "warnings": ["warning compartido"]},
+            {"model_label": "B", "warnings": ["warning compartido"]},
+            {"model_label": "C", "warnings": ["warning unico"]},
+        ]
+    }
+
+    warnings = services.fixture_report_warnings(report)
+
+    assert "warning compartido (2 modelos)" in warnings
+    assert "C: warning unico" in warnings
 
 
 def test_sota_report_explicit_cuda_without_gpu_returns_clear_device_error(monkeypatch):

@@ -1335,16 +1335,13 @@ function reportFixtureCardHtml(report) {
   const fixture = report.fixture || {};
   const consensus = report.consensus || {};
   const models = report.models || [];
+  const topModels = report.top_models_1x2 || [];
+  const stats = report.model_statistics || {};
+  const scoreDistribution = report.consensus_score_distribution || {};
   const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
   const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
-  const outcomeCounts = consensus.outcome_counts || {};
-  const eligible = Math.max(Number(consensus.eligible_models || 0), 1);
-  const outcomes = [
-    { key: "home", label: "1", team: fixture.home || "Local", value: ((Number(outcomeCounts.home || 0) / eligible) * 100).toFixed(0) },
-    { key: "draw", label: "X", team: "Empate", value: ((Number(outcomeCounts.draw || 0) / eligible) * 100).toFixed(0) },
-    { key: "away", label: "2", team: fixture.away || "Visitante", value: ((Number(outcomeCounts.away || 0) / eligible) * 100).toFixed(0) },
-  ];
   const consensusClass = ["Baja", ""].includes(consensus.strength || "") ? "low" : "";
+  const warnings = report.warnings || [];
   return `<article class="upcoming-card report-fixture-card">
     <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
     <div class="upcoming-match">
@@ -1357,21 +1354,112 @@ function reportFixtureCardHtml(report) {
       <strong>${escapeHtml(consensus.outcome_label || "-")} · ${escapeHtml(consensus.strength || "Baja")}</strong>
     </div>
     <span class="consensus-badge ${escapeAttr(consensusClass)}">${escapeHtml(Math.round(Number(consensus.outcome_share || 0) * 100))}% 1X2 · ${escapeHtml(Math.round(Number(consensus.signature_share || 0) * 100))}% firma</span>
-    <div class="outcome-list">
-      ${outcomes.map((item) => `
-        <div class="outcome-row ${escapeAttr(item.key === consensus.outcome ? "active" : "")}">
-          <span>${escapeHtml(item.label)}</span>
-          <div><i style="width:${escapeAttr(clampPercent(item.value))}%"></i></div>
-          <b>${escapeHtml(item.value)}%</b>
-        </div>`).join("")}
-    </div>
-    ${reportTotalsConsensusHtml(consensus)}
-    ${agreementMatrixHtml(models)}
-    <div class="model-consensus-list">
-      ${models.map((model) => modelConsensusRowHtml(model)).join("")}
-    </div>
-    ${report.warnings && report.warnings.length ? `<div class="warning-list">${report.warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${reportTopModelsHtml(topModels)}
+    ${reportOutcomeStatsHtml(stats, consensus, fixture)}
+    ${reportConsensusScoreHtml(scoreDistribution)}
+    ${reportTotalsStatsHtml(stats, consensus)}
+    ${allModelsDetailsHtml(models)}
+    ${warnings.length ? `<div class="warning-list compact">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
   </article>`;
+}
+
+function reportTopModelsHtml(topModels) {
+  const models = topModels || [];
+  if (!models.length) return "";
+  return `<section class="report-panel top-models-panel">
+    <header><strong>Top 4 modelos 1/X/2</strong><small>Ordenados por confianza del pick</small></header>
+    <div class="top-models-grid">
+      ${models.map((model) => {
+        const expected = model.expected_goals || {};
+        return `<div class="top-model-row">
+          <b>#${escapeHtml(model.rank || "")}</b>
+          <strong>${escapeHtml(model.model_label || model.model_key || "")}</strong>
+          <span>${escapeHtml(model.pick_label || "-")} · ${escapeHtml(model.team || "")}</span>
+          <em>${escapeHtml(formatNumber(model.confidence ?? 0))}%</em>
+          <small>${escapeHtml(model.top_score || "-")} · λ ${escapeHtml(formatNumber(expected.home ?? "-"))}/${escapeHtml(formatNumber(expected.away ?? "-"))}</small>
+        </div>`;
+      }).join("")}
+    </div>
+  </section>`;
+}
+
+function reportOutcomeStatsHtml(stats, consensus, fixture) {
+  const outcomeStats = (stats && stats.outcomes) || {};
+  const outcomeCounts = (consensus && consensus.outcome_counts) || {};
+  const eligible = Math.max(Number((stats && stats.model_count) || (consensus && consensus.eligible_models) || 0), 1);
+  const outcomes = [
+    { key: "home", label: "1", team: fixture.home || "Local" },
+    { key: "draw", label: "X", team: "Empate" },
+    { key: "away", label: "2", team: fixture.away || "Visitante" },
+  ];
+  return `<section class="report-panel">
+    <header><strong>Distribución 1/X/2</strong><small>Promedio y dispersión entre modelos</small></header>
+    <div class="outcome-list stat-outcomes">
+      ${outcomes.map((item) => {
+        const summary = outcomeStats[item.key] || {};
+        const avg = Number.isFinite(Number(summary.avg)) ? Number(summary.avg) : (Number(outcomeCounts[item.key] || 0) / eligible) * 100;
+        const active = item.key === ((consensus || {}).outcome || "");
+        return `<div class="outcome-row ${escapeAttr(active ? "active" : "")}">
+          <span>${escapeHtml(item.label)}</span>
+          <div><i style="width:${escapeAttr(clampPercent(avg))}%"></i></div>
+          <b>${escapeHtml(formatNumber(avg))}%</b>
+          <small>${escapeHtml(item.team)} · σ ${escapeHtml(formatNumber(summary.std ?? 0))} · rango ${escapeHtml(formatNumber(summary.min ?? 0))}-${escapeHtml(formatNumber(summary.max ?? 0))}</small>
+        </div>`;
+      }).join("")}
+    </div>
+  </section>`;
+}
+
+function reportConsensusScoreHtml(distribution) {
+  const payload = distribution || {};
+  if (!payload.available) return "";
+  const lambdas = payload.lambdas || {};
+  const topScores = payload.top_scores || [];
+  return `<section class="report-panel consensus-score-panel">
+    <header>
+      <strong>Matriz consenso de marcador</strong>
+      <small>${escapeHtml(payload.model_count || 0)} modelos · λ ${escapeHtml(formatNumber(lambdas.home ?? "-"))}/${escapeHtml(formatNumber(lambdas.away ?? "-"))}</small>
+    </header>
+    <div class="top-scores compact">
+      ${topScores.slice(0, 5).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
+    </div>
+    ${scoreHeatmapHtml(payload)}
+  </section>`;
+}
+
+function reportTotalsStatsHtml(stats, consensus) {
+  const totals = ((stats || {}).totals) || {};
+  const consensusTotals = (consensus && consensus.totals) || {};
+  const lines = ["0.5", "1.5", "2.5", "3.5"];
+  return `<section class="report-panel">
+    <header><strong>Over/Under</strong><small>Acuerdo y variabilidad por línea</small></header>
+    <div class="totals-list stat-totals">
+      ${lines.map((line) => {
+        const item = totals[line] || {};
+        const fallback = consensusTotals[line] || {};
+        const over = item.over || {};
+        const under = item.under || {};
+        const label = item.label || fallback.label || "-";
+        const share = Math.round(Number(item.share ?? fallback.share ?? 0) * 100);
+        return `<div class="total-row">
+          <span>U/O ${escapeHtml(line)}</span>
+          <b>${escapeHtml(label)} · ${escapeHtml(share)}%</b>
+          <small>O ${escapeHtml(formatNumber(over.avg ?? 0))}% σ${escapeHtml(formatNumber(over.std ?? 0))} · U ${escapeHtml(formatNumber(under.avg ?? 0))}% σ${escapeHtml(formatNumber(under.std ?? 0))}</small>
+        </div>`;
+      }).join("")}
+    </div>
+  </section>`;
+}
+
+function allModelsDetailsHtml(models) {
+  const items = models || [];
+  if (!items.length) return "";
+  return `<details class="models-drawer">
+    <summary>Todos los modelos (${escapeHtml(items.length)})</summary>
+    <div class="model-consensus-list">
+      ${items.map((model) => modelConsensusRowHtml(model)).join("")}
+    </div>
+  </details>`;
 }
 
 function reportTotalsConsensusHtml(consensus) {
@@ -1405,9 +1493,11 @@ function modelConsensusRowHtml(model) {
   const decision = model.decision || {};
   const expected = model.expected_goals || {};
   const warnings = model["warnings"] || [];
+  const probs = model.probabilities || {};
+  const confidence = probs[decision.outcome] ?? "";
   return `<div class="model-consensus-row ${escapeAttr(model.fallback ? "fallback" : "")}">
     <strong>${escapeHtml(model.model_label || model.model_key || "")}</strong>
-    <b>${escapeHtml(decision.label || "-")}</b>
+    <b>${escapeHtml(decision.label || "-")}${confidence !== "" ? ` · ${escapeHtml(formatNumber(confidence))}%` : ""}</b>
     <span>${escapeHtml(model.top_score || "-")}</span>
     <span>λ ${escapeHtml(expected.home ?? "-")} / ${escapeHtml(expected.away ?? "-")}</span>
     <span>${escapeHtml(model.consensus_eligible ? "Cuenta" : "Excluido")}${warnings.length ? ` · ${escapeHtml(warnings[0])}` : ""}</span>

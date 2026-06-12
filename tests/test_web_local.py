@@ -340,6 +340,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "renderHeroHardware" in app_source
     assert "hardwareChip(\"CUDA\"" in app_source
     assert "preferredTrainingDevice" in app_source
+    assert "reportTopModelsHtml" in app_source
+    assert "reportConsensusScoreHtml" in app_source
+    assert "Todos los modelos" in app_source
     assert "setInterval(pollWorldcupJobs, 1000)" not in app_source
     assert "setTimeout(pollWorldcupJobs" in app_source
     assert "jobPollingInFlight" in app_source
