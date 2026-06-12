@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260612-v4">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260612-v5">
 </head>
 <body>
   <header class="topbar">
@@ -226,7 +226,7 @@
           <div class="control-grid compact-controls simulation-grid">
             <label>N próximos<input id="sim-match-limit" type="number" min="1" max="72" step="1" value="8"></label>
             <label>Grupo<select id="sim-group-filter"></select></label>
-            <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
+            <label>N simulaciones<input id="sim-iterations" type="number" min="100" step="1000" value="5000"></label>
             <label>Seed<input id="sim-seed" type="number" value="2026"></label>
             <label>Partidos recientes<input id="sim-poisson-recent-matches" type="number" min="3" max="50" step="1" value="15"></label>
             <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
@@ -271,6 +271,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260612-v4"></script>
+  <script src="/static/mundial.js?v=20260612-v5"></script>
 </body>
 </html>

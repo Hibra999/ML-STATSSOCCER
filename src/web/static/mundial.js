@@ -1427,8 +1427,9 @@ async function runMatchMonteCarlo() {
   const button = document.getElementById("simulate-poisson-btn");
   const limit = Number(document.getElementById("sim-match-limit").value || 8);
   const group = document.getElementById("sim-group-filter").value || "";
+  const iterations = Number(document.getElementById("sim-iterations").value || 5000);
   document.getElementById("simulation-summary").textContent =
-    `Simulando ${limit} partido${limit === 1 ? "" : "s"} con Monte Carlo Poisson...`;
+    `Simulando ${limit} partido${limit === 1 ? "" : "s"} con ${formatInteger(iterations)} simulaciones Monte Carlo...`;
   if (button) button.disabled = true;
   try {
     const result = await api("/api/mundial/monte-carlo-matches", jsonOptions({
@@ -1449,7 +1450,7 @@ async function runMatchMonteCarlo() {
 function renderMatchMonteCarlo(result) {
   const summary = result.summary || {};
   document.getElementById("simulation-summary").textContent =
-    `${summary.method || "Monte Carlo Poisson por partido"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.iterations || 0} iteraciones - seed ${summary.seed || ""} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()}`;
+    `${summary.method || "Monte Carlo Poisson por partido"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${formatInteger(summary.iterations || 0)} simulaciones - seed ${summary.seed || ""} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()}`;
   document.getElementById("match-simulation-grid").innerHTML = (result.predictions || [])
     .map((prediction) => monteCarloMatchCardHtml(prediction))
     .join("") || loadingHtml("Sin fixtures para simular");
@@ -1484,7 +1485,7 @@ function monteCarloMatchCardHtml(prediction) {
       <div class="upcoming-team away">${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
     <div class="prediction-pick">
-      <span>Monte Carlo favorito</span>
+      <span>Monte Carlo · ${escapeHtml(formatInteger(prediction.iterations || 0))} simulaciones</span>
       <strong>${escapeHtml(favorite.label)} · ${escapeHtml(favorite.team)}</strong>
     </div>
     <div class="outcome-list">
@@ -1509,7 +1510,7 @@ function monteCarloMatchCardHtml(prediction) {
     <div class="source-strip">
       <span>λ ${escapeHtml(expected.home ?? "-")} / ${escapeHtml(expected.away ?? "-")}</span>
       <span>Media sim ${escapeHtml(simulated.home ?? "-")} / ${escapeHtml(simulated.away ?? "-")}</span>
-      <span>${escapeHtml(prediction.iterations || 0)} iteraciones</span>
+      <span>N=${escapeHtml(formatInteger(prediction.iterations || 0))}</span>
       <span>${escapeHtml(prediction.source || "Poisson")}</span>
     </div>
     ${contextualPoissonHtml(prediction.contextual_poisson || {}, fixture)}
@@ -1779,6 +1780,12 @@ function formatNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return value;
   return number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatInteger(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return value;
+  return Math.round(number).toLocaleString("es-MX");
 }
 
 function predictionCard(label, value) {
