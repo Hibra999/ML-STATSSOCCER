@@ -67,7 +67,7 @@ def simulate_worldcup(
     group_specs = _group_match_specs(group_matches, group_lookup, group_infos, team_index, model, skip_keys=confirmed_keys)
     group_lambda_home = np.asarray([spec[3] for spec in group_specs], dtype=float)
     group_lambda_away = np.asarray([spec[4] for spec in group_specs], dtype=float)
-    pair_cache: Dict[Tuple[int, int], Tuple[float, float, float]] = {}
+    pair_cache: Dict[Tuple[Any, ...], Tuple[float, float, float]] = {}
     report_every = max(1, iterations // 100)
     _emit_progress(progress_callback, "simulation", 0, iterations, "Monte Carlo en ejecucion")
 
@@ -90,7 +90,7 @@ def simulate_worldcup(
         if group_specs:
             sampled_home = rng.poisson(group_lambda_home)
             sampled_away = rng.poisson(group_lambda_away)
-            for spec_index, (group_idx, pos1, pos2, _, _) in enumerate(group_specs):
+            for spec_index, (group_idx, pos1, pos2, _, _, _) in enumerate(group_specs):
                 goals1 = int(sampled_home[spec_index])
                 goals2 = int(sampled_away[spec_index])
                 goals_for[group_idx][pos1] += goals1
@@ -140,7 +140,7 @@ def simulate_worldcup(
             team2_idx = _resolve_slot_index(str(match.get("team2", "")), slots, winners, losers, available_thirds, team_index, ratings)
             if team1_idx < 0 or team2_idx < 0 or team1_idx == team2_idx:
                 continue
-            winner_idx, loser_idx = _sample_knockout_winner_index(team1_idx, team2_idx, teams, model, rng, pair_cache)
+            winner_idx, loser_idx = _sample_knockout_winner_index(team1_idx, team2_idx, teams, model, rng, pair_cache, match)
             number = int(match.get("num", len(winners) + 73))
             winners[number] = winner_idx
             losers[number] = loser_idx
@@ -203,8 +203,8 @@ def _group_match_specs(
         team_index: Dict[str, int],
         model: WorldCupModel,
         skip_keys: set[Tuple[str, str, str]] | None = None,
-) -> List[Tuple[int, int, int, float, float]]:
-    specs: List[Tuple[int, int, int, float, float]] = []
+) -> List[Tuple[int, int, int, float, float, Dict[str, Any]]]:
+    specs: List[Tuple[int, int, int, float, float, Dict[str, Any]]] = []
     skip_keys = skip_keys or set()
     for match in group_matches:
         group = str(match.get("group") or "")
@@ -220,9 +220,23 @@ def _group_match_specs(
         positions = group_infos[group_idx]["positions"]
         if team1_idx not in positions or team2_idx not in positions:
             continue
-        lambda1, lambda2 = model.expected_goals(team1, team2)
-        specs.append((int(group_idx), int(positions[team1_idx]), int(positions[team2_idx]), float(lambda1), float(lambda2)))
+        lambda1, lambda2 = _model_expected_goals(model, team1, team2, match)
+        specs.append((int(group_idx), int(positions[team1_idx]), int(positions[team2_idx]), float(lambda1), float(lambda2), match))
     return specs
+
+
+def _model_expected_goals(model: WorldCupModel, team1: str, team2: str, match: Dict[str, Any] | None = None) -> Tuple[float, float]:
+    method = getattr(model, "expected_goals_for_match", None)
+    if callable(method):
+        return method(team1, team2, match=match)
+    return model.expected_goals(team1, team2)
+
+
+def _model_match_probabilities(model: WorldCupModel, team1: str, team2: str, match: Dict[str, Any] | None = None) -> Dict[str, float]:
+    method = getattr(model, "match_probabilities_for_match", None)
+    if callable(method):
+        return method(team1, team2, match=match)
+    return model.match_probabilities(team1, team2)
 
 
 def _confirmed_group_result_specs(
@@ -326,13 +340,14 @@ def _sample_knockout_winner_index(
         teams: List[str],
         model: WorldCupModel,
         rng: np.random.Generator,
-        pair_cache: Dict[Tuple[int, int], Tuple[float, float, float]],
+        pair_cache: Dict[Tuple[Any, ...], Tuple[float, float, float]],
+        match: Dict[str, Any] | None = None,
 ) -> Tuple[int, int]:
-    cache_key = (int(team1_idx), int(team2_idx))
+    cache_key = (int(team1_idx), int(team2_idx), str((match or {}).get("date", "")))
     if cache_key not in pair_cache:
         team1 = teams[team1_idx]
         team2 = teams[team2_idx]
-        probabilities = model.match_probabilities(team1, team2)
+        probabilities = _model_match_probabilities(model, team1, team2, match)
         lambda1 = float(probabilities.get("lambda1", 1.0))
         lambda2 = float(probabilities.get("lambda2", 1.0))
         win_share = float(probabilities.get("home", 0.0)) / max(
@@ -357,7 +372,7 @@ def match_probabilities_dataframe(matches: List[Dict[str, Any]], model: WorldCup
     for match in matches:
         team1 = str(match.get("team1", ""))
         team2 = str(match.get("team2", ""))
-        probabilities = model.match_probabilities(team1, team2)
+        probabilities = _model_match_probabilities(model, team1, team2, match)
         rows.append({
             "Fecha": match.get("date", ""),
             "Hora": match.get("time", ""),

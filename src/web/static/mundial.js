@@ -34,6 +34,7 @@ const goalMarketLines = [
 ];
 
 const trainingMarketOrder = ["result", "over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"];
+const poissonRecentInputIds = ["sim-poisson-recent-matches", "upcoming-poisson-recent-matches"];
 
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
@@ -67,6 +68,10 @@ function bindEvents() {
   document.getElementById("worldcup-model-id").addEventListener("input", (event) => { event.target.dataset.autofilled = "false"; });
   document.getElementById("worldcup-tuning-enabled").addEventListener("change", applyTuningLocks);
   document.getElementById("worldcup-tune-params").addEventListener("input", applyTuningLocks);
+  poissonRecentInputIds.forEach((id) => {
+    const input = document.getElementById(id);
+    if (input) input.addEventListener("change", () => syncPoissonRecentInputs(input));
+  });
 }
 
 async function api(path, options = {}) {
@@ -148,6 +153,8 @@ function applyDefaultConfig(config) {
     "sim-host-advantage": config.host_advantage,
     "sim-max-goals": config.max_goals,
     "sim-ml-weight": config.ml_weight,
+    "sim-poisson-recent-matches": config.poisson_recent_matches,
+    "upcoming-poisson-recent-matches": config.poisson_recent_matches,
   };
   Object.entries(pairs).forEach(([id, value]) => {
     const input = document.getElementById(id);
@@ -1224,7 +1231,7 @@ async function runUpcomingPredictions() {
   const limit = Number(document.getElementById("upcoming-predict-limit").value || 8);
   const group = document.getElementById("upcoming-group-filter").value || "";
   const modelId = document.getElementById("upcoming-model-select").value || selectedModelId();
-  document.getElementById("upcoming-summary").textContent = "Calculando próximos partidos...";
+  document.getElementById("upcoming-summary").textContent = `Calculando próximos partidos con Poisson ultimos ${currentPoissonRecentMatches()}...`;
   try {
     const result = await api("/api/mundial/predict-upcoming", jsonOptions({ ...simulationPayload(), model_id: modelId, limit, group }));
     renderUpcomingPredictions(result);
@@ -1236,7 +1243,9 @@ async function runUpcomingPredictions() {
 
 function renderUpcomingPredictions(result) {
   const summary = result.summary || {};
-  document.getElementById("upcoming-summary").textContent = `${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - ML ${summary.use_ml_model ? "activo" : "off"}`;
+  const recentLimit = summary.poisson_recent_matches || currentPoissonRecentMatches();
+  document.getElementById("upcoming-summary").textContent =
+    `${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - Poisson ultimos ${recentLimit} - ML ${summary.use_ml_model ? "activo" : "off"}`;
   document.getElementById("upcoming-predictions").innerHTML = (result.predictions || []).map((prediction) => {
     const fixture = prediction.fixture || {};
     const probs = prediction.probabilities || {};
@@ -1316,13 +1325,15 @@ function contextualPoissonHtml(contextual, fixture) {
   const probs = context.probabilities || {};
   const topScores = context.top_scores || [];
   const overUnder = context.over_under || {};
+  const recentLimit = Number(context.match_limit || currentPoissonRecentMatches() || 15);
+  const recentLabel = `Poisson ultimos ${recentLimit}`;
   const hasMatrix = Boolean(context.available || context.matrix_available || topScores.length || ((context.heatmap || {}).cells || []).length);
   if (!hasMatrix) {
     return `<section class="context-poisson unavailable">
-      <header><strong>Poisson ultimos 15</strong><small>${escapeHtml(context.reason || "all_matches.csv no disponible")}</small></header>
+      <header><strong>${escapeHtml(recentLabel)}</strong><small>${escapeHtml(context.reason || "all_matches.csv no disponible")}</small></header>
     </section>`;
   }
-  const title = context.available ? "Poisson ultimos 15" : "Poisson base";
+  const title = context.available ? recentLabel : "Poisson base";
   const lambdaText = `λ ${context.context_lambda_home ?? "-"} / ${context.context_lambda_away ?? "-"}`;
   const detail = context.available ? lambdaText : `${context.reason || "recent15 no disponible"} · ${lambdaText}`;
   return `<section class="context-poisson">
@@ -1345,7 +1356,7 @@ function contextualPoissonHtml(contextual, fixture) {
     </div>
     ${scoreHeatmapHtml(context)}
     ${context.available ? `<details class="recent15-drawer">
-      <summary>Ultimos 15 partidos</summary>
+      <summary>Ultimos ${escapeHtml(recentLimit)} partidos</summary>
       <div class="recent15-columns">
         ${recentMatchesMiniTable((context.recent_matches || {}).home || [], fixtureData.home || "Local")}
         ${recentMatchesMiniTable((context.recent_matches || {}).away || [], fixtureData.away || "Visitante")}
@@ -1721,6 +1732,7 @@ function simulationPayload(overrides = {}) {
     model_id: selectedModelId(),
     iterations: Number(document.getElementById("sim-iterations").value || 5000),
     seed: Number(document.getElementById("sim-seed").value || 2026),
+    poisson_recent_matches: currentPoissonRecentMatches(),
     history_weight: Number(document.getElementById("sim-history-weight").value || 1),
     recency_weight: Number(document.getElementById("sim-recency-weight").value || 0),
     host_advantage: Number(document.getElementById("sim-host-advantage").value || 45),
@@ -1731,14 +1743,32 @@ function simulationPayload(overrides = {}) {
   };
 }
 
+function currentPoissonRecentMatches() {
+  const inputs = poissonRecentInputIds.map((id) => document.getElementById(id)).filter(Boolean);
+  const input = inputs.find((node) => node.offsetParent !== null) || inputs[0];
+  const value = Number(input && input.value ? input.value : 15);
+  if (!Number.isFinite(value)) return 15;
+  return Math.min(50, Math.max(3, Math.round(value)));
+}
+
+function syncPoissonRecentInputs(source) {
+  const value = Math.min(50, Math.max(3, Math.round(Number(source.value || 15) || 15)));
+  source.value = value;
+  poissonRecentInputIds.forEach((id) => {
+    const input = document.getElementById(id);
+    if (input && input !== source) input.value = value;
+  });
+}
+
 function renderSimulation(result) {
   state.lastSimulation = result;
   const summary = result.summary || {};
   const config = summary.config || {};
   const mlState = config.use_ml_model ? "ML híbrido activo" : "ML híbrido off";
   const layers = (summary.hybrid_layers || []).join(" + ");
+  const recentLimit = config.poisson_recent_matches || currentPoissonRecentMatches();
   document.getElementById("simulation-summary").textContent =
-    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${mlState} - ${layers}`;
+    `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - Poisson ultimos ${recentLimit} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${mlState} - ${layers}`;
   const rows = (result.advancement && result.advancement.rows) || [];
   const topChampions = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 8);
   document.getElementById("champion-strip").innerHTML = topChampions.map((row) => {

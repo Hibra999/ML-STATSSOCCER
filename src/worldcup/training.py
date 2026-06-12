@@ -1184,6 +1184,7 @@ def predict_match_payload(
         use_ml_model: bool = True,
         ml_weight: float = 0.5,
         model_id: Optional[str] = None,
+        poisson_recent_matches: int = 15,
 ) -> Dict[str, Any]:
     fixture = select_prediction_fixture(tournament, fixture_id=fixture_id, home=home, away=away)
     home_team = str(fixture.get("Equipo 1", home or ""))
@@ -1254,12 +1255,18 @@ def predict_match_payload(
             key: round(value * 100.0, 2)
             for key, value in (ml_outputs.get("goal_distribution_ml") or {}).items()
         }
+    try:
+        recent_match_limit = int(poisson_recent_matches or 15)
+    except (TypeError, ValueError):
+        recent_match_limit = 15
+    recent_match_limit = max(3, min(50, recent_match_limit))
     return_payload["contextual_poisson"] = contextual_poisson_for_match(
         home_team,
         away_team,
         base_model=base_model,
         before_date=fixture.get("Fecha", HISTORY_REFERENCE_DATE),
         max_goals=base_model.max_goals,
+        limit=recent_match_limit,
     )
     return return_payload
 

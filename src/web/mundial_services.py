@@ -23,7 +23,12 @@ from src.worldcup import (
 )
 from src.worldcup.model import TOTAL_GOAL_LINES, total_line_suffix
 from src.worldcup.data import CACHE_ROOT, fixture_results_status, group_letter, groups_from_tournament
-from src.worldcup.international_provider import download_international_results, international_results_status
+from src.worldcup.international_provider import (
+    contextual_poisson_for_match,
+    download_international_results,
+    international_results_status,
+    load_international_matches,
+)
 from src.worldcup.lanus_provider import (
     LINEUPS_ROOT,
     PLAYER_STATS_ROOT,
@@ -74,6 +79,7 @@ DEFAULT_CONFIG = {
     "recency_weight": 0.35,
     "host_advantage": 45.0,
     "max_goals": 10,
+    "poisson_recent_matches": 15,
     "refresh": False,
 }
 LAST_SIMULATION_RESULT: Dict[str, Any] = {}
@@ -183,6 +189,89 @@ class BlendedWorldCupModel:
         lambda1 = float(np.clip(total_goals * home_share, 0.2, 4.8))
         lambda2 = float(np.clip(total_goals * (1.0 - home_share), 0.2, 4.8))
         return lambda1, lambda2, {"lambda1": lambda1, "lambda2": lambda2}
+
+
+class RecentPoissonWorldCupModel:
+    def __init__(self, base_model: WorldCupModel, recent_match_limit: int = 15):
+        self.base_model = base_model
+        self.recent_match_limit = int(min(50, max(3, int(recent_match_limit or 15))))
+        self.max_goals = int(getattr(base_model, "max_goals", DEFAULT_CONFIG["max_goals"]))
+        self.matches = load_international_matches(required=False)
+
+    def profile(self, team: str):
+        return self.base_model.profile(team)
+
+    def adjusted(self, rating_adjustments: Dict[str, float]):
+        return RecentPoissonWorldCupModel(
+            base_model=self.base_model.adjusted(rating_adjustments),
+            recent_match_limit=self.recent_match_limit,
+        )
+
+    def expected_goals(self, team1: str, team2: str):
+        return self.expected_goals_for_match(team1, team2, match=None)
+
+    def expected_goals_for_match(self, team1: str, team2: str, match: Dict[str, Any] | None = None):
+        probabilities = self.match_probabilities_for_match(team1, team2, match=match)
+        return float(probabilities.get("lambda1", 1.0)), float(probabilities.get("lambda2", 1.0))
+
+    def match_probabilities(self, team1: str, team2: str, max_goals: int | None = None) -> Dict[str, float]:
+        return self.match_probabilities_for_match(team1, team2, match=None, max_goals=max_goals)
+
+    def match_probabilities_for_match(
+            self,
+            team1: str,
+            team2: str,
+            match: Dict[str, Any] | None = None,
+            max_goals: int | None = None,
+    ) -> Dict[str, float]:
+        limit_goals = int(max_goals if max_goals is not None else self.max_goals)
+        context = contextual_poisson_for_match(
+            team1,
+            team2,
+            base_model=self.base_model,
+            before_date=_match_before_date(match),
+            max_goals=limit_goals,
+            matches=self.matches,
+            limit=self.recent_match_limit,
+        )
+        if context.get("matrix_available"):
+            lambda1 = float(context.get("context_lambda_home") or (context.get("lambdas") or {}).get("home") or 0.0)
+            lambda2 = float(context.get("context_lambda_away") or (context.get("lambdas") or {}).get("away") or 0.0)
+            if lambda1 > 0 and lambda2 > 0:
+                probabilities = poisson_probabilities_from_lambdas(lambda1, lambda2, max_goals=limit_goals)
+                probabilities["recent_match_limit"] = self.recent_match_limit
+                probabilities["recent_matrix_available"] = True
+                return probabilities
+        probabilities = self.base_model.match_probabilities(team1, team2, max_goals=limit_goals)
+        probabilities["recent_match_limit"] = self.recent_match_limit
+        probabilities["recent_matrix_available"] = False
+        return probabilities
+
+    def sample_score(self, team1: str, team2: str, rng: np.random.Generator):
+        lambda1, lambda2 = self.expected_goals(team1, team2)
+        return int(rng.poisson(lambda1)), int(rng.poisson(lambda2))
+
+    def sample_knockout_winner(self, team1: str, team2: str, rng: np.random.Generator):
+        probabilities = self.match_probabilities(team1, team2)
+        goals1 = int(rng.poisson(float(probabilities.get("lambda1", 1.0))))
+        goals2 = int(rng.poisson(float(probabilities.get("lambda2", 1.0))))
+        if goals1 > goals2:
+            return team1, team2, goals1, goals2
+        if goals2 > goals1:
+            return team2, team1, goals1, goals2
+        win_share = float(probabilities.get("home", 0.0)) / max(
+            float(probabilities.get("home", 0.0)) + float(probabilities.get("away", 0.0)),
+            1e-9,
+        )
+        if rng.random() <= win_share:
+            return team1, team2, goals1, goals2
+        return team2, team1, goals1, goals2
+
+
+def _match_before_date(match: Dict[str, Any] | None) -> Any:
+    if not isinstance(match, dict):
+        return None
+    return match.get("date") or match.get("Fecha")
 
 
 def poisson_probabilities_from_lambdas(lambda1: float, lambda2: float, max_goals: int) -> Dict[str, float]:
@@ -664,6 +753,7 @@ def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         use_ml_model=bool(config["use_ml_model"]),
         ml_weight=float(config["ml_weight"]),
         model_id=config["model_id"],
+        poisson_recent_matches=int(config["poisson_recent_matches"]),
     )
     result["fixture_source"] = fixture_source
     result["history_source"] = history_source
@@ -690,6 +780,7 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
             use_ml_model=bool(config["use_ml_model"]),
             ml_weight=float(config["ml_weight"]),
             model_id=config["model_id"],
+            poisson_recent_matches=int(config["poisson_recent_matches"]),
         )
         predictions.append(result)
         rows.append(upcoming_prediction_row(result))
@@ -704,6 +795,7 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "history_source": history_source,
             "use_ml_model": config["use_ml_model"],
             "model_id": config["model_id"],
+            "poisson_recent_matches": config["poisson_recent_matches"],
             "active_model": read_model_metadata(model_id=config["model_id"] or None),
         },
     }
@@ -736,6 +828,7 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
     sources = result.get("market_sources", {})
     contextual = result.get("contextual_poisson", {}) or {}
     context_top = (contextual.get("top_scores") or [{}])[0] if contextual.get("top_scores") else {}
+    recent_limit = int(contextual.get("match_limit") or 15)
     return {
         "No.": fixture.get("id", ""),
         "Fecha": fixture.get("date", ""),
@@ -754,10 +847,10 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
         "Under 3.5 %": probs.get("under35", ""),
         "Prediccion": result.get("prediction", ""),
         "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
-        "Poisson 15": "Si" if contextual.get("available") else "Base" if contextual.get("matrix_available") else "No",
-        "Lambda 15 Local": contextual.get("context_lambda_home", ""),
-        "Lambda 15 Visita": contextual.get("context_lambda_away", ""),
-        "Top score 15": context_top.get("score", ""),
+        f"Poisson {recent_limit}": "Si" if contextual.get("available") else "Base" if contextual.get("matrix_available") else "No",
+        f"Lambda {recent_limit} Local": contextual.get("context_lambda_home", ""),
+        f"Lambda {recent_limit} Visita": contextual.get("context_lambda_away", ""),
+        f"Top score {recent_limit}": context_top.get("score", ""),
         "Fuente 1X2": (sources.get("result") or {}).get("source", ""),
         "Fuente O/U": (sources.get("over_under_25") or {}).get("source", ""),
         "Fuente U/O 0.5": (sources.get("over_under_05") or {}).get("source", ""),
@@ -785,6 +878,9 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     hybrid_layers = ["Poisson base"]
     if config["include_confirmed_results"]:
         hybrid_layers.append("resultados confirmados")
+    if config["mode"] == "poisson_live":
+        model = RecentPoissonWorldCupModel(model, recent_match_limit=int(config["poisson_recent_matches"]))
+        hybrid_layers.append(f"Poisson ultimos {config['poisson_recent_matches']}")
     if config["use_ml_model"] and active_model.get("trained"):
         model = BlendedWorldCupModel(model, model_id=config["model_id"], ml_weight=float(config["ml_weight"]))
         hybrid_layers.extend(["ML blend 1X2", "ML ajuste lambdas"])
@@ -811,7 +907,15 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
             "active_model": active_model,
             "hybrid_layers": hybrid_layers,
             "confirmed_results": len(confirmed_results),
-            "result_policy": "Poisson live + resultados confirmados" if config["include_confirmed_results"] else "Poisson prospectivo sin resultados 2026",
+            "result_policy": (
+                f"Poisson live ultimos {config['poisson_recent_matches']} + resultados confirmados"
+                if config["mode"] == "poisson_live" and config["include_confirmed_results"]
+                else f"Poisson live ultimos {config['poisson_recent_matches']} sin resultados 2026"
+                if config["mode"] == "poisson_live"
+                else "Poisson base + resultados confirmados"
+                if config["include_confirmed_results"]
+                else "Poisson prospectivo base sin resultados 2026"
+            ),
             "anti_leakage": [
                 "Historico filtrado antes del 2026-06-11.",
                 "Modelo ML entrenado/evaluado con partidos internacionales no Mundial y sin partidos 2026.",
@@ -920,6 +1024,7 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "recency_weight": _clamp_float(payload.get("recency_weight", DEFAULT_CONFIG["recency_weight"]), 0.0, 1.0),
         "host_advantage": _clamp_float(payload.get("host_advantage", DEFAULT_CONFIG["host_advantage"]), 0.0, 120.0),
         "max_goals": int(_clamp_int(payload.get("max_goals", DEFAULT_CONFIG["max_goals"]), 6, 14)),
+        "poisson_recent_matches": int(_clamp_int(payload.get("poisson_recent_matches", DEFAULT_CONFIG["poisson_recent_matches"]), 3, 50)),
         "refresh": bool(payload.get("refresh", DEFAULT_CONFIG["refresh"])),
         "model_id": str(payload.get("model_id") or "").strip(),
         "include_confirmed_results": bool(payload.get("include_confirmed_results", mode == "poisson_live")),

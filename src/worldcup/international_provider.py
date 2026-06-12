@@ -560,14 +560,14 @@ def contextual_poisson_for_match(
     matches = load_international_matches(required=False) if matches is None else matches
     source_path = str(getattr(matches, "attrs", {}).get("source_path") or INTERNATIONAL_MATCHES_FILE)
     if matches is None or matches.empty:
-        return unavailable_context("all_matches.csv no disponible", source_path, home, away, before_date, base_model=base_model, max_goals=max_goals)
+        return unavailable_context("all_matches.csv no disponible", source_path, home, away, before_date, base_model=base_model, max_goals=max_goals, limit=limit)
 
     home_context = recent15_team_context(home, matches, before_date=before_date, limit=limit, base_model=base_model)
     away_context = recent15_team_context(away, matches, before_date=before_date, limit=limit, base_model=base_model)
     home_features = home_context["features"]
     away_features = away_context["features"]
     if not home_context["matches"] and not away_context["matches"]:
-        return unavailable_context("Sin partidos recientes para las selecciones solicitadas", source_path, home, away, before_date, base_model=base_model, max_goals=max_goals)
+        return unavailable_context("Sin partidos recientes para las selecciones solicitadas", source_path, home, away, before_date, base_model=base_model, max_goals=max_goals, limit=limit)
 
     base_lambda_home, base_lambda_away = base_lambdas(base_model, home, away)
     home_attack = positive_or_default(home_features.get("recent15_adjusted_gf_avg"), base_lambda_home)
@@ -808,6 +808,7 @@ def unavailable_context(
         before_date: Optional[Any],
         base_model: Optional[Any] = None,
         max_goals: int = 10,
+        limit: int = RECENT_MATCH_LIMIT,
 ) -> Dict[str, Any]:
     lambda_home, lambda_away = base_lambdas(base_model, home, away)
     matrix_payload = poisson_matrix_payload(lambda_home, lambda_away, max_goals=max_goals)
@@ -820,7 +821,7 @@ def unavailable_context(
         "dataset_slug": INTERNATIONAL_DATASET_SLUG,
         "source_path": source_path,
         "before_date": date_to_string(before_date),
-        "match_limit": int(RECENT_MATCH_LIMIT),
+        "match_limit": int(limit),
         **matrix_payload,
         "home_recent": {"team": home, "canonical_team": canonical_team_name(home), "features": recent15_summary_features(home, []), "matches": []},
         "away_recent": {"team": away, "canonical_team": canonical_team_name(away), "features": recent15_summary_features(away, []), "matches": []},
