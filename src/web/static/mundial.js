@@ -1261,7 +1261,13 @@ async function runUpcomingPredictions() {
   const group = document.getElementById("upcoming-group-filter").value || "";
   const modelId = document.getElementById("upcoming-model-select").value || selectedModelId();
   const pipelineMode = document.getElementById("upcoming-pipeline-mode").value || "default_ai_poisson";
-  document.getElementById("upcoming-summary").textContent = `Generando reporte con Poisson ultimos ${currentPoissonRecentMatches()}...`;
+  const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
+  const calculationLabel = pipelineMode === "poisson_sota" && sotaCalculationMode === "monte_carlo"
+    ? `SOTA Monte Carlo N=${formatInteger(currentMonteCarloSimulations())}`
+    : pipelineMode === "poisson_sota"
+      ? "SOTA rápido: matriz exacta"
+      : "Default IA + Poisson";
+  document.getElementById("upcoming-summary").textContent = `Generando ${calculationLabel} con Poisson ultimos ${currentPoissonRecentMatches()}...`;
   try {
     const job = await api("/api/mundial/predict-upcoming-report", jsonOptions({
       ...simulationPayload({
@@ -1274,6 +1280,7 @@ async function runUpcomingPredictions() {
       group,
       bayes_profile: (document.getElementById("upcoming-bayes-profile") || {}).value || "deep",
       sota_device: (document.getElementById("upcoming-sota-device") || {}).value || "auto",
+      sota_calculation_mode: sotaCalculationMode,
     }));
     trackWorldcupJob(job, "upcoming-report");
   } catch (error) {
@@ -1299,12 +1306,14 @@ function renderUpcomingReport(report) {
   const fixtures = report.fixture_reports || [];
   const hardware = summary.hardware || {};
   const warnings = summary.warnings || [];
+  const calculationLabel = summary.sota_calculation_label || (summary.pipeline_mode === "poisson_sota" ? "SOTA rápido: matriz exacta, sin simulación" : "");
   document.getElementById("upcoming-summary").textContent =
-    `${summary.pipeline_label || "Reporte"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()} - ${summary.report_id || report.report_id || ""}`;
+    `${summary.pipeline_label || "Reporte"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()}${calculationLabel ? ` - ${calculationLabel}` : ""} - ${summary.report_id || report.report_id || ""}`;
   document.getElementById("upcoming-predictions").innerHTML = "";
   document.getElementById("upcoming-report").innerHTML = `
     <div class="report-summary-grid">
       ${reportSummaryCard("Pipeline", summary.pipeline_label || summary.pipeline_mode || "-")}
+      ${calculationLabel ? reportSummaryCard("Cálculo", calculationLabel) : ""}
       ${reportSummaryCard("Fuerza global", globalConsensusStrength(fixtures))}
       ${reportSummaryCard("Partidos", `${summary.returned || 0}/${summary.requested || 0}`)}
       ${reportSummaryCard("Hardware", `${hardware.actual_device || "cpu"} · ${hardware.requested_device || "auto"}`)}
@@ -1353,14 +1362,15 @@ function clientReportHtml(fixtures) {
 
 function clientFixtureCardHtml(report) {
   const fixture = report.fixture || {};
-  const consensus = report.consensus || {};
-  const stats = report.model_statistics || {};
-  const distribution = report.consensus_score_distribution || {};
+  const primary = clientPrimaryReportPayload(report);
+  const consensus = primary.consensus || {};
+  const stats = primary.stats || {};
+  const distribution = primary.distribution || {};
   const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
   const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
   const pickTeam = consensus.outcome === "draw" ? "Empate" : consensus.outcome === "home" ? fixture.home : consensus.outcome === "away" ? fixture.away : "-";
   const pickLabel = consensus.outcome_label || "-";
-  const pickConfidence = clientOutcomeConfidence(stats, consensus);
+  const pickConfidence = Number.isFinite(Number(primary.pickConfidence)) ? Number(primary.pickConfidence) : clientOutcomeConfidence(stats, consensus);
   const confidenceClass = pickConfidence >= 70 ? "high" : pickConfidence >= 55 ? "medium" : "low";
   return `<article class="client-fixture-card confidence-${escapeAttr(confidenceClass)}">
     <header>
@@ -1375,12 +1385,60 @@ function clientFixtureCardHtml(report) {
     <div class="client-main-pick">
       <span>Pronóstico principal</span>
       <strong>${escapeHtml(pickLabel)} · ${escapeHtml(pickTeam || "-")}</strong>
-      <small>${escapeHtml(formatNumber(pickConfidence))}% confianza · ${escapeHtml(consensus.strength || "Baja")}</small>
+      <small>${escapeHtml(formatNumber(pickConfidence))}% confianza · ${escapeHtml(primary.label || consensus.strength || "Baja")}</small>
     </div>
-    ${clientOutcomeChartHtml(stats, consensus, fixture)}
-    ${clientBetCardsHtml(report)}
-    ${clientScorePanelHtml(distribution)}
+    ${clientOutcomeChartHtml(stats, consensus, fixture, primary)}
+    ${clientBetCardsHtml(report, primary)}
+    ${clientScorePanelHtml(distribution, primary)}
   </article>`;
+}
+
+function clientPrimaryReportPayload(report) {
+  const mc = (report && report.monte_carlo_consensus) || {};
+  if (mc.available) {
+    const probabilities = mc.probabilities || {};
+    const outcome = mc.outcome || strongestOutcomeFromProbabilities(probabilities);
+    const outcomeProbability = Number(mc.outcome_probability ?? probabilities[outcome] ?? 0);
+    return {
+      mode: "monte_carlo",
+      label: `SOTA Monte Carlo: N=${formatInteger(mc.iterations || 0)}`,
+      probabilities,
+      distribution: mc,
+      stats: report.model_statistics || {},
+      pickConfidence: outcomeProbability,
+      consensus: {
+        ...(report.consensus || {}),
+        outcome,
+        outcome_label: mc.outcome_label || outcomeLabel(outcome),
+        outcome_share: outcomeProbability / 100,
+        strength: "Monte Carlo",
+        totals: mc.totals || {},
+      },
+    };
+  }
+  const consensus = (report && report.consensus) || {};
+  return {
+    mode: "exact",
+    label: (report && report.sota_calculation_label) || "Matriz exacta, sin simulación",
+    probabilities: {},
+    distribution: (report && report.consensus_score_distribution) || {},
+    stats: (report && report.model_statistics) || {},
+    consensus,
+    pickConfidence: null,
+  };
+}
+
+function strongestOutcomeFromProbabilities(probabilities) {
+  const probs = probabilities || {};
+  return [
+    ["home", Number(probs.home || 0)],
+    ["draw", Number(probs.draw || 0)],
+    ["away", Number(probs.away || 0)],
+  ].sort((a, b) => b[1] - a[1])[0][0];
+}
+
+function outcomeLabel(outcome) {
+  return { home: "1", draw: "X", away: "2" }[outcome] || "";
 }
 
 function clientOutcomeConfidence(stats, consensus) {
@@ -1390,10 +1448,11 @@ function clientOutcomeConfidence(stats, consensus) {
   return Number((consensus || {}).outcome_share || 0) * 100;
 }
 
-function clientOutcomeChartHtml(stats, consensus, fixture) {
+function clientOutcomeChartHtml(stats, consensus, fixture, primary) {
   const outcomeStats = (stats && stats.outcomes) || {};
   const outcomeCounts = (consensus && consensus.outcome_counts) || {};
   const eligible = Math.max(Number((stats && stats.model_count) || (consensus && consensus.eligible_models) || 0), 1);
+  const directProbabilities = (primary && primary.probabilities) || {};
   const rows = [
     { key: "home", label: "1", team: fixture.home || "Local" },
     { key: "draw", label: "X", team: "Empate" },
@@ -1402,7 +1461,10 @@ function clientOutcomeChartHtml(stats, consensus, fixture) {
   return `<div class="client-outcome-chart">
     ${rows.map((item) => {
       const summary = outcomeStats[item.key] || {};
-      const value = Number.isFinite(Number(summary.avg)) ? Number(summary.avg) : (Number(outcomeCounts[item.key] || 0) / eligible) * 100;
+      const direct = Number(directProbabilities[item.key]);
+      const value = Number.isFinite(direct) && primary && primary.mode === "monte_carlo"
+        ? direct
+        : Number.isFinite(Number(summary.avg)) ? Number(summary.avg) : (Number(outcomeCounts[item.key] || 0) / eligible) * 100;
       return `<div class="${escapeAttr(item.key === ((consensus || {}).outcome || "") ? "active" : "")}">
         <span>${escapeHtml(item.label)}</span>
         <strong>${escapeHtml(formatNumber(value))}%</strong>
@@ -1413,8 +1475,8 @@ function clientOutcomeChartHtml(stats, consensus, fixture) {
   </div>`;
 }
 
-function clientBetCardsHtml(report) {
-  const bets = clientBestBets(report).slice(0, 4);
+function clientBetCardsHtml(report, primary) {
+  const bets = clientBestBets(report, primary).slice(0, 4);
   if (!bets.length) return "";
   return `<section class="client-bets-panel">
     <header><strong>Mejores señales</strong><small>Ordenadas por acuerdo</small></header>
@@ -1429,7 +1491,10 @@ function clientBetCardsHtml(report) {
   </section>`;
 }
 
-function clientBestBets(report) {
+function clientBestBets(report, primary) {
+  if (primary && primary.mode === "monte_carlo") {
+    return clientMonteCarloBets(primary).slice(0, 5);
+  }
   const fixture = report.fixture || {};
   const consensus = report.consensus || {};
   const stats = report.model_statistics || {};
@@ -1469,12 +1534,50 @@ function clientBestBets(report) {
   return bets.sort((a, b) => (Number(b.agreement || 0) - Number(a.agreement || 0)) || (Number(b.probability || 0) - Number(a.probability || 0)));
 }
 
-function clientScorePanelHtml(distribution) {
+function clientMonteCarloBets(primary) {
+  const consensus = primary.consensus || {};
+  const distribution = primary.distribution || {};
+  const totals = consensus.totals || {};
+  const bets = [{
+    market: "1X2",
+    pick: consensus.outcome_label || "-",
+    probability: Number(primary.pickConfidence || 0),
+    agreement: Number(primary.pickConfidence || 0) / 100,
+    detail: "probabilidad simulada",
+  }];
+  Object.entries(totals).forEach(([line, item]) => {
+    const pick = item.pick || "";
+    const probability = pick === "over" ? Number(item.over || 0) : Number(item.under || 0);
+    bets.push({
+      market: `U/O ${line}`,
+      pick: item.label || "-",
+      probability,
+      agreement: probability / 100,
+      detail: "probabilidad simulada",
+    });
+  });
+  const topScore = ((distribution || {}).top_scores || [])[0];
+  if (topScore) {
+    bets.push({
+      market: "Marcador exacto",
+      pick: topScore.score || "-",
+      probability: Number(topScore.probability || 0),
+      agreement: Number(topScore.probability || 0) / 100,
+      detail: `N=${formatInteger(distribution.iterations || 0)}`,
+    });
+  }
+  return bets.sort((a, b) => Number(b.probability || 0) - Number(a.probability || 0));
+}
+
+function clientScorePanelHtml(distribution, primary) {
   const payload = distribution || {};
   if (!payload.available) return "";
   const topScores = payload.top_scores || [];
+  const sourceLabel = primary && primary.mode === "monte_carlo"
+    ? `Monte Carlo · N=${formatInteger(payload.iterations || 0)}`
+    : "Matriz consenso";
   return `<section class="client-score-panel">
-    <header><strong>Marcadores probables</strong><small>Matriz consenso</small></header>
+    <header><strong>Marcadores probables</strong><small>${escapeHtml(sourceLabel)}</small></header>
     <div class="top-scores compact">
       ${topScores.slice(0, 4).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
     </div>
@@ -1484,11 +1587,19 @@ function clientScorePanelHtml(distribution) {
 
 function reportFixtureCardHtml(report) {
   const fixture = report.fixture || {};
-  const consensus = report.consensus || {};
+  const monteCarlo = report.monte_carlo_consensus || {};
+  const consensus = monteCarlo.available ? {
+    ...(report.consensus || {}),
+    outcome: monteCarlo.outcome || (report.consensus || {}).outcome,
+    outcome_label: monteCarlo.outcome_label || (report.consensus || {}).outcome_label,
+    outcome_share: Number(monteCarlo.outcome_probability || 0) / 100,
+    strength: "Monte Carlo",
+  } : report.consensus || {};
   const models = report.models || [];
   const topModels = report.top_models_1x2 || [];
   const stats = report.model_statistics || {};
-  const scoreDistribution = report.consensus_score_distribution || {};
+  const scoreDistribution = (monteCarlo.available ? monteCarlo : report.consensus_score_distribution) || {};
+  const calculationLabel = report.sota_calculation_label || (monteCarlo.available ? `SOTA Monte Carlo: N=${formatInteger(monteCarlo.iterations || 0)}` : "Matriz exacta, sin simulación");
   const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
   const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
   const consensusClass = ["Baja", ""].includes(consensus.strength || "") ? "low" : "";
@@ -1501,7 +1612,7 @@ function reportFixtureCardHtml(report) {
       <div class="upcoming-team away">${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
     <div class="prediction-pick">
-      <span>Consenso · ${escapeHtml(consensus.eligible_models || 0)} modelos válidos</span>
+      <span>Consenso · ${escapeHtml(consensus.eligible_models || 0)} modelos válidos · ${escapeHtml(calculationLabel)}</span>
       <strong>${escapeHtml(consensus.outcome_label || "-")} · ${escapeHtml(consensus.strength || "Baja")}</strong>
     </div>
     <span class="consensus-badge ${escapeAttr(consensusClass)}">${escapeHtml(Math.round(Number(consensus.outcome_share || 0) * 100))}% 1X2 · ${escapeHtml(Math.round(Number(consensus.signature_share || 0) * 100))}% firma</span>
@@ -1566,10 +1677,15 @@ function reportConsensusScoreHtml(distribution) {
   if (!payload.available) return "";
   const lambdas = payload.lambdas || {};
   const topScores = payload.top_scores || [];
+  const isMonteCarlo = payload.calculation_mode === "monte_carlo";
+  const title = isMonteCarlo ? "Monte Carlo consenso" : "Matriz consenso de marcador";
+  const subtitle = isMonteCarlo
+    ? `N=${formatInteger(payload.iterations || 0)} · ${payload.backend || "numpy"} · λ ${formatNumber(lambdas.home ?? "-")}/${formatNumber(lambdas.away ?? "-")}`
+    : `${payload.model_count || 0} modelos · λ ${formatNumber(lambdas.home ?? "-")}/${formatNumber(lambdas.away ?? "-")}`;
   return `<section class="report-panel consensus-score-panel">
     <header>
-      <strong>Matriz consenso de marcador</strong>
-      <small>${escapeHtml(payload.model_count || 0)} modelos · λ ${escapeHtml(formatNumber(lambdas.home ?? "-"))}/${escapeHtml(formatNumber(lambdas.away ?? "-"))}</small>
+      <strong>${escapeHtml(title)}</strong>
+      <small>${escapeHtml(subtitle)}</small>
     </header>
     <div class="top-scores compact">
       ${topScores.slice(0, 5).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}

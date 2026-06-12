@@ -45,7 +45,7 @@ def simulate_worldcup(
         confirmed_results: List[Dict[str, Any]] | None = None,
         progress_callback=None,
 ) -> Dict[str, pd.DataFrame]:
-    iterations = min(max(int(iterations or 5000), 100), 20000)
+    iterations = min(max(int(iterations or 5000), 100), 100_000)
     seed = int(seed if seed is not None else 2026)
     rng = np.random.default_rng(seed)
     groups = groups_from_tournament(tournament)

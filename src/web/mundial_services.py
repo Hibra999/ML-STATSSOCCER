@@ -95,6 +95,7 @@ SOTA_SCORE_MODEL_SEQUENCE = [
 ]
 REPORT_TOTAL_GOAL_LINES = (0.5, 1.5, 2.5, 3.5)
 REPORT_SCORE_MATRIX_GOALS = 6
+REPORT_MAX_ITERATIONS = 100_000
 DEFAULT_CONFIG = {
     "iterations": 5000,
     "seed": 2026,
@@ -114,6 +115,7 @@ DEFAULT_CONFIG = {
     "refresh": False,
 }
 LAST_SIMULATION_RESULT: Dict[str, Any] = {}
+_MONTE_CARLO_CUDA_BACKEND: Tuple[str, str] | None = None
 
 
 class BlendedWorldCupModel:
@@ -887,7 +889,11 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
     pipeline_mode = normalize_report_pipeline_mode(payload.get("pipeline_mode"))
     config = report_pipeline_config(payload, pipeline_mode)
     start_time = time.monotonic()
-    hardware = stat_report_hardware(config.get("sota_device", "auto"), pipeline_mode)
+    hardware = stat_report_hardware(
+        config.get("sota_device", "auto"),
+        pipeline_mode,
+        config.get("sota_calculation_mode", "exact"),
+    )
     emit_report_progress(
         progress_callback,
         stage="preparing",
@@ -926,10 +932,31 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
             hardware=hardware,
             progress_callback=progress_callback,
         )
+    monte_carlo_seed_rng = (
+        np.random.default_rng(int(config["seed"]))
+        if pipeline_mode == "poisson_sota" and config.get("sota_calculation_mode") == "monte_carlo"
+        else None
+    )
     for report in fixture_reports:
         report["consensus"] = fixture_consensus(report.get("models", []))
         report.update(fixture_model_analysis(report.get("models", [])))
+        if pipeline_mode == "poisson_sota":
+            report["sota_calculation_mode"] = config.get("sota_calculation_mode", "exact")
+            report["sota_calculation_label"] = sota_calculation_summary(config)
+            if monte_carlo_seed_rng is not None:
+                report["monte_carlo_consensus"] = monte_carlo_consensus_from_distribution(
+                    distribution=report.get("consensus_score_distribution", {}),
+                    fixture=report.get("fixture", {}),
+                    config=config,
+                    hardware=hardware,
+                    seed=int(monte_carlo_seed_rng.integers(1, np.iinfo(np.int32).max)),
+                )
         report["warnings"] = fixture_report_warnings(report)
+        if report.get("monte_carlo_consensus"):
+            report["warnings"] = unique_strings([
+                *report["warnings"],
+                *[str(item) for item in (report.get("monte_carlo_consensus") or {}).get("warnings", []) if str(item)],
+            ])
     table = table_payload(pd.DataFrame(upcoming_report_table_rows(fixture_reports)), page=1, page_size=max(limit * 12, 1))
     summary = {
         "pipeline_mode": pipeline_mode,
@@ -946,6 +973,9 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         "seed": config["seed"],
         "bayes_profile": config.get("bayes_profile", ""),
         "sota_device": config.get("sota_device", "auto"),
+        "sota_calculation_mode": config.get("sota_calculation_mode", "exact") if pipeline_mode == "poisson_sota" else "",
+        "sota_calculation_label": sota_calculation_summary(config) if pipeline_mode == "poisson_sota" else "",
+        "monte_carlo_iterations": config["iterations"] if pipeline_mode == "poisson_sota" and config.get("sota_calculation_mode") == "monte_carlo" else 0,
         "score_models": SOTA_SCORE_MODEL_SEQUENCE if pipeline_mode == "poisson_sota" else ["default_ai_poisson"],
         "hardware": hardware,
         "warnings": list(hardware.get("warnings", [])),
@@ -1120,11 +1150,23 @@ def normalize_report_pipeline_mode(value: Any) -> str:
     return "poisson_sota" if mode == "poisson_sota" else "default_ai_poisson"
 
 
+def normalize_sota_calculation_mode(value: Any) -> str:
+    mode = str(value or "exact").strip().lower().replace("-", "_")
+    return "monte_carlo" if mode in {"monte_carlo", "montecarlo", "mc", "simulation"} else "exact"
+
+
+def sota_calculation_summary(config: Dict[str, Any]) -> str:
+    if config.get("sota_calculation_mode") == "monte_carlo":
+        return f"SOTA Monte Carlo: N={int(config.get('iterations') or DEFAULT_CONFIG['iterations']):,}"
+    return "SOTA rápido: matriz exacta, sin simulación"
+
+
 def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[str, Any]:
     config = simulation_config(payload)
     config["pipeline_mode"] = pipeline_mode
     config["bayes_profile"] = str(payload.get("bayes_profile") or "deep").strip().lower()
     config["sota_device"] = str(payload.get("sota_device") or "auto").strip().lower()
+    config["sota_calculation_mode"] = normalize_sota_calculation_mode(payload.get("sota_calculation_mode"))
     if config["sota_device"] not in {"auto", "cpu", "cuda"}:
         config["sota_device"] = "auto"
     if pipeline_mode == "poisson_sota":
@@ -1139,25 +1181,47 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
     return config
 
 
-def stat_report_hardware(requested_device: Any, pipeline_mode: str) -> Dict[str, Any]:
+def stat_report_hardware(requested_device: Any, pipeline_mode: str, sota_calculation_mode: str = "exact") -> Dict[str, Any]:
     requested = str(requested_device or "auto").strip().lower()
     if requested not in {"auto", "cpu", "cuda"}:
         requested = "auto"
+    calculation_mode = normalize_sota_calculation_mode(sota_calculation_mode)
     detected = detect_hardware()
     warnings: List[str] = []
     backend_supports_cuda = False
     actual_device = "cpu"
     device_error = ""
+    monte_carlo_backend = "numpy"
     if pipeline_mode == "poisson_sota":
         cuda_reason = detected.get("cuda_error") or detected.get("cuda_warning") or "sin dispositivos"
-        if requested == "cuda" and detected.get("cuda_available"):
+        if calculation_mode == "monte_carlo":
+            if requested == "cpu":
+                warnings.append("Monte Carlo SOTA configurado en CPU por solicitud explicita.")
+            elif detected.get("cuda_available"):
+                backend_name, backend_warning = monte_carlo_cuda_backend()
+                if backend_name:
+                    actual_device = "cuda"
+                    backend_supports_cuda = True
+                    monte_carlo_backend = backend_name
+                    warnings.append(f"CUDA activa para Monte Carlo SOTA via {backend_name}; el ajuste estadistico previo sigue en CPU.")
+                elif requested == "cuda":
+                    device_error = f"CUDA fue solicitada explicitamente, pero no hay backend CuPy/Torch usable ({backend_warning or cuda_reason}); Monte Carlo SOTA corre en CPU."
+                    warnings.append(device_error)
+                else:
+                    warnings.append(f"CUDA detectada, pero no hay backend CuPy/Torch usable ({backend_warning or cuda_reason}); Monte Carlo SOTA corre en CPU.")
+            elif requested == "cuda":
+                device_error = f"CUDA fue solicitada explicitamente, pero no se detecto GPU ({cuda_reason}); Monte Carlo SOTA corre en CPU."
+                warnings.append(device_error)
+            else:
+                warnings.append(f"CUDA no disponible ({cuda_reason}); Monte Carlo SOTA corre en CPU.")
+        elif requested == "cuda" and detected.get("cuda_available"):
             actual_device = "cuda"
-            warnings.append("CUDA fue solicitada y detectada; los modelos estadisticos SOTA actuales son CPU-bound y no ejecutan kernels GPU.")
+            warnings.append("CUDA fue solicitada y detectada; SOTA rapido usa matriz exacta CPU-bound. Cambia Calculo a Monte Carlo para muestreo GPU.")
         elif requested == "cuda":
             device_error = f"CUDA fue solicitada explicitamente, pero no se detecto GPU ({cuda_reason}); SOTA corre en CPU."
             warnings.append(device_error)
         elif requested == "auto" and detected.get("cuda_available"):
-            warnings.append("CUDA detectada; los modelos estadisticos actuales no exponen backend GPU y se ejecutan en CPU.")
+            warnings.append("CUDA detectada; SOTA rapido usa matriz exacta CPU-bound. Cambia Calculo a Monte Carlo para muestreo GPU.")
         elif requested == "auto" and not detected.get("cuda_available"):
             warnings.append(f"CUDA no disponible ({cuda_reason}); SOTA corre en CPU.")
     return {
@@ -1165,9 +1229,38 @@ def stat_report_hardware(requested_device: Any, pipeline_mode: str) -> Dict[str,
         "requested_device": requested,
         "actual_device": actual_device,
         "backend_supports_cuda": backend_supports_cuda,
+        "monte_carlo_backend": monte_carlo_backend,
         "device_error": device_error,
         "warnings": warnings,
     }
+
+
+def monte_carlo_cuda_backend() -> Tuple[str, str]:
+    global _MONTE_CARLO_CUDA_BACKEND
+    if _MONTE_CARLO_CUDA_BACKEND is not None:
+        return _MONTE_CARLO_CUDA_BACKEND
+    errors: List[str] = []
+    try:
+        import cupy as cp  # type: ignore
+
+        device_count = int(cp.cuda.runtime.getDeviceCount())
+        if device_count > 0:
+            _MONTE_CARLO_CUDA_BACKEND = ("cupy", "")
+            return _MONTE_CARLO_CUDA_BACKEND
+        errors.append("CuPy sin dispositivos CUDA")
+    except Exception as exc:
+        errors.append(f"CuPy no disponible: {exc.__class__.__name__}")
+    try:
+        import torch  # type: ignore
+
+        if bool(torch.cuda.is_available()):
+            _MONTE_CARLO_CUDA_BACKEND = ("torch", "")
+            return _MONTE_CARLO_CUDA_BACKEND
+        errors.append("Torch sin CUDA disponible")
+    except Exception as exc:
+        errors.append(f"Torch no disponible: {exc.__class__.__name__}")
+    _MONTE_CARLO_CUDA_BACKEND = ("", "; ".join(errors))
+    return _MONTE_CARLO_CUDA_BACKEND
 
 
 def emit_report_progress(
@@ -1495,6 +1588,208 @@ def consensus_score_distribution(model_reports: List[Dict[str, Any]]) -> Dict[st
             lambda_away=float(np.mean(lambda_away)) if lambda_away else 0.0,
         ),
     }
+
+
+def monte_carlo_consensus_from_distribution(
+        distribution: Dict[str, Any],
+        fixture: Dict[str, Any],
+        config: Dict[str, Any],
+        hardware: Dict[str, Any],
+        seed: int,
+) -> Dict[str, Any]:
+    iterations = monte_carlo_match_iterations(config.get("iterations", DEFAULT_CONFIG["iterations"]))
+    matrix = (distribution or {}).get("score_matrix")
+    if not matrix:
+        return {
+            "available": False,
+            "calculation_mode": "monte_carlo",
+            "iterations": iterations,
+            "seed": int(seed),
+            "reason": "Sin matriz consenso exacta para simular.",
+            "warnings": ["Monte Carlo SOTA no se ejecuto porque falta la matriz consenso."],
+        }
+    grid = normalize_score_grid_array(np.asarray(matrix, dtype=float) / 100.0)
+    requested_backend = str((hardware or {}).get("monte_carlo_backend") or "numpy").strip().lower()
+    warnings: List[str] = []
+    try:
+        count_matrix, backend = monte_carlo_count_matrix_from_grid(
+            grid=grid,
+            iterations=iterations,
+            seed=seed,
+            backend=requested_backend,
+        )
+    except Exception as exc:
+        if requested_backend != "numpy":
+            warnings.append(f"Monte Carlo CUDA fallo ({exc.__class__.__name__}); se recalculo en CPU/NumPy.")
+            count_matrix, backend = monte_carlo_count_matrix_from_grid(
+                grid=grid,
+                iterations=iterations,
+                seed=seed,
+                backend="numpy",
+            )
+        else:
+            return {
+                "available": False,
+                "calculation_mode": "monte_carlo",
+                "iterations": iterations,
+                "seed": int(seed),
+                "reason": f"Monte Carlo no disponible: {exc.__class__.__name__}",
+                "warnings": [f"Monte Carlo SOTA fallo: {exc}"],
+            }
+    payload = monte_carlo_consensus_payload_from_counts(
+        count_matrix=count_matrix,
+        iterations=iterations,
+        source_distribution=distribution,
+        fixture=fixture,
+    )
+    payload.update({
+        "available": True,
+        "calculation_mode": "monte_carlo",
+        "source": "SOTA Monte Carlo sobre matriz consenso",
+        "matrix_source": "monte_carlo_consensus",
+        "iterations": iterations,
+        "seed": int(seed),
+        "backend": backend,
+        "requested_backend": requested_backend,
+        "requested_device": (hardware or {}).get("requested_device", "auto"),
+        "actual_device": "cuda" if backend in {"cupy", "torch"} else "cpu",
+        "cuda": backend in {"cupy", "torch"},
+        "warnings": warnings,
+    })
+    return payload
+
+
+def monte_carlo_count_matrix_from_grid(
+        grid: np.ndarray,
+        iterations: int,
+        seed: int,
+        backend: str = "numpy",
+) -> Tuple[np.ndarray, str]:
+    backend = str(backend or "numpy").strip().lower()
+    if backend == "cupy":
+        return monte_carlo_count_matrix_cupy(grid, iterations, seed), "cupy"
+    if backend == "torch":
+        return monte_carlo_count_matrix_torch(grid, iterations, seed), "torch"
+    return monte_carlo_count_matrix_numpy(grid, iterations, seed), "numpy"
+
+
+def monte_carlo_count_matrix_numpy(grid: np.ndarray, iterations: int, seed: int) -> np.ndarray:
+    normalized = normalize_score_grid_array(grid)
+    rng = np.random.default_rng(int(seed))
+    sampled_home, sampled_away = sample_scores_from_grid(normalized, rng, size=int(iterations))
+    cols = int(normalized.shape[1])
+    indices = sampled_home.astype(int) * cols + sampled_away.astype(int)
+    counts = np.bincount(indices, minlength=int(normalized.size))
+    return counts.reshape(normalized.shape).astype(int)
+
+
+def monte_carlo_count_matrix_cupy(grid: np.ndarray, iterations: int, seed: int) -> np.ndarray:
+    import cupy as cp  # type: ignore
+
+    normalized = normalize_score_grid_array(grid)
+    flat = cp.asarray(normalized.ravel(), dtype=cp.float64)
+    flat = flat / cp.maximum(cp.sum(flat), cp.float64(1e-12))
+    cdf = cp.cumsum(flat)
+    cdf[-1] = 1.0
+    rng = cp.random.default_rng(int(seed))
+    draws = rng.random(int(iterations)).astype(cp.float64)
+    indices = cp.searchsorted(cdf, draws, side="right").astype(cp.int64)
+    counts = cp.bincount(indices, minlength=int(flat.size))
+    return cp.asnumpy(counts.reshape(normalized.shape)).astype(int)
+
+
+def monte_carlo_count_matrix_torch(grid: np.ndarray, iterations: int, seed: int) -> np.ndarray:
+    import torch  # type: ignore
+
+    normalized = normalize_score_grid_array(grid)
+    device = torch.device("cuda")
+    flat = torch.as_tensor(normalized.ravel(), dtype=torch.float64, device=device)
+    flat = flat / torch.clamp(torch.sum(flat), min=1e-12)
+    cdf = torch.cumsum(flat, dim=0)
+    cdf[-1] = 1.0
+    generator = torch.Generator(device=device)
+    generator.manual_seed(int(seed))
+    draws = torch.rand(int(iterations), generator=generator, device=device, dtype=torch.float64)
+    indices = torch.searchsorted(cdf, draws, right=True).to(torch.int64)
+    counts = torch.bincount(indices, minlength=int(flat.numel()))
+    return counts.reshape(normalized.shape).detach().cpu().numpy().astype(int)
+
+
+def monte_carlo_consensus_payload_from_counts(
+        count_matrix: np.ndarray,
+        iterations: int,
+        source_distribution: Dict[str, Any],
+        fixture: Dict[str, Any],
+) -> Dict[str, Any]:
+    counts = np.asarray(count_matrix, dtype=float)
+    total = max(float(counts.sum()), 1.0)
+    simulated_grid = normalize_score_grid_array(counts / total)
+    rows, cols = simulated_grid.shape
+    home_axis = np.arange(rows, dtype=float)
+    away_axis = np.arange(cols, dtype=float)
+    home_goals, away_goals = np.meshgrid(home_axis, away_axis, indexing="ij")
+    simulated_home = float((counts * home_goals).sum() / total)
+    simulated_away = float((counts * away_goals).sum() / total)
+    payload = score_distribution_payload(
+        simulated_grid,
+        lambda_home=simulated_home,
+        lambda_away=simulated_away,
+    )
+    payload["top_scores"] = monte_carlo_top_scores_from_matrix(counts, int(iterations))
+    probabilities = payload.get("probabilities", {})
+    outcome = outcome_decision(probabilities)
+    totals = total_decisions(probabilities)
+    over_under = payload.get("over_under", {})
+    total_payload: Dict[str, Dict[str, Any]] = {}
+    for line in REPORT_TOTAL_GOAL_LINES:
+        line_key = f"{line:.1f}"
+        item = over_under.get(line_key, {})
+        pick = totals.get(line_key, "")
+        total_payload[line_key] = {
+            "pick": pick,
+            "label": "Over" if pick == "over" else "Under" if pick == "under" else "",
+            "over": float_or_zero(item.get("over")),
+            "under": float_or_zero(item.get("under")),
+        }
+    return {
+        **payload,
+        "model_count": int((source_distribution or {}).get("model_count") or 0),
+        "source_lambdas": (source_distribution or {}).get("lambdas", {}),
+        "simulated_goals": {
+            "home": round(simulated_home, 3),
+            "away": round(simulated_away, 3),
+        },
+        "probabilities": probabilities,
+        "outcome": outcome,
+        "outcome_label": outcome_label(outcome),
+        "outcome_team": outcome_team(outcome, fixture or {}),
+        "outcome_probability": float_or_zero(probabilities.get(outcome)),
+        "totals": total_payload,
+    }
+
+
+def monte_carlo_top_scores_from_matrix(count_matrix: np.ndarray, iterations: int, limit: int = 5) -> List[Dict[str, Any]]:
+    counts = np.asarray(count_matrix, dtype=int)
+    flat = counts.ravel()
+    if flat.size == 0:
+        return []
+    ranked_indices = np.argsort(flat)[::-1]
+    cols = counts.shape[1]
+    output = []
+    for index in ranked_indices[:limit]:
+        count = int(flat[int(index)])
+        if count <= 0:
+            continue
+        home_goals = int(index // cols)
+        away_goals = int(index % cols)
+        output.append({
+            "score": f"{home_goals}-{away_goals}",
+            "home_goals": home_goals,
+            "away_goals": away_goals,
+            "probability": round(float(count) * 100.0 / max(int(iterations), 1), 2),
+            "count": count,
+        })
+    return output
 
 
 def model_statistics_payload(model_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1901,7 +2196,7 @@ def monte_carlo_match_iterations(value: Any) -> int:
         number = int(float(value))
     except (TypeError, ValueError):
         number = int(DEFAULT_CONFIG["iterations"])
-    return min(max(number, 100), 100_000)
+    return min(max(number, 100), REPORT_MAX_ITERATIONS)
 
 
 def monte_carlo_top_scores(score_counts: Counter[Tuple[int, int]], iterations: int) -> List[Dict[str, Any]]:
@@ -2210,7 +2505,7 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         use_ml_model = False
     return {
         "mode": mode,
-        "iterations": int(_clamp_int(payload.get("iterations", DEFAULT_CONFIG["iterations"]), 100, 20000)),
+        "iterations": int(_clamp_int(payload.get("iterations", DEFAULT_CONFIG["iterations"]), 100, REPORT_MAX_ITERATIONS)),
         "seed": int(payload.get("seed") if payload.get("seed") is not None else DEFAULT_CONFIG["seed"]),
         "use_ml_model": use_ml_model,
         "ml_weight": _clamp_float(payload.get("ml_weight", DEFAULT_CONFIG["ml_weight"]), 0.0, 1.0),

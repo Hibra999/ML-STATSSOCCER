@@ -1,5 +1,6 @@
 import json
 
+import numpy as np
 import pandas as pd
 
 
@@ -156,8 +157,10 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
 
     assert prediction_order == services.SOTA_SCORE_MODEL_SEQUENCE
     assert fit_order == services.SOTA_SCORE_MODEL_SEQUENCE[1:]
+    assert result["summary"]["sota_calculation_mode"] == "exact"
     assert result["summary"]["use_ml_model"] is False
     assert result["fixture_reports"][0]["models"][0]["model_key"] == "independent_poisson"
+    assert "monte_carlo_consensus" not in result["fixture_reports"][0]
     assert result["fixture_reports"][0]["consensus"]["eligible_models"] == len(services.SOTA_SCORE_MODEL_SEQUENCE)
     assert len(result["fixture_reports"][0]["top_models_1x2"]) == 4
     assert result["fixture_reports"][0]["consensus_score_distribution"]["available"] is True
@@ -168,6 +171,83 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     assert latest["report_id"] == result["report_id"]
     assert any(item.get("model_key") == "xg_poisson_local" for item in progress)
     assert {item.get("model_total") for item in progress if item.get("model_key")} == {len(services.SOTA_SCORE_MODEL_SEQUENCE)}
+
+
+def test_poisson_sota_report_monte_carlo_consensus_uses_form_iterations(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+
+    class FakeModel:
+        max_goals = 10
+
+        def match_probabilities(self, home, away, max_goals=None):
+            return {
+                "home": 0.55,
+                "draw": 0.25,
+                "away": 0.20,
+                "over05": 0.9,
+                "under05": 0.1,
+                "over15": 0.7,
+                "under15": 0.3,
+                "over25": 0.45,
+                "under25": 0.55,
+                "over35": 0.2,
+                "under35": 0.8,
+                "lambda1": 1.4,
+                "lambda2": 0.9,
+                "modal_g1": 1,
+                "modal_g2": 0,
+            }
+
+        def score_model_metadata(self):
+            return {"key": "independent_poisson", "label": "Poisson", "available": True, "params": {}, "warnings": []}
+
+    fixtures = pd.DataFrame([
+        {"No.": 1, "Fecha": "2026-06-11", "Hora": "18:00 UTC+0", "Grupo": "Group A", "Equipo 1": "Mexico", "Equipo 2": "Canada", "Sede": "A"},
+    ])
+    captured = {}
+
+    def fake_count_matrix(grid, iterations, seed, backend="numpy"):
+        captured["iterations"] = iterations
+        captured["backend"] = backend
+        return np.array([[35000, 15000], [40000, 10000]]), "numpy"
+
+    monkeypatch.setattr(services, "REPORTS_ROOT", tmp_path)
+    monkeypatch.setattr(services, "SOTA_SCORE_MODEL_SEQUENCE", ["independent_poisson"])
+    monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: ({}, "fixture-test"))
+    monkeypatch.setattr(services, "build_model", lambda tournament, config: (FakeModel(), "history-test"))
+    monkeypatch.setattr(services, "upcoming_fixture_rows", lambda tournament, group_filter="": fixtures)
+    monkeypatch.setattr(services, "groups_from_tournament", lambda tournament: {"Group A": ["Mexico", "Canada"]})
+    monkeypatch.setattr(services, "load_historical_matches", lambda refresh=False: (pd.DataFrame(), "history-test"))
+    monkeypatch.setattr(services, "contextual_poisson_for_match", lambda *args, **kwargs: {})
+    monkeypatch.setattr(services, "monte_carlo_count_matrix_from_grid", fake_count_matrix)
+    monkeypatch.setattr(services, "detect_hardware", lambda: {
+        "cpu_count": 8,
+        "default_n_jobs": -1,
+        "cuda_available": False,
+        "cuda_devices": [],
+        "cuda_device_names": [],
+        "cuda_detection_source": "none",
+        "cuda_detection_sources": [],
+        "cuda_error": "sin dispositivos",
+        "cuda_warning": "sin dispositivos",
+        "device_default": "cpu",
+    })
+
+    result = services.predict_upcoming_report({
+        "pipeline_mode": "poisson_sota",
+        "sota_calculation_mode": "monte_carlo",
+        "iterations": 100000,
+        "limit": 1,
+    })
+
+    monte_carlo = result["fixture_reports"][0]["monte_carlo_consensus"]
+    assert result["summary"]["sota_calculation_mode"] == "monte_carlo"
+    assert result["summary"]["monte_carlo_iterations"] == 100000
+    assert captured["iterations"] == 100000
+    assert monte_carlo["available"] is True
+    assert monte_carlo["iterations"] == 100000
+    assert set(monte_carlo["probabilities"]) >= {"home", "draw", "away", "over05", "under05", "over25", "under25"}
+    assert monte_carlo["top_scores"]
 
 
 def test_sota_report_honors_explicit_cuda_when_detected_and_warns_cpu_bound(monkeypatch):
@@ -190,6 +270,30 @@ def test_sota_report_honors_explicit_cuda_when_detected_and_warns_cpu_bound(monk
     assert hardware["actual_device"] == "cuda"
     assert hardware["backend_supports_cuda"] is False
     assert sum("CPU-bound" in warning for warning in hardware["warnings"]) == 1
+
+
+def test_sota_monte_carlo_hardware_uses_cuda_backend_when_available(monkeypatch):
+    from src.web import mundial_services as services
+
+    monkeypatch.setattr(services, "detect_hardware", lambda: {
+        "cpu_count": 16,
+        "default_n_jobs": -1,
+        "cuda_available": True,
+        "cuda_devices": ["GPU 0: NVIDIA GeForce RTX 5070"],
+        "cuda_device_names": ["NVIDIA GeForce RTX 5070"],
+        "cuda_detection_source": "nvidia-smi:/usr/bin/nvidia-smi",
+        "cuda_detection_sources": ["nvidia-smi:/usr/bin/nvidia-smi"],
+        "cuda_error": "",
+        "cuda_warning": "",
+        "device_default": "cuda",
+    })
+    monkeypatch.setattr(services, "monte_carlo_cuda_backend", lambda: ("cupy", ""))
+
+    hardware = services.stat_report_hardware("cuda", "poisson_sota", "monte_carlo")
+
+    assert hardware["actual_device"] == "cuda"
+    assert hardware["backend_supports_cuda"] is True
+    assert hardware["monte_carlo_backend"] == "cupy"
 
 
 def test_fixture_report_warnings_groups_duplicate_model_warnings():

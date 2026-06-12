@@ -287,6 +287,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson" in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-pipeline-mode" in html_source
+    assert "upcoming-sota-calculation-mode" in html_source
+    assert "Rápido / matriz exacta" in html_source
+    assert "Monte Carlo" in html_source
     assert "upcoming-report" in html_source
     assert "worldcup-upcoming-progress" in html_source
     assert "upcoming-predictions" in html_source
@@ -342,6 +345,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "preferredTrainingDevice" in app_source
     assert "reportTopModelsHtml" in app_source
     assert "reportConsensusScoreHtml" in app_source
+    assert "sota_calculation_mode" in app_source
+    assert "monte_carlo_consensus" in app_source
+    assert "SOTA Monte Carlo: N=" in app_source
     assert "Todos los modelos" in app_source
     assert "clientReportHtml" in app_source
     assert "Reporte cliente" in app_source
@@ -1108,7 +1114,7 @@ def test_mundial_simulation_config_is_clamped():
         "use_ml_model": True,
     })
 
-    assert config["iterations"] == 20000
+    assert config["iterations"] == 100000
     assert config["history_weight"] == 0.2
     assert config["recency_weight"] == 1.0
     assert config["host_advantage"] == 0.0
