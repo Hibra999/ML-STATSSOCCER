@@ -168,7 +168,7 @@ class WorldCupFeatureBuildCache:
         self.team_features_asof: Dict[Tuple[int, str], pd.DataFrame] = {}
         self.static_features: Dict[Tuple[Any, ...], Tuple[pd.DataFrame, pd.DataFrame]] = {}
         self.snapshots: Dict[Tuple[Any, ...], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
-        self.recent15_features: Dict[Tuple[str, str, str, str], pd.DataFrame] = {}
+        self.recent15_features: Dict[Tuple[Any, ...], pd.DataFrame] = {}
         self.matrices: Dict[Tuple[Any, ...], pd.DataFrame] = {}
         self.stats: Dict[str, int] = {
             "matrix_hits": 0,
@@ -243,6 +243,11 @@ def emit_training_progress(callback, stage: str, current: int, total: int, messa
         details.append(f"rows={extra['rows']}")
     if extra.get("features") not in {None, ""}:
         details.append(f"features={extra['features']}")
+    if extra.get("progress_every") not in {None, ""}:
+        details.append(f"progress_every={extra['progress_every']}")
+    feature_cache_detail = format_feature_cache_for_progress(extra.get("feature_cache"))
+    if feature_cache_detail:
+        details.append(f"feature_cache={feature_cache_detail}")
     detail_label = f" - {' '.join(details)}" if details else ""
     line = f"[mundial-training]{market_label} {message} - {stage} {current}/{total} ({percent}%){detail_label}"
     print(line, flush=True)
@@ -259,6 +264,33 @@ def emit_training_progress(callback, stage: str, current: int, total: int, messa
         "message": message,
         **extra,
     })
+
+
+def format_feature_cache_for_progress(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, dict):
+        keys = ("matrix_hits", "matrix_misses", "recent15_hits", "recent15_misses")
+        return ",".join(f"{key}:{int(value.get(key, 0) or 0)}" for key in keys)
+    return str(value)
+
+
+def dynamic_feature_progress_every(row_count: int) -> int:
+    rows = max(int(row_count or 0), 1)
+    return max(500, min(2000, rows // 50))
+
+
+def feature_progress_every_from_payload(payload: Optional[Dict[str, Any]], row_count: int) -> int:
+    payload = payload or {}
+    default = dynamic_feature_progress_every(row_count)
+    raw_value = payload.get("feature_progress_every")
+    if "feature_progress_every" not in payload or raw_value is None or raw_value == "":
+        return default
+    try:
+        value = int(float(raw_value))
+    except (TypeError, ValueError):
+        return default
+    return min(5000, max(100, value))
 
 
 def market_label_for_progress(target: str) -> str:
@@ -613,7 +645,8 @@ def train_single_hybrid_model(
             test_size=eval_size,
         )
         fit_train_rows = split_train_rows
-        emit_training_progress(progress_callback, "features_train", 3, single_total_steps, f"Construyendo features train {label}", market=label, model_id=model_id, rows=int(split_train_rows.shape[0]))
+        train_progress_every = feature_progress_every_from_payload(payload, int(split_train_rows.shape[0]))
+        emit_training_progress(progress_callback, "features_train", 3, single_total_steps, f"Construyendo features train {label}", market=label, model_id=model_id, rows=int(split_train_rows.shape[0]), progress_every=train_progress_every, feature_cache=feature_cache.summary())
         x_train, y_train, feature_columns = build_training_matrix(
             split_train_rows,
             history_df=history_df,
@@ -637,9 +670,11 @@ def train_single_hybrid_model(
             progress_message=f"Construyendo features train {label}",
             progress_market=label,
             progress_model_id=model_id,
+            progress_every=train_progress_every,
         )
-        emit_training_progress(progress_callback, "features_train", 4, single_total_steps, f"Features train {label} listas", market=label, model_id=model_id, rows=int(x_train.shape[0]), features=int(x_train.shape[1]))
-        emit_training_progress(progress_callback, "features_eval", 5, single_total_steps, f"Construyendo features eval {label}", market=label, model_id=model_id, rows=int(split_eval_rows.shape[0]))
+        emit_training_progress(progress_callback, "features_train", 4, single_total_steps, f"Features train {label} listas", market=label, model_id=model_id, rows=int(x_train.shape[0]), features=int(x_train.shape[1]), progress_every=train_progress_every, feature_cache=feature_cache.summary())
+        eval_progress_every = feature_progress_every_from_payload(payload, int(split_eval_rows.shape[0]))
+        emit_training_progress(progress_callback, "features_eval", 5, single_total_steps, f"Construyendo features eval {label}", market=label, model_id=model_id, rows=int(split_eval_rows.shape[0]), progress_every=eval_progress_every, feature_cache=feature_cache.summary())
         x_eval, y_eval, _ = build_training_matrix(
             split_eval_rows,
             history_df=history_df,
@@ -665,15 +700,17 @@ def train_single_hybrid_model(
             progress_message=f"Construyendo features eval {label}",
             progress_market=label,
             progress_model_id=model_id,
+            progress_every=eval_progress_every,
         )
-        emit_training_progress(progress_callback, "features_eval", 6, single_total_steps, f"Features eval {label} listas", market=label, model_id=model_id, rows=int(x_eval.shape[0]), features=int(x_eval.shape[1]))
+        emit_training_progress(progress_callback, "features_eval", 6, single_total_steps, f"Features eval {label} listas", market=label, model_id=model_id, rows=int(x_eval.shape[0]), features=int(x_eval.shape[1]), progress_every=eval_progress_every, feature_cache=feature_cache.summary())
     else:
         eval_strategy = evaluation_strategy(normalized)
         if eval_strategy == "test_file":
             eval_strategy = EVAL_STRATEGY_LAST_30
         test_rows = sort_match_rows(test_rows)
         fit_train_rows = train_rows
-        emit_training_progress(progress_callback, "features_train", 3, single_total_steps, f"Construyendo features train {label}", market=label, model_id=model_id, rows=int(train_rows.shape[0]))
+        train_progress_every = feature_progress_every_from_payload(payload, int(train_rows.shape[0]))
+        emit_training_progress(progress_callback, "features_train", 3, single_total_steps, f"Construyendo features train {label}", market=label, model_id=model_id, rows=int(train_rows.shape[0]), progress_every=train_progress_every, feature_cache=feature_cache.summary())
         x_train, y_train, feature_columns = build_training_matrix(
             train_rows,
             history_df=history_df,
@@ -697,9 +734,11 @@ def train_single_hybrid_model(
             progress_message=f"Construyendo features train {label}",
             progress_market=label,
             progress_model_id=model_id,
+            progress_every=train_progress_every,
         )
-        emit_training_progress(progress_callback, "features_train", 4, single_total_steps, f"Features train {label} listas", market=label, model_id=model_id, rows=int(x_train.shape[0]), features=int(x_train.shape[1]))
-        emit_training_progress(progress_callback, "features_eval", 5, single_total_steps, f"Construyendo features eval {label}", market=label, model_id=model_id, rows=int(test_rows.shape[0]))
+        emit_training_progress(progress_callback, "features_train", 4, single_total_steps, f"Features train {label} listas", market=label, model_id=model_id, rows=int(x_train.shape[0]), features=int(x_train.shape[1]), progress_every=train_progress_every, feature_cache=feature_cache.summary())
+        eval_progress_every = feature_progress_every_from_payload(payload, int(test_rows.shape[0]))
+        emit_training_progress(progress_callback, "features_eval", 5, single_total_steps, f"Construyendo features eval {label}", market=label, model_id=model_id, rows=int(test_rows.shape[0]), progress_every=eval_progress_every, feature_cache=feature_cache.summary())
         x_eval, y_eval, _ = build_training_matrix(
             test_rows,
             history_df=history_df,
@@ -725,8 +764,9 @@ def train_single_hybrid_model(
             progress_message=f"Construyendo features eval {label}",
             progress_market=label,
             progress_model_id=model_id,
+            progress_every=eval_progress_every,
         )
-        emit_training_progress(progress_callback, "features_eval", 6, single_total_steps, f"Features eval {label} listas", market=label, model_id=model_id, rows=int(x_eval.shape[0]), features=int(x_eval.shape[1]))
+        emit_training_progress(progress_callback, "features_eval", 6, single_total_steps, f"Features eval {label} listas", market=label, model_id=model_id, rows=int(x_eval.shape[0]), features=int(x_eval.shape[1]), progress_every=eval_progress_every, feature_cache=feature_cache.summary())
 
     if x_train.empty or pd.Series(y_train).dropna().empty:
         raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
@@ -2316,6 +2356,69 @@ def feature_matrix_cache_key(
     )
 
 
+def normalize_build_progress_every(value: Optional[int], row_count: int) -> int:
+    if value is None:
+        return dynamic_feature_progress_every(row_count)
+    try:
+        return max(1, int(float(value)))
+    except (TypeError, ValueError):
+        return dynamic_feature_progress_every(row_count)
+
+
+def recent15_feature_table_covers(features: Optional[pd.DataFrame], teams: Iterable[str]) -> bool:
+    requested = {normalize_team_key(team) for team in teams if normalize_team_key(team)}
+    if not requested:
+        return True
+    if features is None:
+        return False
+    if features.empty:
+        return True
+    if "Team" not in features.columns:
+        return False
+    available = set(features["Team"].dropna().astype(str).map(normalize_team_key).tolist())
+    return requested.issubset(available)
+
+
+def cached_recent15_feature_table(
+        feature_cache: WorldCupFeatureBuildCache,
+        international_matches: pd.DataFrame,
+        working_teams: Iterable[str],
+        reference_date: str,
+        row_model: WorldCupModel,
+        recent15_match_index: Optional[Dict[str, pd.DataFrame]],
+) -> pd.DataFrame:
+    cache_key = (
+        "recent15-table",
+        reference_date,
+        str(id(row_model)),
+        dataframe_cache_id(international_matches),
+        id(recent15_match_index) if recent15_match_index is not None else 0,
+    )
+    teams = list(working_teams)
+    cached = feature_cache.recent15_features.get(cache_key)
+    if cached is not None and recent15_feature_table_covers(cached, teams):
+        feature_cache.stats["recent15_hits"] += 1
+        return cached
+    feature_cache.stats["recent15_misses"] += 1
+    features = recent15_feature_table(
+        international_matches,
+        teams=teams,
+        before_date=reference_date,
+        base_model=row_model,
+        match_index=recent15_match_index,
+    )
+    feature_cache.recent15_features[cache_key] = features
+    return features
+
+
+def recent15_features_for_match(features: pd.DataFrame, home: str, away: str) -> pd.DataFrame:
+    if features is None or features.empty or "Team" not in features.columns:
+        return pd.DataFrame()
+    requested = {normalize_team_key(home), normalize_team_key(away)}
+    team_keys = features["Team"].map(normalize_team_key)
+    return features.loc[team_keys.isin(requested)]
+
+
 def dataframe_cache_id(frame: Optional[pd.DataFrame]) -> int:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return 0
@@ -2407,7 +2510,7 @@ def build_training_matrix(
         progress_message: str = "",
         progress_market: str = "",
         progress_model_id: str = "",
-        progress_every: int = 25,
+        progress_every: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     working = rows_for_training_target(rows, target)
     if team_features is None:
@@ -2463,6 +2566,7 @@ def build_training_matrix(
             progress_market=progress_market,
             progress_model_id=progress_model_id,
             feature_cache_state="hit",
+            progress_every=normalize_build_progress_every(progress_every, int(max(working.shape[0], 1))),
         )
 
     feature_cache.stats["matrix_misses"] += 1
@@ -2472,7 +2576,7 @@ def build_training_matrix(
     market_lookup = feature_cache.market_lookup[market_key]
     records = []
     progress_total = int(max(working.shape[0], 1))
-    progress_every = max(1, int(progress_every or 25))
+    progress_every = normalize_build_progress_every(progress_every, progress_total)
     for row_index, (_, row) in enumerate(working.iterrows(), start=1):
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
@@ -2551,24 +2655,15 @@ def build_training_matrix(
                     ),
                 )
             row_qualifier_features, row_api_football_features = feature_cache.static_features[static_cache_key]
-        recent15_key = (
-            normalize_team_key(home_team),
-            normalize_team_key(away_team),
-            reference_date,
-            str(id(row_model)),
+        row_recent15_table = cached_recent15_feature_table(
+            feature_cache=feature_cache,
+            international_matches=international_matches,
+            working_teams=working_teams,
+            reference_date=reference_date,
+            row_model=row_model,
+            recent15_match_index=recent15_match_index,
         )
-        if recent15_key not in feature_cache.recent15_features:
-            feature_cache.stats["recent15_misses"] += 1
-            feature_cache.recent15_features[recent15_key] = recent15_feature_table(
-                international_matches,
-                teams=[home_team, away_team],
-                before_date=reference_date,
-                base_model=row_model,
-                match_index=recent15_match_index,
-            )
-        else:
-            feature_cache.stats["recent15_hits"] += 1
-        row_recent15_features = feature_cache.recent15_features[recent15_key]
+        row_recent15_features = recent15_features_for_match(row_recent15_table, home_team, away_team)
         records.append(
             match_feature_row(
                 row_model,
@@ -2602,6 +2697,7 @@ def build_training_matrix(
                 rows=row_index,
                 features=len(records[-1]) if records else 0,
                 feature_cache="miss",
+                progress_every=progress_every,
             )
     x = pd.DataFrame(records).fillna(0.0)
     feature_cache.matrices[matrix_key] = x.copy()
@@ -2626,6 +2722,7 @@ def finalize_training_matrix_from_features(
         progress_market: str = "",
         progress_model_id: str = "",
         feature_cache_state: str = "",
+        progress_every: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     if feature_columns is None:
         feature_columns = list(x.columns)
@@ -2645,6 +2742,7 @@ def finalize_training_matrix_from_features(
             rows=int(working.shape[0]),
             features=int(x.shape[1]),
             feature_cache=feature_cache_state,
+            progress_every=progress_every,
         )
     if is_over_under_target(target):
         return x, working[over_under_column_for_target(target)].astype(int), feature_columns

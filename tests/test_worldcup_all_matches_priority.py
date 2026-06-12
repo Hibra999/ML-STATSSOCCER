@@ -374,6 +374,106 @@ def test_build_training_matrix_recent15_uses_match_date_not_year_cache():
     assert x.iloc[1]["recent15_matches_home"] == pytest.approx(2.0)
 
 
+def test_build_training_matrix_dynamic_progress_is_batched(monkeypatch):
+    total_rows = 5000
+    rows = pd.DataFrame([
+        {
+            "Date": "2022-02-01",
+            "Year": 2022,
+            "Home": "Mexico" if index % 2 == 0 else "Canada",
+            "Away": "Canada" if index % 2 == 0 else "Mexico",
+            "HG": 1,
+            "AG": 0,
+            "Label": "H",
+            "Source": "train",
+        }
+        for index in range(total_rows)
+    ])
+    model = training.WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "Canada"])
+    progress = []
+
+    monkeypatch.setattr(training, "match_feature_row", lambda *args, **kwargs: {"bias": 1.0})
+
+    training.build_training_matrix(
+        rows,
+        base_model=model,
+        team_features=pd.DataFrame(),
+        international_matches=pd.DataFrame(),
+        progress_callback=progress.append,
+    )
+
+    assert len(progress) < total_rows // 25
+    assert progress[0]["current"] == 1
+    assert progress[-1]["current"] == total_rows
+    assert {event["progress_every"] for event in progress} == {500}
+
+
+def test_feature_progress_every_payload_override_is_clamped():
+    assert training.feature_progress_every_from_payload({}, 5000) == 500
+    assert training.feature_progress_every_from_payload({"feature_progress_every": 1000}, 5000) == 1000
+    assert training.feature_progress_every_from_payload({"feature_progress_every": 25}, 5000) == 100
+    assert training.feature_progress_every_from_payload({"feature_progress_every": 99999}, 5000) == 5000
+
+
+def test_build_training_matrix_progress_every_override_controls_events(monkeypatch):
+    total_rows = 3000
+    rows = pd.DataFrame([
+        {
+            "Date": "2022-02-01",
+            "Year": 2022,
+            "Home": "Mexico",
+            "Away": "Canada",
+            "HG": 1,
+            "AG": 0,
+            "Label": "H",
+            "Source": "train",
+        }
+        for _ in range(total_rows)
+    ])
+    model = training.WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "Canada"])
+    progress = []
+
+    monkeypatch.setattr(training, "match_feature_row", lambda *args, **kwargs: {"bias": 1.0})
+
+    training.build_training_matrix(
+        rows,
+        base_model=model,
+        team_features=pd.DataFrame(),
+        international_matches=pd.DataFrame(),
+        progress_callback=progress.append,
+        progress_every=1000,
+    )
+
+    assert [event["current"] for event in progress] == [1, 1000, 2000, 3000]
+    assert {event["progress_every"] for event in progress} == {1000}
+
+
+def test_build_training_matrix_recent15_cache_reuses_date_table(monkeypatch):
+    rows = pd.DataFrame([
+        {"Date": "2022-02-01", "Year": 2022, "Home": "Mexico", "Away": "Canada", "HG": 1, "AG": 0, "Label": "H", "Source": "train"},
+        {"Date": "2022-02-01", "Year": 2022, "Home": "Brazil", "Away": "France", "HG": 2, "AG": 1, "Label": "H", "Source": "train"},
+        {"Date": "2022-02-01", "Year": 2022, "Home": "Japan", "Away": "South Africa", "HG": 0, "AG": 0, "Label": "D", "Source": "train"},
+        {"Date": "2022-02-01", "Year": 2022, "Home": "Canada", "Away": "Mexico", "HG": 0, "AG": 1, "Label": "A", "Source": "train"},
+    ])
+    teams = ["Mexico", "Canada", "Brazil", "France", "Japan", "South Africa"]
+    model = training.WorldCupModel.from_history(pd.DataFrame(), teams=teams)
+    cache = training.WorldCupFeatureBuildCache()
+
+    monkeypatch.setattr(training, "match_feature_row", lambda *args, **kwargs: {"bias": 1.0})
+
+    training.build_training_matrix(
+        rows,
+        base_model=model,
+        teams=teams,
+        team_features=pd.DataFrame(),
+        international_matches=make_international_matches(30),
+        feature_cache=cache,
+    )
+
+    assert cache.summary()["recent15_misses"] == 1
+    assert cache.summary()["recent15_hits"] == rows.shape[0] - 1
+
+
 def test_sample_weights_are_passed_to_supported_classifier(monkeypatch):
     captured = {}
 
