@@ -1427,13 +1427,13 @@ async function runMatchMonteCarlo() {
   const button = document.getElementById("simulate-poisson-btn");
   const limit = Number(document.getElementById("sim-match-limit").value || 8);
   const group = document.getElementById("sim-group-filter").value || "";
-  const iterations = Number(document.getElementById("sim-iterations").value || 5000);
+  const iterations = currentMonteCarloSimulations();
   document.getElementById("simulation-summary").textContent =
     `Simulando ${limit} partido${limit === 1 ? "" : "s"} con ${formatInteger(iterations)} simulaciones Monte Carlo...`;
   if (button) button.disabled = true;
   try {
     const result = await api("/api/mundial/monte-carlo-matches", jsonOptions({
-      ...simulationPayload({ use_ml_model: false, mode: "poisson_live" }),
+      ...simulationPayload({ iterations, use_ml_model: false, mode: "poisson_live" }),
       limit,
       group,
     }));
@@ -1847,7 +1847,7 @@ function simulationPayload(overrides = {}) {
   const mlToggle = document.getElementById("sim-use-ml-model");
   return {
     model_id: selectedModelId(),
-    iterations: Number(document.getElementById("sim-iterations").value || 5000),
+    iterations: currentMonteCarloSimulations(),
     seed: Number(document.getElementById("sim-seed").value || 2026),
     poisson_recent_matches: currentPoissonRecentMatches(),
     history_weight: Number(document.getElementById("sim-history-weight").value || 1),
@@ -1866,6 +1866,14 @@ function currentPoissonRecentMatches() {
   const value = Number(input && input.value ? input.value : 15);
   if (!Number.isFinite(value)) return 15;
   return Math.min(50, Math.max(3, Math.round(value)));
+}
+
+function currentMonteCarloSimulations() {
+  const input = document.getElementById("sim-iterations");
+  const value = Number(input && input.value ? input.value : 5000);
+  const simulations = Math.min(100000, Math.max(100, Math.round(Number.isFinite(value) ? value : 5000)));
+  if (input && String(input.value) !== String(simulations)) input.value = simulations;
+  return simulations;
 }
 
 function syncPoissonRecentInputs(source) {

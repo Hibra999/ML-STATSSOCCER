@@ -945,7 +945,7 @@ def monte_carlo_match_iterations(value: Any) -> int:
         number = int(float(value))
     except (TypeError, ValueError):
         number = int(DEFAULT_CONFIG["iterations"])
-    return max(number, 100)
+    return min(max(number, 100), 100_000)
 
 
 def monte_carlo_top_scores(score_counts: Counter[Tuple[int, int]], iterations: int) -> List[Dict[str, Any]]:
