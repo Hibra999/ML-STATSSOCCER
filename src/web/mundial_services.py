@@ -22,7 +22,7 @@ from src.worldcup import (
     tournament_fixtures_dataframe,
 )
 from src.worldcup.model import TOTAL_GOAL_LINES, total_line_suffix
-from src.worldcup.data import CACHE_ROOT, group_letter, groups_from_tournament
+from src.worldcup.data import CACHE_ROOT, fixture_results_status, group_letter, groups_from_tournament
 from src.worldcup.international_provider import download_international_results, international_results_status
 from src.worldcup.lanus_provider import (
     LINEUPS_ROOT,
@@ -293,6 +293,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
     players_df, players_source = load_players(refresh=False)
     fixture_summary = fixture_overview_payload(fixture_df)
     standings = group_standings_payload(groups, fixture_df)
+    results_status = fixture_results_status(fixture_df)
     return {
         "name": tournament.get("name", "World Cup 2026"),
         "teams": sum(len(teams) for teams in groups.values()),
@@ -301,6 +302,11 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
         "group_fixtures": int((fixture_df["Grupo"] != "").sum()) if not fixture_df.empty else 0,
         "players": int(players_df.shape[0]),
         "fixture_source": fixture_source,
+        "result_source": results_status["source"],
+        "result_override_rows": results_status["override_rows"],
+        "result_override_applied": results_status["override_applied"],
+        "confirmed_results": results_status["confirmed_results"],
+        "results_updated_at": results_status["updated_at"],
         "players_source": players_source,
         "opener": fixture_summary["opener"],
         "featured_matches": fixture_summary["featured_matches"],
@@ -318,12 +324,14 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
 def groups(refresh: bool = False) -> Dict[str, Any]:
     tournament, source = load_tournament_2026(refresh=bool(refresh))
     group_map = groups_from_tournament(tournament)
+    fixture_df = tournament_fixtures_dataframe(tournament)
+    results_status = fixture_results_status(fixture_df)
     items = []
     for group_name, team_names in group_map.items():
         items.append({
             "name": group_name,
             "letter": group_letter(group_name),
-            "standings": group_standing_rows(group_name, team_names, tournament_fixtures_dataframe(tournament)),
+            "standings": group_standing_rows(group_name, team_names, fixture_df),
             "teams": [
                 {
                     **team_asset(team),
@@ -337,12 +345,16 @@ def groups(refresh: bool = False) -> Dict[str, Any]:
         "groups": items,
         "table": table_payload(groups_dataframe(tournament), page=1, page_size=80),
         "source": source,
+        "result_source": results_status["source"],
+        "confirmed_results": results_status["confirmed_results"],
+        "results_updated_at": results_status["updated_at"],
     }
 
 
 def fixtures(refresh: bool = False) -> Dict[str, Any]:
     tournament, source = load_tournament_2026(refresh=bool(refresh))
     df = tournament_fixtures_dataframe(tournament)
+    results_status = fixture_results_status(df)
     rows = []
     for _, row in df.iterrows():
         home = str(row.get("Equipo 1", ""))
@@ -357,6 +369,8 @@ def fixtures(refresh: bool = False) -> Dict[str, Any]:
             "score_home": row.get("Goles 1", ""),
             "score_away": row.get("Goles 2", ""),
             "finished": str(row.get("Finalizado", "")).lower() == "si",
+            "result_source": row.get("Fuente Resultado", ""),
+            "result_override": str(row.get("Resultado Override", "")).lower() == "si",
             "home": team_asset(home),
             "away": team_asset(away),
             "label": f"{home} vs {away}",
@@ -365,6 +379,8 @@ def fixtures(refresh: bool = False) -> Dict[str, Any]:
         "fixtures": rows,
         "table": table_payload(df, page=1, page_size=150),
         "source": source,
+        "result_source": results_status["source"],
+        "confirmed_results": results_status["confirmed_results"],
     }
 
 
@@ -1003,10 +1019,22 @@ def group_standings_payload(group_map: Dict[str, List[str]], fixture_df: pd.Data
         {
             "name": group_name,
             "letter": group_letter(group_name),
+            "played_matches": group_finished_fixture_count(group_name, fixture_df),
             "rows": group_standing_rows(group_name, team_names, fixture_df),
         }
         for group_name, team_names in group_map.items()
     ]
+
+
+def group_finished_fixture_count(group_name: str, fixture_df: pd.DataFrame) -> int:
+    if fixture_df is None or fixture_df.empty or "Grupo" not in fixture_df.columns:
+        return 0
+    scoped = fixture_df[fixture_df["Grupo"].astype(str) == str(group_name)].copy()
+    if scoped.empty or not {"Goles 1", "Goles 2"}.issubset(scoped.columns):
+        return 0
+    goals_1 = pd.to_numeric(scoped["Goles 1"], errors="coerce")
+    goals_2 = pd.to_numeric(scoped["Goles 2"], errors="coerce")
+    return int((goals_1.notna() & goals_2.notna()).sum())
 
 
 def group_standing_rows(group_name: str, team_names: List[str], fixture_df: pd.DataFrame) -> List[Dict[str, Any]]:

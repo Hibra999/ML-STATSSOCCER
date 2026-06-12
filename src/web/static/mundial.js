@@ -158,7 +158,8 @@ function renderOverview(overview) {
   document.getElementById("metric-groups").textContent = overview.groups || 0;
   document.getElementById("metric-fixtures").textContent = overview.fixtures || 0;
   document.getElementById("metric-players").textContent = overview.players || 0;
-  document.getElementById("model-source").textContent = `${overview.model || "Modelo"} - ${overview.fixture_source || ""}`;
+  const resultSource = overview.result_source ? ` · resultados: ${overview.result_source}` : "";
+  document.getElementById("model-source").textContent = `${overview.model || "Modelo"} - ${overview.fixture_source || ""}${resultSource}`;
   const featured = overview.featured_matches || [];
   const highlight = overview.highlight || featured[0] || {};
   document.getElementById("hero-meta").textContent = featured.length
@@ -171,7 +172,7 @@ function renderOverview(overview) {
   renderHeroHardware((state.trainingOptions || {}).hardware || {});
   document.getElementById("hero-next-grid").innerHTML = (overview.next_matches || []).map((fixture) => heroNextCardHtml(fixture)).join("")
     || `<article class="hero-next-card empty"><strong>Sin más partidos cargados</strong><small>El calendario adicional aparecerá aquí.</small></article>`;
-  renderOverviewStandings(overview.group_standings || []);
+  renderOverviewStandings(overview.group_standings || [], overview);
 }
 
 function matchTeamHtml(asset, side) {
@@ -199,14 +200,31 @@ function heroFeaturedMatchHtml(fixture, withCountdown) {
   </article>`;
 }
 
-function renderOverviewStandings(groups) {
-  const rows = (groups || []).slice(0, 8);
-  document.getElementById("overview-standings").innerHTML = rows.map((group) => `
+function renderOverviewStandings(groups, overview = {}) {
+  const rows = (groups || []).slice(0, 12);
+  const confirmed = Number(overview.confirmed_results || 0);
+  const applied = Number(overview.result_override_applied || 0);
+  const updated = overview.results_updated_at ? `Actualizado ${overview.results_updated_at}` : "Sin hora de actualizacion";
+  const source = overview.result_source || "fixture-cache";
+  const summary = `<article class="overview-standing-card overview-results-card">
+    <header><strong>Resultados</strong><span>Marc.</span><span></span><span>Local</span></header>
+    <div>
+      <span>${escapeHtml(source)}</span>
+      <b>${escapeHtml(String(confirmed))}</b>
+      <small></small>
+      <small>${escapeHtml(String(applied))}</small>
+    </div>
+    <div class="overview-results-meta">
+      <small>${escapeHtml(updated)}</small>
+    </div>
+  </article>`;
+  document.getElementById("overview-standings").innerHTML = summary + rows.map((group) => `
     <article class="overview-standing-card">
-      <header><strong>${escapeHtml(group.letter || group.name || "")}</strong><span>Pts</span><span>DG</span></header>
+      <header><strong>${escapeHtml(group.letter || group.name || "")}</strong><span>PJ</span><span>Pts</span><span>DG</span></header>
       ${(group.rows || []).map((row) => `
         <div>
           <span>${flagHtml(row)}${escapeHtml(row.team || row.name || "")}</span>
+          <small>${escapeHtml(row.PJ ?? 0)}</small>
           <b>${escapeHtml(row.Pts ?? 0)}</b>
           <small>${escapeHtml(row.DG ?? 0)}</small>
         </div>`).join("")}

@@ -169,6 +169,7 @@ class WorldCupFeatureBuildCache:
         self.static_features: Dict[Tuple[Any, ...], Tuple[pd.DataFrame, pd.DataFrame]] = {}
         self.snapshots: Dict[Tuple[Any, ...], Tuple[WorldCupModel, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
         self.recent15_features: Dict[Tuple[Any, ...], pd.DataFrame] = {}
+        self.table_lookups: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         self.matrices: Dict[Tuple[Any, ...], pd.DataFrame] = {}
         self.stats: Dict[str, int] = {
             "matrix_hits": 0,
@@ -2574,10 +2575,12 @@ def build_training_matrix(
     if market_key not in feature_cache.market_lookup:
         feature_cache.market_lookup[market_key] = build_market_lookup(market_rows)
     market_lookup = feature_cache.market_lookup[market_key]
+    fixture_lookup = cached_fixture_feature_lookup(feature_cache, fixture_feature_rows)
     records = []
     progress_total = int(max(working.shape[0], 1))
     progress_every = normalize_build_progress_every(progress_every, progress_total)
-    for row_index, (_, row) in enumerate(working.iterrows(), start=1):
+    working_records = working.to_dict(orient="records")
+    for row_index, row in enumerate(working_records, start=1):
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
         reference_date = reference_date_for_row(row_date, row_year)
@@ -2663,7 +2666,19 @@ def build_training_matrix(
             row_model=row_model,
             recent15_match_index=recent15_match_index,
         )
-        row_recent15_features = recent15_features_for_match(row_recent15_table, home_team, away_team)
+        row_feature_lookups = {
+            "qualifier": cached_team_feature_lookup(feature_cache, row_qualifier_features),
+            "api_football": cached_team_feature_lookup(feature_cache, row_api_football_features),
+            "recent15": cached_team_feature_lookup(feature_cache, row_recent15_table),
+            "kaggle": cached_team_feature_lookup(
+                feature_cache,
+                feature_cache.team_features_asof[team_features_key],
+                limit=24,
+            ),
+            "history": cached_team_feature_lookup(feature_cache, row_history_features),
+            "matchup": cached_matchup_feature_lookup(feature_cache, row_matchup_features),
+            "fixture": fixture_lookup,
+        }
         records.append(
             match_feature_row(
                 row_model,
@@ -2676,13 +2691,14 @@ def build_training_matrix(
                 market_lookup=market_lookup,
                 qualifier_features=row_qualifier_features,
                 api_football_features=row_api_football_features,
-                recent15_features=row_recent15_features,
+                recent15_features=None,
                 fixture_feature_rows=fixture_feature_rows,
                 fixture_id=row.get("FixtureId"),
                 match_date=row_date,
                 match_year=row_year,
-                fixture_context=row.to_dict(),
+                fixture_context=row,
                 dc_rho=dc_rho,
+                feature_lookups=row_feature_lookups,
             )
         )
         if progress_callback is not None and (row_index == 1 or row_index == progress_total or row_index % progress_every == 0):
@@ -2808,6 +2824,239 @@ def market_for_match_lookup(
     return selected.sort_values("_priority", ascending=False, kind="stable").iloc[0].to_dict()
 
 
+def cached_team_feature_lookup(
+        feature_cache: WorldCupFeatureBuildCache,
+        features: Optional[pd.DataFrame],
+        team_column: str = "Team",
+        exclude_columns: Optional[Iterable[str]] = None,
+        limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    excluded = tuple(exclude_columns or ())
+    cache_key = ("team-feature-lookup", dataframe_cache_id(features), team_column, excluded, "" if limit is None else int(limit))
+    cached = feature_cache.table_lookups.get(cache_key)
+    if cached is not None:
+        return cached
+    lookup = build_team_feature_lookup(features, team_column=team_column, exclude_columns=excluded, limit=limit)
+    feature_cache.table_lookups[cache_key] = lookup
+    return lookup
+
+
+def build_team_feature_lookup(
+        features: Optional[pd.DataFrame],
+        team_column: str = "Team",
+        exclude_columns: Optional[Iterable[str]] = None,
+        limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    if features is None or features.empty or team_column not in features.columns:
+        return {"columns": [], "rows": {}}
+    excluded = set(exclude_columns or ())
+    numeric_cols = [
+        column for column in features.columns
+        if column != team_column and column not in excluded and pd.api.types.is_numeric_dtype(features[column])
+    ]
+    if limit is not None:
+        numeric_cols = numeric_cols[:int(limit)]
+    rows: Dict[str, Dict[str, Any]] = {}
+    for record in features[[team_column] + numeric_cols].to_dict(orient="records"):
+        key = normalize_team_key(record.get(team_column))
+        if key and key not in rows:
+            rows[key] = {column: record.get(column) for column in numeric_cols}
+    return {"columns": numeric_cols, "rows": rows}
+
+
+def cached_matchup_feature_lookup(
+        feature_cache: WorldCupFeatureBuildCache,
+        matchup_features: Optional[pd.DataFrame],
+) -> Dict[str, Any]:
+    cache_key = ("matchup-feature-lookup", dataframe_cache_id(matchup_features))
+    cached = feature_cache.table_lookups.get(cache_key)
+    if cached is not None:
+        return cached
+    lookup = build_matchup_feature_lookup(matchup_features)
+    feature_cache.table_lookups[cache_key] = lookup
+    return lookup
+
+
+def build_matchup_feature_lookup(matchup_features: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    if matchup_features is None or matchup_features.empty or not {"HomeKey", "AwayKey"}.issubset(matchup_features.columns):
+        return {"columns": [], "rows": {}}
+    columns = [column for column in matchup_features.columns if column not in {"HomeKey", "AwayKey"}]
+    rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for record in matchup_features[["HomeKey", "AwayKey"] + columns].to_dict(orient="records"):
+        key = (normalize_team_key(record.get("HomeKey")), normalize_team_key(record.get("AwayKey")))
+        if key[0] and key[1] and key not in rows:
+            rows[key] = {column: record.get(column) for column in columns}
+    return {"columns": columns, "rows": rows}
+
+
+def cached_fixture_feature_lookup(
+        feature_cache: WorldCupFeatureBuildCache,
+        fixture_feature_rows: Optional[pd.DataFrame],
+) -> Dict[str, Any]:
+    cache_key = ("fixture-feature-lookup", dataframe_cache_id(fixture_feature_rows))
+    cached = feature_cache.table_lookups.get(cache_key)
+    if cached is not None:
+        return cached
+    lookup = build_fixture_feature_lookup(fixture_feature_rows)
+    feature_cache.table_lookups[cache_key] = lookup
+    return lookup
+
+
+def build_fixture_feature_lookup(fixture_feature_rows: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    if fixture_feature_rows is None or fixture_feature_rows.empty or not {"fixture_id", "Equipo"}.issubset(fixture_feature_rows.columns):
+        return {"columns": [], "rows": {}}
+    excluded = {"fixture_id", "Equipo", "Rival"}
+    numeric_cols = [
+        column for column in fixture_feature_rows.columns
+        if column not in excluded and pd.api.types.is_numeric_dtype(fixture_feature_rows[column])
+    ]
+    rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    fixture_ids = set()
+    for record in fixture_feature_rows[["fixture_id", "Equipo"] + numeric_cols].to_dict(orient="records"):
+        fixture_key = str(record.get("fixture_id"))
+        team_key = normalize_team_key(record.get("Equipo"))
+        if fixture_key:
+            fixture_ids.add(fixture_key)
+        if fixture_key and team_key and (fixture_key, team_key) not in rows:
+            rows[(fixture_key, team_key)] = {column: record.get(column) for column in numeric_cols}
+    return {"columns": numeric_cols, "rows": rows, "fixtures": fixture_ids}
+
+
+def feature_float(value: Any, missing_default: float = 0.0) -> float:
+    if value is None:
+        return missing_default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def merge_qualifier_feature_lookup(
+        row: Dict[str, float],
+        lookup: Optional[Dict[str, Any]],
+        home_key: str,
+        away_key: str,
+) -> None:
+    row["qualifier_context_available"] = 0.0
+    if not lookup:
+        return
+    rows = lookup.get("rows", {})
+    columns = lookup.get("columns", [])
+    home_features = rows.get(home_key)
+    away_features = rows.get(away_key)
+    if home_features is not None or away_features is not None:
+        row["qualifier_context_available"] = 1.0
+    for column in columns:
+        home_value = feature_float(home_features.get(column), 0.0) if home_features is not None else 0.0
+        away_value = feature_float(away_features.get(column), 0.0) if away_features is not None else 0.0
+        safe = normalize_column(column)
+        row[f"{safe}_home"] = home_value
+        row[f"{safe}_away"] = away_value
+        row[f"{safe}_diff"] = home_value - away_value
+
+
+def merge_team_feature_lookup(
+        row: Dict[str, float],
+        lookup: Optional[Dict[str, Any]],
+        home_key: str,
+        away_key: str,
+        prefix: str,
+) -> None:
+    if not lookup:
+        return
+    rows = lookup.get("rows", {})
+    columns = lookup.get("columns", [])
+    home_features = rows.get(home_key)
+    away_features = rows.get(away_key)
+    for column in columns:
+        home_value = feature_float(home_features.get(column), 0.0) if home_features is not None else 0.0
+        away_value = feature_float(away_features.get(column), 0.0) if away_features is not None else 0.0
+        safe = normalize_column(column)
+        row[f"{prefix}_{safe}_home"] = home_value
+        row[f"{prefix}_{safe}_away"] = away_value
+        row[f"{prefix}_{safe}_diff"] = home_value - away_value
+
+
+def merge_recent15_feature_lookup(
+        row: Dict[str, float],
+        lookup: Optional[Dict[str, Any]],
+        home_key: str,
+        away_key: str,
+) -> None:
+    if not lookup:
+        return
+    rows = lookup.get("rows", {})
+    columns = lookup.get("columns", [])
+    home_features = rows.get(home_key)
+    away_features = rows.get(away_key)
+    for column in columns:
+        home_value = feature_float(home_features.get(column), 0.0) if home_features is not None else 0.0
+        away_value = feature_float(away_features.get(column), 0.0) if away_features is not None else 0.0
+        safe = normalize_column(column)
+        key = safe if safe.startswith("recent15_") else f"recent15_{safe}"
+        row[f"{key}_home"] = home_value
+        row[f"{key}_away"] = away_value
+        row[f"{key}_diff"] = home_value - away_value
+
+
+def recent15_context_available_from_lookup(
+        lookup: Optional[Dict[str, Any]],
+        home_key: str,
+        away_key: str,
+) -> float:
+    if not lookup:
+        return 0.0
+    rows = lookup.get("rows", {})
+    for team_key in (home_key, away_key):
+        record = rows.get(team_key)
+        if record is not None and feature_float(record.get("recent15_matches"), 0.0) > 0.0:
+            return 1.0
+    return 0.0
+
+
+def merge_matchup_feature_lookup(
+        row: Dict[str, float],
+        lookup: Optional[Dict[str, Any]],
+        home_key: str,
+        away_key: str,
+) -> None:
+    if not lookup:
+        return
+    record = lookup.get("rows", {}).get((home_key, away_key))
+    if not record:
+        return
+    for column in lookup.get("columns", []):
+        value = record.get(column)
+        if isinstance(value, (int, float, np.integer, np.floating)) and not pd.isna(value):
+            row[f"h2h_{normalize_column(column)}"] = float(value)
+
+
+def merge_fixture_feature_lookup(
+        row: Dict[str, float],
+        lookup: Optional[Dict[str, Any]],
+        home_key: str,
+        away_key: str,
+        fixture_id: Optional[Any],
+        prefix: str,
+) -> None:
+    if not lookup or fixture_id in {"", None}:
+        return
+    rows = lookup.get("rows", {})
+    columns = lookup.get("columns", [])
+    fixture_key = str(fixture_id)
+    if fixture_key not in lookup.get("fixtures", set()):
+        return
+    home_features = rows.get((fixture_key, home_key))
+    away_features = rows.get((fixture_key, away_key))
+    for column in columns:
+        home_value = feature_float(home_features.get(column), 0.0) if home_features is not None else 0.0
+        away_value = feature_float(away_features.get(column), 0.0) if away_features is not None else 0.0
+        safe = normalize_column(column)
+        row[f"{prefix}_{safe}_home"] = home_value
+        row[f"{prefix}_{safe}_away"] = away_value
+        row[f"{prefix}_{safe}_diff"] = home_value - away_value
+
+
 def match_feature_row(
         base_model: WorldCupModel,
         team_features: pd.DataFrame,
@@ -2825,8 +3074,12 @@ def match_feature_row(
         match_year: Optional[int] = None,
         fixture_context: Optional[Dict[str, Any]] = None,
         market_lookup: Optional[Dict[Tuple[str, str], pd.DataFrame]] = None,
+        feature_lookups: Optional[Dict[str, Any]] = None,
         dc_rho: float = 0.0,
 ) -> Dict[str, float]:
+    home_key = normalize_team_key(home)
+    away_key = normalize_team_key(away)
+    recent15_lookup = feature_lookups.get("recent15") if feature_lookups else None
     p_home = base_model.profile(home)
     p_away = base_model.profile(away)
     poisson = base_model.match_probabilities(home, away)
@@ -2863,7 +3116,11 @@ def match_feature_row(
         "host_flag_diff": float((1.0 if home in HOST_TEAMS else 0.0) - (1.0 if away in HOST_TEAMS else 0.0)),
         "rating_attack_interaction": float((p_home.rating - p_away.rating) * (p_home.attack - p_away.attack)),
         "rating_defense_interaction": float((p_home.rating - p_away.rating) * (p_home.defense - p_away.defense)),
-        "recent15_context_available": recent15_context_available(recent15_features if recent15_features is not None else pd.DataFrame(), home, away),
+        "recent15_context_available": (
+            recent15_context_available_from_lookup(recent15_lookup, home_key, away_key)
+            if recent15_lookup is not None
+            else recent15_context_available(recent15_features if recent15_features is not None else pd.DataFrame(), home, away)
+        ),
     }
     row.update(shrinkage_feature_row(p_home, p_away))
     row.update(score_grid_features(lambda_home, lambda_away, max_goals=base_model.max_goals, score_cap=4))
@@ -2885,27 +3142,38 @@ def match_feature_row(
         model_probs={"H": poisson.get("home", 0.0), "D": poisson.get("draw", 0.0), "A": poisson.get("away", 0.0)},
         model_totals=total_line_probabilities_from_probs(poisson),
     ))
-    merge_qualifier_feature_block(row, qualifier_features if qualifier_features is not None else pd.DataFrame(), home, away)
-    merge_team_feature_block(row, api_football_features if api_football_features is not None else pd.DataFrame(), home, away, prefix="api_football")
-    merge_recent15_feature_block(row, recent15_features if recent15_features is not None else pd.DataFrame(), home, away)
+    if feature_lookups is not None:
+        merge_qualifier_feature_lookup(row, feature_lookups.get("qualifier"), home_key, away_key)
+        merge_team_feature_lookup(row, feature_lookups.get("api_football"), home_key, away_key, prefix="api_football")
+        merge_recent15_feature_lookup(row, feature_lookups.get("recent15"), home_key, away_key)
+    else:
+        merge_qualifier_feature_block(row, qualifier_features if qualifier_features is not None else pd.DataFrame(), home, away)
+        merge_team_feature_block(row, api_football_features if api_football_features is not None else pd.DataFrame(), home, away, prefix="api_football")
+        merge_recent15_feature_block(row, recent15_features if recent15_features is not None else pd.DataFrame(), home, away)
     row.update(fixture_context_features(fixture_context or {}, home=home, away=away, fixture_id=fixture_id, match_date=match_date, match_year=match_year))
-    merge_team_feature_block(row, team_features, home, away, prefix="kaggle", limit=24)
-    merge_team_feature_block(
-        row,
-        history_team_features if history_team_features is not None else pd.DataFrame(),
-        home,
-        away,
-        prefix="history",
-    )
-    merge_matchup_feature_block(row, matchup_features if matchup_features is not None else pd.DataFrame(), home, away)
-    merge_fixture_feature_block(
-        row,
-        fixture_feature_rows if fixture_feature_rows is not None else pd.DataFrame(),
-        home,
-        away,
-        fixture_id=fixture_id,
-        prefix="xi",
-    )
+    if feature_lookups is not None:
+        merge_team_feature_lookup(row, feature_lookups.get("kaggle"), home_key, away_key, prefix="kaggle")
+        merge_team_feature_lookup(row, feature_lookups.get("history"), home_key, away_key, prefix="history")
+        merge_matchup_feature_lookup(row, feature_lookups.get("matchup"), home_key, away_key)
+        merge_fixture_feature_lookup(row, feature_lookups.get("fixture"), home_key, away_key, fixture_id=fixture_id, prefix="xi")
+    else:
+        merge_team_feature_block(row, team_features, home, away, prefix="kaggle", limit=24)
+        merge_team_feature_block(
+            row,
+            history_team_features if history_team_features is not None else pd.DataFrame(),
+            home,
+            away,
+            prefix="history",
+        )
+        merge_matchup_feature_block(row, matchup_features if matchup_features is not None else pd.DataFrame(), home, away)
+        merge_fixture_feature_block(
+            row,
+            fixture_feature_rows if fixture_feature_rows is not None else pd.DataFrame(),
+            home,
+            away,
+            fixture_id=fixture_id,
+            prefix="xi",
+        )
     return row
 
 
@@ -3685,6 +3953,16 @@ def read_fixture_feature_rows() -> pd.DataFrame:
 
 
 def worldcup_played_fixture_rows(tournament: Dict[str, Any]) -> pd.DataFrame:
+    working = worldcup_result_due_fixture_rows(tournament)
+    if working.empty:
+        return pd.DataFrame(columns=working.columns)
+    working["HG"] = pd.to_numeric(working["Goles 1"], errors="coerce")
+    working["AG"] = pd.to_numeric(working["Goles 2"], errors="coerce")
+    working = working[working["HG"].notna() & working["AG"].notna()].copy()
+    return working.sort_values(["_date", "No."], kind="stable")
+
+
+def worldcup_result_due_fixture_rows(tournament: Dict[str, Any]) -> pd.DataFrame:
     fixture_df = tournament_fixtures_dataframe(tournament)
     if fixture_df.empty:
         return pd.DataFrame(columns=fixture_df.columns)
@@ -3805,6 +4083,7 @@ def walk_forward_refresh_state() -> Dict[str, Any]:
             tournament, _ = load_tournament_2026(refresh=False)
         except Exception:
             tournament = fallback_tournament_2026()
+    due = worldcup_result_due_fixture_rows(tournament)
     played = worldcup_played_fixture_rows(tournament)
     completed = completed_worldcup_training_rows(tournament)
     matches = read_optional_csv(WALK_FORWARD_MATCHES_FILE)
@@ -3813,9 +4092,11 @@ def walk_forward_refresh_state() -> Dict[str, Any]:
     if not matches.empty and "fixture_id" in matches.columns:
         if "included_result_only_at" in matches.columns:
             included_result_ids = set(matches[matches["included_result_only_at"].fillna("").astype(str).str.len() > 0]["fixture_id"].astype(str))
+    due_ids = set(due["No."].astype(str)) if not due.empty else set()
     played_ids = set(played["No."].astype(str)) if not played.empty else set()
     completed_ids = set(completed["FixtureId"].astype(str)) if not completed.empty else set()
     stale_ids = sorted(played_ids - snapshot_ids)
+    pending_result_ids = sorted(due_ids - completed_ids)
     ready_result_ids = sorted(completed_ids - included_result_ids)
     latest_fixture = ""
     if not played.empty:
@@ -3826,11 +4107,15 @@ def walk_forward_refresh_state() -> Dict[str, Any]:
         note = f"Hay {len(stale_ids)} partidos ya jugados sin snapshot. Conviene recargar datos."
     elif ready_result_ids:
         note = f"Hay {len(ready_result_ids)} partidos listos para reentreno base."
+    elif pending_result_ids:
+        note = f"Hay {len(pending_result_ids)} partidos con fecha pasada esperando marcador final."
     return {
         "played_matches": int(len(played_ids)),
+        "date_passed_matches": int(len(due_ids)),
         "completed_results": int(len(completed_ids)),
         "snapshot_matches": int(len(snapshot_ids)),
         "stale_match_ids": stale_ids,
+        "pending_result_ids": pending_result_ids,
         "ready_result_ids": ready_result_ids,
         "ready_result_only": int(len(ready_result_ids)),
         "requires_reload": bool(stale_ids),
@@ -5850,7 +6135,7 @@ def walk_forward_status() -> Dict[str, int]:
     players = read_optional_csv(WALK_FORWARD_PLAYERS_FILE)
     team_features = read_optional_csv(WALK_FORWARD_TEAM_FEATURES_FILE)
     refresh_state = walk_forward_refresh_state()
-    pending_results = int(refresh_state["completed_results"] - refresh_state["ready_result_only"]) if refresh_state["completed_results"] else 0
+    pending_results = int(len(refresh_state.get("pending_result_ids", [])))
     ready_for_retrain = int(refresh_state["ready_result_only"])
     return {
         "matches": int(matches.shape[0]),

@@ -18,9 +18,11 @@ HISTORY_YEARS = (
     1982, 1986, 1990, 1994, 1998, 2002, 2006, 2010, 2014, 2018, 2022,
 )
 CACHE_ROOT = Path("storage") / "worldcup" / "cache"
+WORLD_CUP_2026_RESULTS_FILE = CACHE_ROOT / "worldcup_2026_results.csv"
 PLAYERS_LOCAL_FILE = Path("storage") / "worldcup" / "players_2026.csv"
 PLAYERS_CACHE_FILE = CACHE_ROOT / "players_2026.csv"
 WIKIPEDIA_SQUADS_URL = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup_squads"
+RESULT_OVERRIDE_COLUMNS = ["date", "home", "away", "home_goals", "away_goals", "status", "source", "updated_at"]
 
 FALLBACK_2026_GROUPS: Dict[str, List[str]] = {
     "Group A": ["Mexico", "South Africa", "South Korea", "Czech Republic"],
@@ -103,6 +105,59 @@ def load_tournament_2026(refresh: bool = False) -> Tuple[Dict[str, Any], str]:
 
     fallback = fallback_tournament_2026()
     return fallback, "fallback:embedded-groups"
+
+
+def load_worldcup_results_override(path: Path = WORLD_CUP_2026_RESULTS_FILE) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=RESULT_OVERRIDE_COLUMNS)
+    try:
+        frame = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame(columns=RESULT_OVERRIDE_COLUMNS)
+    if frame.empty:
+        return pd.DataFrame(columns=RESULT_OVERRIDE_COLUMNS)
+    output = frame.copy()
+    for column in RESULT_OVERRIDE_COLUMNS:
+        if column not in output.columns:
+            output[column] = ""
+    output["date"] = pd.to_datetime(output["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    output["home"] = output["home"].map(clean_team_name)
+    output["away"] = output["away"].map(clean_team_name)
+    output["home_goals"] = pd.to_numeric(output["home_goals"], errors="coerce")
+    output["away_goals"] = pd.to_numeric(output["away_goals"], errors="coerce")
+    output["status"] = output["status"].astype(str).str.strip().str.lower()
+    output = output[
+        output["date"].notna() &
+        output["home"].astype(str).str.len().gt(1) &
+        output["away"].astype(str).str.len().gt(1) &
+        output["home_goals"].notna() &
+        output["away_goals"].notna()
+    ].copy()
+    return output[RESULT_OVERRIDE_COLUMNS].reset_index(drop=True)
+
+
+def fixture_results_status(fixture_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    overrides = load_worldcup_results_override()
+    confirmed = 0
+    override_applied = 0
+    if fixture_df is not None and not fixture_df.empty and {"Goles 1", "Goles 2"}.issubset(fixture_df.columns):
+        goals_1 = pd.to_numeric(fixture_df["Goles 1"], errors="coerce")
+        goals_2 = pd.to_numeric(fixture_df["Goles 2"], errors="coerce")
+        confirmed = int((goals_1.notna() & goals_2.notna()).sum())
+        if "Resultado Override" in fixture_df.columns:
+            override_applied = int(fixture_df["Resultado Override"].astype(str).str.lower().eq("si").sum())
+    latest_update = ""
+    if not overrides.empty and "updated_at" in overrides.columns:
+        latest_update = str(overrides["updated_at"].dropna().astype(str).max() or "")
+    source = "override local" if not overrides.empty else "fixture-cache"
+    return {
+        "source": source,
+        "override_file": str(WORLD_CUP_2026_RESULTS_FILE),
+        "override_rows": int(overrides.shape[0]),
+        "override_applied": override_applied,
+        "confirmed_results": confirmed,
+        "updated_at": latest_update,
+    }
 
 
 def fallback_tournament_2026() -> Dict[str, Any]:
@@ -210,26 +265,72 @@ def groups_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
 
 
 def tournament_fixtures_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
+    result_overrides = _worldcup_result_overrides_by_key()
     rows = []
     for index, match in enumerate(tournament.get("matches", []), start=1):
         score = match.get("score") or {}
         ft = score.get("ft") if isinstance(score, dict) else None
         goals_1 = ft[0] if isinstance(ft, list) and len(ft) == 2 else ""
         goals_2 = ft[1] if isinstance(ft, list) and len(ft) == 2 else ""
+        home = clean_team_name(match.get("team1"))
+        away = clean_team_name(match.get("team2"))
+        date_value = match.get("date", "")
+        result_source = "fixture-cache" if goals_1 != "" and goals_2 != "" else ""
+        result_updated = ""
+        result_override = "No"
+        override = result_overrides.get(_worldcup_result_key(date_value, home, away))
+        if override:
+            goals_1 = int(override["home_goals"])
+            goals_2 = int(override["away_goals"])
+            result_source = str(override.get("source") or "local_override")
+            result_updated = str(override.get("updated_at") or "")
+            result_override = "Si"
         rows.append({
             "No.": match.get("num") or index,
-            "Fecha": match.get("date", ""),
+            "Fecha": date_value,
             "Hora": match.get("time", ""),
             "Ronda": match.get("round", ""),
             "Grupo": match.get("group", ""),
-            "Equipo 1": clean_team_name(match.get("team1")),
-            "Equipo 2": clean_team_name(match.get("team2")),
+            "Equipo 1": home,
+            "Equipo 2": away,
             "Sede": match.get("ground", ""),
             "Goles 1": goals_1,
             "Goles 2": goals_2,
             "Finalizado": "Si" if goals_1 != "" and goals_2 != "" else "No",
+            "Fuente Resultado": result_source,
+            "Resultado Actualizado": result_updated,
+            "Resultado Override": result_override,
         })
-    return pd.DataFrame(rows, columns=["No.", "Fecha", "Hora", "Ronda", "Grupo", "Equipo 1", "Equipo 2", "Sede", "Goles 1", "Goles 2", "Finalizado"])
+    return pd.DataFrame(rows, columns=[
+        "No.", "Fecha", "Hora", "Ronda", "Grupo", "Equipo 1", "Equipo 2", "Sede",
+        "Goles 1", "Goles 2", "Finalizado", "Fuente Resultado", "Resultado Actualizado", "Resultado Override",
+    ])
+
+
+def _worldcup_result_overrides_by_key() -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+    overrides = load_worldcup_results_override()
+    if overrides.empty:
+        return {}
+    result: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for _, row in overrides.iterrows():
+        if str(row.get("status", "")).lower() not in {"final", "finished", "si", "sí"}:
+            continue
+        key = _worldcup_result_key(row.get("date"), row.get("home"), row.get("away"))
+        if key[0] and key[1] and key[2]:
+            result[key] = row.to_dict()
+    return result
+
+
+def _worldcup_result_key(date_value: Any, home: Any, away: Any) -> Tuple[str, str, str]:
+    timestamp = pd.to_datetime(date_value, errors="coerce")
+    date_key = str(timestamp.date()) if pd.notna(timestamp) else str(date_value or "")[:10]
+    return date_key, _worldcup_team_key(home), _worldcup_team_key(away)
+
+
+def _worldcup_team_key(value: Any) -> str:
+    text = str(value or "").lower().replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def teams_dataframe(tournament: Dict[str, Any], model=None) -> pd.DataFrame:

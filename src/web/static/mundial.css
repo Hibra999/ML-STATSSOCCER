@@ -371,7 +371,7 @@ h3 { font-size: 16px; }
 .overview-standing-card header,
 .overview-standing-card div {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 38px 38px;
+  grid-template-columns: minmax(0, 1fr) 30px 38px 38px;
   gap: 8px;
   align-items: center;
 }
@@ -391,6 +391,25 @@ h3 { font-size: 16px; }
 .overview-standing-card b,
 .overview-standing-card small {
   text-align: right;
+}
+.overview-results-card {
+  align-content: start;
+}
+.overview-results-card header {
+  grid-template-columns: minmax(0, 1fr) 38px 30px 38px;
+}
+.overview-results-card .overview-results-meta {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+.overview-results-card .overview-results-meta span,
+.overview-results-card .overview-results-meta small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hero-next-card {
   display: grid;
