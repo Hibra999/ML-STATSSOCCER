@@ -17,6 +17,7 @@ const state = {
   jobPollingInFlight: false,
   newModelMode: false,
   lastSimulation: null,
+  lastUpcomingReport: null,
 };
 
 const jobLabels = {
@@ -63,6 +64,7 @@ function bindEvents() {
   document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
   document.getElementById("training-retrain-base").addEventListener("click", () => trainWorldCupModel("result_only"));
   document.getElementById("upcoming-predict-btn").addEventListener("click", runUpcomingPredictions);
+  document.getElementById("upcoming-pipeline-mode").addEventListener("change", syncUpcomingPipelineControls);
   document.getElementById("worldcup-model-type").addEventListener("change", () => applyModelDefaults(document.getElementById("worldcup-model-type").value, true));
   document.getElementById("worldcup-model-id").addEventListener("input", (event) => { event.target.dataset.autofilled = "false"; });
   document.getElementById("worldcup-tuning-enabled").addEventListener("change", applyTuningLocks);
@@ -71,6 +73,7 @@ function bindEvents() {
     const input = document.getElementById(id);
     if (input) input.addEventListener("change", () => syncPoissonRecentInputs(input));
   });
+  syncUpcomingPipelineControls();
 }
 
 async function api(path, options = {}) {
@@ -138,6 +141,8 @@ function setLoading() {
   document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
   renderWorldcupJobProgress("training");
   document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones pendientes");
+  document.getElementById("upcoming-report").innerHTML = loadingHtml("Reporte pendiente");
+  renderWorldcupJobProgress("upcoming-report");
   document.getElementById("match-simulation-grid").innerHTML = loadingHtml("Monte Carlo pendiente");
   document.getElementById("match-simulation-table").innerHTML = "";
   document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
@@ -1251,17 +1256,162 @@ function applyTuningLocks() {
 }
 
 async function runUpcomingPredictions() {
+  clearAlert();
   const limit = Number(document.getElementById("upcoming-predict-limit").value || 8);
   const group = document.getElementById("upcoming-group-filter").value || "";
   const modelId = document.getElementById("upcoming-model-select").value || selectedModelId();
-  document.getElementById("upcoming-summary").textContent = `Calculando próximos partidos con Poisson ultimos ${currentPoissonRecentMatches()}...`;
+  const pipelineMode = document.getElementById("upcoming-pipeline-mode").value || "default_ai_poisson";
+  document.getElementById("upcoming-summary").textContent = `Generando reporte con Poisson ultimos ${currentPoissonRecentMatches()}...`;
   try {
-    const result = await api("/api/mundial/predict-upcoming", jsonOptions({ ...simulationPayload(), model_id: modelId, limit, group }));
-    renderUpcomingPredictions(result);
+    const job = await api("/api/mundial/predict-upcoming-report", jsonOptions({
+      ...simulationPayload({
+        model_id: modelId,
+        use_ml_model: pipelineMode === "poisson_sota" ? false : Boolean(document.getElementById("sim-use-ml-model").checked),
+        score_model: "independent_poisson",
+      }),
+      pipeline_mode: pipelineMode,
+      limit,
+      group,
+      bayes_profile: (document.getElementById("upcoming-bayes-profile") || {}).value || "deep",
+      sota_device: (document.getElementById("upcoming-sota-device") || {}).value || "auto",
+    }));
+    trackWorldcupJob(job, "upcoming-report");
   } catch (error) {
-    document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones no disponibles");
+    document.getElementById("upcoming-report").innerHTML = loadingHtml("Reporte no disponible");
     showError(error.message);
   }
+}
+
+function syncUpcomingPipelineControls() {
+  const mode = (document.getElementById("upcoming-pipeline-mode") || {}).value || "default_ai_poisson";
+  const isSota = mode === "poisson_sota";
+  const defaultControls = document.getElementById("upcoming-default-controls");
+  const sotaControls = document.getElementById("upcoming-sota-controls");
+  if (defaultControls) defaultControls.classList.toggle("hidden", isSota);
+  if (sotaControls) sotaControls.classList.toggle("hidden", !isSota);
+  const mlToggle = document.getElementById("sim-use-ml-model");
+  if (mlToggle && isSota) mlToggle.checked = false;
+}
+
+function renderUpcomingReport(report) {
+  state.lastUpcomingReport = report;
+  const summary = report.summary || {};
+  const fixtures = report.fixture_reports || [];
+  const hardware = summary.hardware || {};
+  const warnings = summary.warnings || [];
+  document.getElementById("upcoming-summary").textContent =
+    `${summary.pipeline_label || "Reporte"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()} - ${summary.report_id || report.report_id || ""}`;
+  document.getElementById("upcoming-predictions").innerHTML = "";
+  document.getElementById("upcoming-report").innerHTML = `
+    <div class="report-summary-grid">
+      ${reportSummaryCard("Pipeline", summary.pipeline_label || summary.pipeline_mode || "-")}
+      ${reportSummaryCard("Fuerza global", globalConsensusStrength(fixtures))}
+      ${reportSummaryCard("Partidos", `${summary.returned || 0}/${summary.requested || 0}`)}
+      ${reportSummaryCard("Hardware", `${hardware.actual_device || "cpu"} · ${hardware.requested_device || "auto"}`)}
+      ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
+    </div>
+    ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    <div class="upcoming-grid">
+      ${fixtures.map((fixtureReport) => reportFixtureCardHtml(fixtureReport)).join("") || loadingHtml("Sin fixtures futuros")}
+    </div>`;
+  renderTable("upcoming-predictions-table", report.table);
+}
+
+function reportSummaryCard(label, value) {
+  return `<article class="report-summary-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
+}
+
+function globalConsensusStrength(fixtures) {
+  const counts = new Map();
+  (fixtures || []).forEach((item) => {
+    const strength = ((item.consensus || {}).strength) || "Baja";
+    counts.set(strength, (counts.get(strength) || 0) + 1);
+  });
+  if (!counts.size) return "-";
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
+function reportFixtureCardHtml(report) {
+  const fixture = report.fixture || {};
+  const consensus = report.consensus || {};
+  const models = report.models || [];
+  const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
+  const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
+  const outcomeCounts = consensus.outcome_counts || {};
+  const eligible = Math.max(Number(consensus.eligible_models || 0), 1);
+  const outcomes = [
+    { key: "home", label: "1", team: fixture.home || "Local", value: ((Number(outcomeCounts.home || 0) / eligible) * 100).toFixed(0) },
+    { key: "draw", label: "X", team: "Empate", value: ((Number(outcomeCounts.draw || 0) / eligible) * 100).toFixed(0) },
+    { key: "away", label: "2", team: fixture.away || "Visitante", value: ((Number(outcomeCounts.away || 0) / eligible) * 100).toFixed(0) },
+  ];
+  const consensusClass = ["Baja", ""].includes(consensus.strength || "") ? "low" : "";
+  return `<article class="upcoming-card report-fixture-card">
+    <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
+    <div class="upcoming-match">
+      <div class="upcoming-team">${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
+      <span>vs</span>
+      <div class="upcoming-team away">${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
+    </div>
+    <div class="prediction-pick">
+      <span>Consenso · ${escapeHtml(consensus.eligible_models || 0)} modelos válidos</span>
+      <strong>${escapeHtml(consensus.outcome_label || "-")} · ${escapeHtml(consensus.strength || "Baja")}</strong>
+    </div>
+    <span class="consensus-badge ${escapeAttr(consensusClass)}">${escapeHtml(Math.round(Number(consensus.outcome_share || 0) * 100))}% 1X2 · ${escapeHtml(Math.round(Number(consensus.signature_share || 0) * 100))}% firma</span>
+    <div class="outcome-list">
+      ${outcomes.map((item) => `
+        <div class="outcome-row ${escapeAttr(item.key === consensus.outcome ? "active" : "")}">
+          <span>${escapeHtml(item.label)}</span>
+          <div><i style="width:${escapeAttr(clampPercent(item.value))}%"></i></div>
+          <b>${escapeHtml(item.value)}%</b>
+        </div>`).join("")}
+    </div>
+    ${reportTotalsConsensusHtml(consensus)}
+    ${agreementMatrixHtml(models)}
+    <div class="model-consensus-list">
+      ${models.map((model) => modelConsensusRowHtml(model)).join("")}
+    </div>
+    ${report.warnings && report.warnings.length ? `<div class="warning-list">${report.warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+  </article>`;
+}
+
+function reportTotalsConsensusHtml(consensus) {
+  const totals = consensus.totals || {};
+  const lines = ["0.5", "1.5", "2.5", "3.5"];
+  return `<div class="totals-list">
+    ${lines.map((line) => {
+      const item = totals[line] || {};
+      return `<div class="total-row">
+        <span>U/O ${escapeHtml(line)}</span>
+        <b>${escapeHtml(item.label || "-")}</b>
+        <b>${escapeHtml(Math.round(Number(item.share || 0) * 100))}%</b>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function agreementMatrixHtml(models) {
+  return `<div class="agreement-matrix">
+    ${(models || []).map((model) => {
+      const decision = model.decision || {};
+      return `<div class="agreement-cell">
+        <span>${escapeHtml(model.model_label || model.model_key || "")}</span>
+        <strong>${escapeHtml(decision.label || "-")} · ${escapeHtml(model.top_score || "-")}</strong>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function modelConsensusRowHtml(model) {
+  const decision = model.decision || {};
+  const expected = model.expected_goals || {};
+  const warnings = model["warnings"] || [];
+  return `<div class="model-consensus-row ${escapeAttr(model.fallback ? "fallback" : "")}">
+    <strong>${escapeHtml(model.model_label || model.model_key || "")}</strong>
+    <b>${escapeHtml(decision.label || "-")}</b>
+    <span>${escapeHtml(model.top_score || "-")}</span>
+    <span>λ ${escapeHtml(expected.home ?? "-")} / ${escapeHtml(expected.away ?? "-")}</span>
+    <span>${escapeHtml(model.consensus_eligible ? "Cuenta" : "Excluido")}${warnings.length ? ` · ${escapeHtml(warnings[0])}` : ""}</span>
+  </div>`;
 }
 
 function renderUpcomingPredictions(result) {
@@ -1639,6 +1789,11 @@ function worldcupJobProgressSignature(job) {
     progress.percent ?? "",
     progress.current_trial ?? "",
     progress.total_trials ?? "",
+    progress.model_index ?? "",
+    progress.model_total ?? "",
+    progress.model_key ?? "",
+    progress.fixture_index ?? "",
+    progress.fixture_total ?? "",
     job.updated_at || "",
   ].join("|");
 }
@@ -1647,6 +1802,7 @@ function worldcupJobPollDelay(job) {
   const progress = job.progress || {};
   const kind = job.kind || "";
   const stage = progress.stage || "";
+  if (kind === "upcoming-report") return 1000;
   const base = kind === "simulation" ? 2000 : stage === "tuning" ? 5000 : 3000;
   const idleCount = Number(job.pollIdleCount || 0);
   if (idleCount >= 4) return 10000;
@@ -1690,10 +1846,19 @@ async function handleWorldcupJobComplete(job) {
   if (job.kind === "simulation") {
     renderSimulation(result);
   }
+  if (job.kind === "upcoming-report") {
+    renderUpcomingReport(result);
+  }
 }
 
 function renderWorldcupJobProgress(kind) {
-  const targetId = kind === "training" ? "worldcup-training-progress" : kind === "simulation" ? "worldcup-simulation-progress" : "";
+  const targetId = kind === "training"
+    ? "worldcup-training-progress"
+    : kind === "simulation"
+      ? "worldcup-simulation-progress"
+      : kind === "upcoming-report"
+        ? "worldcup-upcoming-progress"
+        : "";
   if (!targetId) return;
   const target = document.getElementById(targetId);
   if (!target) return;
@@ -1715,6 +1880,9 @@ function renderWorldcupJobProgress(kind) {
   const market = progress.market ? `<span>${escapeHtml(progress.market)}</span>` : "";
   const throughput = progress.rows_per_second ? `<span>${escapeHtml(progress.rows_per_second)} filas/s</span>` : "";
   const eta = progress.eta_seconds ? `<span>ETA ${escapeHtml(formatElapsed(progress.eta_seconds))}</span>` : "";
+  const modelStep = progress.model_total ? `<span>Modelo ${escapeHtml(progress.model_index || 0)}/${escapeHtml(progress.model_total)}</span>` : "";
+  const fixtureStep = progress.fixture_total ? `<span>Fixture ${escapeHtml(progress.fixture_index || 0)}/${escapeHtml(progress.fixture_total)}</span>` : "";
+  const hardware = progress.hardware ? `<span>${escapeHtml((progress.hardware || {}).actual_device || "cpu")}</span>` : "";
   const error = job.error ? `<span>${escapeHtml(cleanMessage(job.error))}</span>` : "";
   const activity = worldcupJobActivityLabel(job);
   target.className = `worldcup-progress ${escapeAttr(job.status || "queued")}`;
@@ -1733,6 +1901,9 @@ function renderWorldcupJobProgress(kind) {
       ${market}
       ${throughput}
       ${eta}
+      ${modelStep}
+      ${fixtureStep}
+      ${hardware}
       ${best}
       ${stateText}
       ${activity ? `<span>${escapeHtml(activity)}</span>` : ""}
@@ -1776,7 +1947,9 @@ function isTerminalJob(job) {
 function setWorldcupJobBusy(kind, busy) {
   const ids = kind === "simulation"
     ? ["simulate-poisson-btn"]
-    : ["training-train", "training-retrain-base"];
+    : kind === "upcoming-report"
+      ? ["upcoming-predict-btn"]
+      : ["training-train", "training-retrain-base"];
   ids.forEach((id) => {
     const button = document.getElementById(id);
     if (button) button.disabled = Boolean(busy);

@@ -17,7 +17,6 @@
       <button class="nav-pill" data-section="grupos">Grupos</button>
       <button class="nav-pill" data-section="fixtures">Calendario</button>
       <button class="nav-pill" data-section="entrenamiento">Entrenamiento y Modelo</button>
-      <button class="nav-pill" data-section="simulacion">Simulación</button>
       <button class="nav-pill" data-section="predicciones">Predicciones Futuras</button>
       <button class="nav-pill" data-section="datos">Datos</button>
     </nav>
@@ -82,24 +81,71 @@
     <section id="predicciones" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Predicciones Futuras</h2>
-        <small id="upcoming-summary">Modelo entrenado si esta disponible</small>
+        <small id="upcoming-summary">Reporte de consenso por pipeline</small>
       </div>
       <div class="prediction-dock clean-dock">
         <div>
           <h3>Próximos N partidos</h3>
-          <small>Modelo actual y Poisson configurable por fixture</small>
+          <small>Default híbrido o secuencia Poisson + SOTA</small>
         </div>
+        <label>Pipeline<select id="upcoming-pipeline-mode">
+          <option value="default_ai_poisson">Default: IA + Poisson simple</option>
+          <option value="poisson_sota">Poisson + SOTA</option>
+        </select></label>
         <label>N partidos<input id="upcoming-predict-limit" type="number" min="1" max="72" step="1" value="8"></label>
         <label>Poisson últimos<input id="upcoming-poisson-recent-matches" type="number" min="3" max="50" step="1" value="15"></label>
-        <select id="upcoming-model-select"></select>
-        <select id="upcoming-group-filter"></select>
-        <label class="check"><input id="sim-use-ml-model" type="checkbox"> ML híbrido</label>
-        <button id="upcoming-predict-btn" class="primary" type="button">Predecir próximos</button>
+        <label>Grupo<select id="upcoming-group-filter"></select></label>
+        <div id="upcoming-default-controls" class="inline-control-row">
+          <label>Modelo<select id="upcoming-model-select"></select></label>
+          <label class="check"><input id="sim-use-ml-model" type="checkbox"> ML híbrido</label>
+        </div>
+        <div id="upcoming-sota-controls" class="inline-control-row hidden">
+          <label>Bayes<select id="upcoming-bayes-profile"><option value="deep">Deep</option><option value="light">Light</option></select></label>
+          <label>CUDA<select id="upcoming-sota-device"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
+        </div>
+        <button id="upcoming-predict-btn" class="primary" type="button">Generar reporte</button>
       </div>
+      <div class="control-grid compact-controls upcoming-advanced-controls">
+        <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="100000" step="1000" value="5000"></label>
+        <label>Seed<input id="sim-seed" type="number" value="2026"></label>
+        <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
+        <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
+        <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
+        <label class="hidden">Modelo marcador<select id="sim-score-model"></select></label>
+        <input id="sim-max-goals" type="hidden" value="10">
+        <input id="sim-poisson-recent-matches" type="hidden" value="15">
+      </div>
+      <div id="worldcup-upcoming-progress" class="worldcup-progress hidden"></div>
+      <div id="upcoming-report" class="upcoming-report"></div>
       <div id="upcoming-predictions" class="upcoming-grid"></div>
       <details class="data-drawer">
-        <summary>Tabla próximos partidos</summary>
+        <summary>Tabla reporte</summary>
         <div id="upcoming-predictions-table"></div>
+      </details>
+      <details class="data-drawer prediction-simulation-drawer">
+        <summary>Monte Carlo por partido</summary>
+        <div class="simulation-layout">
+          <article class="visual-panel simulation-control-panel">
+            <header>
+              <h3>Próximos partidos</h3>
+              <small id="model-source">Poisson contextual por fixture</small>
+            </header>
+            <div class="control-grid compact-controls simulation-grid">
+              <label>N próximos<input id="sim-match-limit" type="number" min="1" max="72" step="1" value="8"></label>
+              <label>Grupo<select id="sim-group-filter"></select></label>
+            </div>
+            <div class="actions-row simulation-actions">
+              <button id="simulate-poisson-btn" class="primary" type="button">Simular próximos partidos</button>
+            </div>
+            <div id="worldcup-simulation-progress" class="worldcup-progress hidden"></div>
+            <div id="simulation-summary" class="status-strip"></div>
+          </article>
+        </div>
+        <div id="match-simulation-grid" class="upcoming-grid monte-carlo-grid"></div>
+        <details class="data-drawer simulation-table-drawer">
+          <summary>Tabla Monte Carlo por partido</summary>
+          <div id="match-simulation-table"></div>
+        </details>
       </details>
     </section>
 
@@ -210,43 +256,6 @@
         </article>
 
       </div>
-    </section>
-
-    <section id="simulacion" class="section-block worldcup-view simulation-section">
-      <div class="section-heading">
-        <h2>Monte Carlo por partido</h2>
-        <small id="model-source">Poisson contextual por fixture</small>
-      </div>
-      <div class="simulation-layout">
-        <article class="visual-panel simulation-control-panel">
-          <header>
-            <h3>Próximos partidos</h3>
-            <small>Simula marcador por fixture con lambdas Poisson de últimos N partidos</small>
-          </header>
-          <div class="control-grid compact-controls simulation-grid">
-            <label>N próximos<input id="sim-match-limit" type="number" min="1" max="72" step="1" value="8"></label>
-            <label>Grupo<select id="sim-group-filter"></select></label>
-            <label>Modelo marcador<select id="sim-score-model"></select></label>
-            <label>N simulaciones<input id="sim-iterations" type="number" min="100" max="100000" step="1000" value="5000"></label>
-            <label>Seed<input id="sim-seed" type="number" value="2026"></label>
-            <label>Partidos recientes<input id="sim-poisson-recent-matches" type="number" min="3" max="50" step="1" value="15"></label>
-            <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
-            <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
-            <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
-          </div>
-          <input id="sim-max-goals" type="hidden" value="10">
-          <div class="actions-row simulation-actions">
-            <button id="simulate-poisson-btn" class="primary" type="button">Simular próximos partidos</button>
-          </div>
-          <div id="worldcup-simulation-progress" class="worldcup-progress hidden"></div>
-          <div id="simulation-summary" class="status-strip"></div>
-        </article>
-      </div>
-      <div id="match-simulation-grid" class="upcoming-grid monte-carlo-grid"></div>
-      <details class="data-drawer simulation-table-drawer">
-        <summary>Tabla Monte Carlo por partido</summary>
-        <div id="match-simulation-table"></div>
-      </details>
     </section>
 
     <section id="datos" class="section-block worldcup-view">

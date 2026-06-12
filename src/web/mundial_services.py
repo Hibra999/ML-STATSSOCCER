@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 import re
 import shutil
+import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -62,6 +65,7 @@ from src.worldcup.training import (
     clear_active_worldcup_model,
     dataset_status,
     delete_worldcup_model,
+    detect_hardware,
     download_kaggle_dataset,
     list_worldcup_models,
     prepare_training_dataset,
@@ -78,6 +82,20 @@ from src.worldcup.training import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 COUNTRY_FLAGS_ROOT = PROJECT_ROOT / "storage" / "graphics" / "countries"
+REPORTS_ROOT = Path("storage") / "worldcup" / "reports"
+SOTA_SCORE_MODEL_SEQUENCE = [
+    "independent_poisson",
+    "dixon_coles_mle",
+    "bivariate_poisson_mle",
+    "diagonal_inflated_bivariate_poisson",
+    "zero_inflated_generalized_poisson",
+    "bayesian_hierarchical_poisson",
+    "bayesian_dynamic_poisson",
+    "skellam_margin",
+    "copula_weibull_count",
+    "xg_poisson_local",
+]
+REPORT_TOTAL_GOAL_LINES = (0.5, 1.5, 2.5, 3.5)
 DEFAULT_CONFIG = {
     "iterations": 5000,
     "seed": 2026,
@@ -863,6 +881,644 @@ def predict_upcoming_monte_carlo(payload: Dict[str, Any] | None = None) -> Dict[
             "source": "Modelo de marcador contextual + simulacion por fixture",
         },
     }
+
+
+def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_callback=None) -> Dict[str, Any]:
+    payload = payload or {}
+    pipeline_mode = normalize_report_pipeline_mode(payload.get("pipeline_mode"))
+    config = report_pipeline_config(payload, pipeline_mode)
+    start_time = time.monotonic()
+    hardware = stat_report_hardware(config.get("sota_device", "auto"), pipeline_mode)
+    emit_report_progress(
+        progress_callback,
+        stage="preparing",
+        start_time=start_time,
+        model_index=0,
+        model_total=1,
+        model_key="",
+        fixture_index=0,
+        fixture_total=1,
+        hardware=hardware,
+        message="Preparando fixtures y modelo base",
+    )
+    tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    base_model, history_source = build_model(tournament, config)
+    limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
+    group_filter = str(payload.get("group") or "").strip()
+    fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter).head(limit).copy()
+    fixture_records = [fixture for _, fixture in fixture_df.iterrows()]
+    if pipeline_mode == "poisson_sota":
+        fixture_reports = upcoming_sota_fixture_reports(
+            tournament=tournament,
+            base_model=base_model,
+            fixtures=fixture_records,
+            config=config,
+            start_time=start_time,
+            hardware=hardware,
+            progress_callback=progress_callback,
+        )
+    else:
+        fixture_reports = upcoming_default_fixture_reports(
+            tournament=tournament,
+            base_model=base_model,
+            fixtures=fixture_records,
+            config=config,
+            start_time=start_time,
+            hardware=hardware,
+            progress_callback=progress_callback,
+        )
+    for report in fixture_reports:
+        report["consensus"] = fixture_consensus(report.get("models", []))
+        report["warnings"] = fixture_report_warnings(report)
+    table = table_payload(pd.DataFrame(upcoming_report_table_rows(fixture_reports)), page=1, page_size=max(limit * 12, 1))
+    summary = {
+        "pipeline_mode": pipeline_mode,
+        "pipeline_label": "Poisson + SOTA" if pipeline_mode == "poisson_sota" else "Default: IA + Poisson simple",
+        "requested": limit,
+        "returned": len(fixture_reports),
+        "group": group_filter or "Todos",
+        "fixture_source": fixture_source,
+        "history_source": history_source,
+        "use_ml_model": bool(config["use_ml_model"]),
+        "model_id": config["model_id"],
+        "poisson_recent_matches": config["poisson_recent_matches"],
+        "iterations": config["iterations"],
+        "seed": config["seed"],
+        "bayes_profile": config.get("bayes_profile", ""),
+        "sota_device": config.get("sota_device", "auto"),
+        "score_models": SOTA_SCORE_MODEL_SEQUENCE if pipeline_mode == "poisson_sota" else ["default_ai_poisson"],
+        "hardware": hardware,
+        "warnings": list(hardware.get("warnings", [])),
+        "config": config,
+    }
+    report = persist_upcoming_report({
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "summary": summary,
+        "fixture_reports": fixture_reports,
+        "table": table,
+    })
+    emit_report_progress(
+        progress_callback,
+        stage="complete",
+        start_time=start_time,
+        model_index=len(summary["score_models"]),
+        model_total=max(len(summary["score_models"]), 1),
+        model_key="",
+        fixture_index=len(fixture_reports),
+        fixture_total=max(len(fixture_reports), 1),
+        hardware=hardware,
+        message="Reporte guardado",
+        force_complete=True,
+    )
+    return report
+
+
+def upcoming_default_fixture_reports(
+        tournament: Dict[str, Any],
+        base_model: WorldCupModel,
+        fixtures: List[pd.Series],
+        config: Dict[str, Any],
+        start_time: float,
+        hardware: Dict[str, Any],
+        progress_callback=None,
+) -> List[Dict[str, Any]]:
+    reports: List[Dict[str, Any]] = []
+    total = max(len(fixtures), 1)
+    for fixture_index, fixture in enumerate(fixtures, start=1):
+        emit_report_progress(
+            progress_callback,
+            stage="predicting",
+            start_time=start_time,
+            model_index=1,
+            model_total=1,
+            model_key="default_ai_poisson",
+            fixture_index=fixture_index,
+            fixture_total=total,
+            hardware=hardware,
+            message=f"Default IA + Poisson: {fixture.get('Equipo 1', '')} vs {fixture.get('Equipo 2', '')}",
+        )
+        prediction = predict_match_payload(
+            tournament=tournament,
+            base_model=base_model,
+            fixture_id=fixture.get("No."),
+            use_ml_model=bool(config["use_ml_model"]),
+            ml_weight=float(config["ml_weight"]),
+            model_id=config["model_id"],
+            poisson_recent_matches=int(config["poisson_recent_matches"]),
+        )
+        reports.append({
+            "fixture": report_fixture_payload(prediction.get("fixture", {})),
+            "contextual_poisson": prediction.get("contextual_poisson", {}),
+            "models": [default_prediction_model_report(prediction, config)],
+        })
+    return reports
+
+
+def upcoming_sota_fixture_reports(
+        tournament: Dict[str, Any],
+        base_model: WorldCupModel,
+        fixtures: List[pd.Series],
+        config: Dict[str, Any],
+        start_time: float,
+        hardware: Dict[str, Any],
+        progress_callback=None,
+) -> List[Dict[str, Any]]:
+    fixture_reports = [
+        {
+            "fixture": report_fixture_payload({
+                "id": str(fixture.get("No.", "")),
+                "date": fixture.get("Fecha", ""),
+                "time": fixture.get("Hora", ""),
+                "group": fixture.get("Grupo", ""),
+                "home": str(fixture.get("Equipo 1", "")),
+                "away": str(fixture.get("Equipo 2", "")),
+                "venue": fixture.get("Sede", ""),
+            }),
+            "contextual_poisson": contextual_poisson_for_match(
+                str(fixture.get("Equipo 1", "")),
+                str(fixture.get("Equipo 2", "")),
+                base_model=base_model,
+                before_date=fixture.get("Fecha", ""),
+                max_goals=int(config["max_goals"]),
+                limit=int(config["poisson_recent_matches"]),
+            ),
+            "models": [],
+        }
+        for fixture in fixtures
+    ]
+    group_map = groups_from_tournament(tournament)
+    team_names = [team for group_teams in group_map.values() for team in group_teams]
+    history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    model_total = len(SOTA_SCORE_MODEL_SEQUENCE)
+    fixture_total = max(len(fixtures), 1)
+    for model_index, model_key in enumerate(SOTA_SCORE_MODEL_SEQUENCE, start=1):
+        emit_report_progress(
+            progress_callback,
+            stage="fitting",
+            start_time=start_time,
+            model_index=model_index,
+            model_total=model_total,
+            model_key=model_key,
+            fixture_index=0,
+            fixture_total=fixture_total,
+            hardware=hardware,
+            message=f"Ajustando {score_model_display_label(model_key)}",
+        )
+        try:
+            if model_key == DEFAULT_SCORE_MODEL:
+                score_model = base_model
+                metadata = score_model_metadata(score_model)
+            else:
+                score_model = build_score_model(
+                    base_model,
+                    history_df=history_df,
+                    teams=team_names,
+                    config={**config, "score_model": model_key, "use_ml_model": False},
+                )
+                metadata = score_model_metadata(score_model)
+        except Exception as exc:
+            score_model = base_model
+            metadata = {
+                "key": model_key,
+                "label": score_model_display_label(model_key),
+                "available": False,
+                "params": {},
+                "warnings": [f"{exc.__class__.__name__}: {exc}; se usa Poisson independiente."],
+            }
+        for fixture_index, fixture in enumerate(fixtures, start=1):
+            emit_report_progress(
+                progress_callback,
+                stage="predicting",
+                start_time=start_time,
+                model_index=model_index,
+                model_total=model_total,
+                model_key=model_key,
+                fixture_index=fixture_index,
+                fixture_total=fixture_total,
+                hardware=hardware,
+                message=f"{score_model_display_label(model_key)}: {fixture.get('Equipo 1', '')} vs {fixture.get('Equipo 2', '')}",
+            )
+            probabilities = model_probabilities_for_fixture(score_model, fixture, config)
+            fixture_reports[fixture_index - 1]["models"].append(
+                score_prediction_model_report(
+                    model_key=model_key,
+                    metadata=metadata,
+                    probabilities=probabilities,
+                    fixture=fixture,
+                    config=config,
+                    already_percent=False,
+                )
+            )
+    return fixture_reports
+
+
+def normalize_report_pipeline_mode(value: Any) -> str:
+    mode = str(value or "default_ai_poisson").strip().lower().replace("-", "_")
+    return "poisson_sota" if mode == "poisson_sota" else "default_ai_poisson"
+
+
+def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[str, Any]:
+    config = simulation_config(payload)
+    config["pipeline_mode"] = pipeline_mode
+    config["bayes_profile"] = str(payload.get("bayes_profile") or "deep").strip().lower()
+    config["sota_device"] = str(payload.get("sota_device") or "auto").strip().lower()
+    if config["sota_device"] not in {"auto", "cpu", "cuda"}:
+        config["sota_device"] = "auto"
+    if pipeline_mode == "poisson_sota":
+        config["use_ml_model"] = False
+        config["score_model"] = DEFAULT_SCORE_MODEL
+        if config["bayes_profile"] == "deep":
+            config["bayes_draws"] = 2000
+            config["bayes_tune"] = 2000
+            config["bayes_chains"] = 4
+            config["stat_model_cache"] = True
+            config["stat_model_refit"] = False
+    return config
+
+
+def stat_report_hardware(requested_device: Any, pipeline_mode: str) -> Dict[str, Any]:
+    requested = str(requested_device or "auto").strip().lower()
+    if requested not in {"auto", "cpu", "cuda"}:
+        requested = "auto"
+    detected = detect_hardware()
+    warnings: List[str] = []
+    backend_supports_cuda = False
+    actual_device = "cpu"
+    if pipeline_mode == "poisson_sota":
+        if requested == "cuda":
+            warnings.append("CUDA fue solicitada, pero los modelos estadisticos de marcador disponibles corren en CPU en este backend.")
+        elif requested == "auto" and detected.get("cuda_available"):
+            warnings.append("CUDA detectada; los modelos estadisticos actuales no exponen backend GPU y se ejecutan en CPU.")
+        elif requested == "auto" and not detected.get("cuda_available"):
+            warnings.append(f"CUDA no disponible ({detected.get('cuda_error') or 'sin dispositivos'}); SOTA corre en CPU.")
+    return {
+        **detected,
+        "requested_device": requested,
+        "actual_device": actual_device,
+        "backend_supports_cuda": backend_supports_cuda,
+        "warnings": warnings,
+    }
+
+
+def emit_report_progress(
+        callback,
+        stage: str,
+        start_time: float,
+        model_index: int,
+        model_total: int,
+        model_key: str,
+        fixture_index: int,
+        fixture_total: int,
+        hardware: Dict[str, Any],
+        message: str,
+        force_complete: bool = False,
+):
+    elapsed = max(time.monotonic() - float(start_time), 0.0)
+    model_total = max(int(model_total or 1), 1)
+    fixture_total = max(int(fixture_total or 1), 1)
+    completed = max((max(int(model_index or 1), 1) - 1) * fixture_total + max(int(fixture_index or 0), 0), 0)
+    total = max(model_total * fixture_total, 1)
+    if force_complete:
+        completed = total
+    eta = 0
+    if completed > 0 and completed < total:
+        eta = int(round((elapsed / completed) * (total - completed)))
+    emit_job_progress(
+        callback,
+        stage,
+        completed,
+        total,
+        message,
+        model_index=int(model_index or 0),
+        model_total=model_total,
+        model_key=model_key,
+        fixture_index=int(fixture_index or 0),
+        fixture_total=fixture_total,
+        elapsed_seconds=round(elapsed, 1),
+        eta_seconds=eta,
+        hardware=hardware,
+    )
+
+
+def report_fixture_payload(fixture: Dict[str, Any]) -> Dict[str, Any]:
+    home = str(fixture.get("home", ""))
+    away = str(fixture.get("away", ""))
+    return {
+        "id": str(fixture.get("id", "")),
+        "date": fixture.get("date", ""),
+        "time": fixture.get("time", ""),
+        "group": fixture.get("group", ""),
+        "home": home,
+        "away": away,
+        "home_asset": team_asset(home),
+        "away_asset": team_asset(away),
+        "venue": fixture.get("venue", ""),
+        "label": f"{home} vs {away}",
+    }
+
+
+def default_prediction_model_report(prediction: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    probabilities = prediction.get("probabilities", {})
+    metadata = {
+        "key": "default_ai_poisson",
+        "label": "IA + Poisson simple" if config.get("use_ml_model") else "Poisson independiente",
+        "available": True,
+        "warnings": prediction.get("notes", []),
+    }
+    return score_prediction_model_report(
+        model_key="default_ai_poisson",
+        metadata=metadata,
+        probabilities={
+            **probabilities,
+            "lambda1": (prediction.get("expected_goals") or {}).get("home", 0.0),
+            "lambda2": (prediction.get("expected_goals") or {}).get("away", 0.0),
+            "modal_g1": parse_score_part(prediction.get("modal_score", ""), 0),
+            "modal_g2": parse_score_part(prediction.get("modal_score", ""), 1),
+        },
+        fixture=pd.Series(prediction.get("fixture", {})),
+        config=config,
+        already_percent=True,
+    )
+
+
+def model_probabilities_for_fixture(model: Any, fixture: pd.Series, config: Dict[str, Any]) -> Dict[str, Any]:
+    home = str(fixture.get("Equipo 1", ""))
+    away = str(fixture.get("Equipo 2", ""))
+    max_goals = int(config.get("max_goals") or DEFAULT_CONFIG["max_goals"])
+    record = fixture.to_dict() if hasattr(fixture, "to_dict") else dict(fixture)
+    method = getattr(model, "match_probabilities_for_match", None)
+    if callable(method):
+        return method(home, away, match=record, max_goals=max_goals)
+    return model.match_probabilities(home, away, max_goals=max_goals)
+
+
+def score_prediction_model_report(
+        model_key: str,
+        metadata: Dict[str, Any],
+        probabilities: Dict[str, Any],
+        fixture: pd.Series,
+        config: Dict[str, Any],
+        already_percent: bool,
+) -> Dict[str, Any]:
+    key = str(model_key or metadata.get("key") or DEFAULT_SCORE_MODEL)
+    available = bool(metadata.get("available", True))
+    probs_pct = {
+        "home": probability_percent(probabilities.get("home", 0.0), already_percent=already_percent),
+        "draw": probability_percent(probabilities.get("draw", 0.0), already_percent=already_percent),
+        "away": probability_percent(probabilities.get("away", 0.0), already_percent=already_percent),
+    }
+    for line in REPORT_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        probs_pct[f"over{suffix}"] = probability_percent(probabilities.get(f"over{suffix}", 0.0), already_percent=already_percent)
+        probs_pct[f"under{suffix}"] = probability_percent(probabilities.get(f"under{suffix}", 0.0), already_percent=already_percent)
+    outcome = outcome_decision(probs_pct)
+    totals = total_decisions(probs_pct)
+    signature = consensus_signature(outcome, totals)
+    lambda_home = float_or_zero(probabilities.get("lambda1", 0.0))
+    lambda_away = float_or_zero(probabilities.get("lambda2", 0.0))
+    modal_home = round_half_up_int(probabilities.get("modal_g1", lambda_home))
+    modal_away = round_half_up_int(probabilities.get("modal_g2", lambda_away))
+    return {
+        "model_key": key,
+        "model_label": str(metadata.get("label") or score_model_display_label(key)),
+        "available": available,
+        "consensus_eligible": bool(available or key in {DEFAULT_SCORE_MODEL, "default_ai_poisson"}),
+        "fallback": not available,
+        "warnings": [str(item) for item in metadata.get("warnings", []) if str(item)],
+        "decision": {
+            "outcome": outcome,
+            "label": outcome_label(outcome),
+            "team": outcome_team(outcome, fixture),
+        },
+        "totals": totals,
+        "signature": signature,
+        "probabilities": probs_pct,
+        "expected_goals": {
+            "home": round(lambda_home, 3),
+            "away": round(lambda_away, 3),
+            "rounded_home": round_half_up_int(lambda_home),
+            "rounded_away": round_half_up_int(lambda_away),
+        },
+        "top_score": f"{modal_home}-{modal_away}",
+        "modal_score": f"{modal_home}-{modal_away}",
+        "params": metadata.get("params", {}),
+        "source": "ML + Poisson" if key == "default_ai_poisson" and config.get("use_ml_model") else "Poisson/SOTA",
+    }
+
+
+def round_half_up_int(value: Any) -> int:
+    return int(math.floor(float_or_zero(value) + 0.5))
+
+
+def consensus_signature(outcome: str, totals: Dict[str, str]) -> str:
+    parts = [str(outcome or "")]
+    for line in REPORT_TOTAL_GOAL_LINES:
+        parts.append(str(totals.get(f"{line:.1f}", "")))
+    return "|".join(parts)
+
+
+def fixture_consensus(model_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    eligible = [
+        report for report in model_reports
+        if report.get("consensus_eligible") and report.get("signature")
+    ]
+    valid_total = len(eligible)
+    signature_counts = Counter(str(report.get("signature", "")) for report in eligible)
+    outcome_counts = Counter(str((report.get("decision") or {}).get("outcome", "")) for report in eligible)
+    total_counts: Dict[str, Dict[str, int]] = {}
+    for line in REPORT_TOTAL_GOAL_LINES:
+        line_key = f"{line:.1f}"
+        total_counts[line_key] = dict(Counter(str((report.get("totals") or {}).get(line_key, "")) for report in eligible))
+    leader_signature, leader_signature_count = most_common_item(signature_counts)
+    leader_outcome, leader_outcome_count = most_common_item(outcome_counts)
+    signature_share = leader_signature_count / valid_total if valid_total else 0.0
+    outcome_share = leader_outcome_count / valid_total if valid_total else 0.0
+    if valid_total and signature_share >= 1.0:
+        strength = "Muy fuerte"
+    elif valid_total and signature_share >= 0.70:
+        strength = "Fuerte"
+    elif valid_total and outcome_share >= 0.60:
+        strength = "Media"
+    else:
+        strength = "Baja"
+    leader_totals = {}
+    for line in REPORT_TOTAL_GOAL_LINES:
+        line_key = f"{line:.1f}"
+        pick, count = most_common_item(Counter(total_counts.get(line_key, {})))
+        leader_totals[line_key] = {
+            "pick": pick,
+            "label": "Over" if pick == "over" else "Under" if pick == "under" else "",
+            "count": count,
+            "share": round(count / valid_total, 3) if valid_total else 0.0,
+        }
+    return {
+        "strength": strength,
+        "eligible_models": valid_total,
+        "excluded_models": max(len(model_reports) - valid_total, 0),
+        "signature": leader_signature,
+        "signature_count": leader_signature_count,
+        "signature_share": round(signature_share, 3),
+        "outcome": leader_outcome,
+        "outcome_label": outcome_label(leader_outcome),
+        "outcome_count": leader_outcome_count,
+        "outcome_share": round(outcome_share, 3),
+        "outcome_counts": dict(outcome_counts),
+        "signature_counts": dict(signature_counts),
+        "totals": leader_totals,
+        "total_counts": total_counts,
+    }
+
+
+def most_common_item(counter: Counter) -> Tuple[str, int]:
+    if not counter:
+        return "", 0
+    key, count = counter.most_common(1)[0]
+    return str(key), int(count)
+
+
+def outcome_decision(probabilities: Dict[str, Any]) -> str:
+    candidates = {
+        "home": float_or_zero(probabilities.get("home", 0.0)),
+        "draw": float_or_zero(probabilities.get("draw", 0.0)),
+        "away": float_or_zero(probabilities.get("away", 0.0)),
+    }
+    return max(candidates, key=candidates.get)
+
+
+def total_decisions(probabilities: Dict[str, Any]) -> Dict[str, str]:
+    decisions = {}
+    for line in REPORT_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        over = float_or_zero(probabilities.get(f"over{suffix}", 0.0))
+        under = float_or_zero(probabilities.get(f"under{suffix}", 0.0))
+        decisions[f"{line:.1f}"] = "over" if over >= under else "under"
+    return decisions
+
+
+def outcome_label(outcome: Any) -> str:
+    return {"home": "1", "draw": "X", "away": "2"}.get(str(outcome or ""), "")
+
+
+def outcome_team(outcome: Any, fixture: pd.Series | Dict[str, Any]) -> str:
+    if str(outcome) == "draw":
+        return "Empate"
+    if str(outcome) == "home":
+        return str(fixture.get("Equipo 1", fixture.get("home", "Local")))
+    if str(outcome) == "away":
+        return str(fixture.get("Equipo 2", fixture.get("away", "Visitante")))
+    return ""
+
+
+def probability_percent(value: Any, already_percent: bool = False) -> float:
+    number = float_or_zero(value)
+    if not already_percent:
+        number *= 100.0
+    return round(float(np.clip(number, 0.0, 100.0)), 2)
+
+
+def parse_score_part(score: Any, index: int) -> int:
+    parts = re.findall(r"\d+", str(score or ""))
+    if index < len(parts):
+        return int(parts[index])
+    return 0
+
+
+def float_or_zero(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(number):
+        return 0.0
+    return number
+
+
+def fixture_report_warnings(report: Dict[str, Any]) -> List[str]:
+    warnings: List[str] = []
+    for model in report.get("models", []):
+        for warning in model.get("warnings", []):
+            label = model.get("model_label") or model.get("model_key") or "Modelo"
+            warnings.append(f"{label}: {warning}")
+    return unique_strings(warnings)
+
+
+def upcoming_report_table_rows(fixture_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for report in fixture_reports:
+        fixture = report.get("fixture", {})
+        consensus = report.get("consensus", {})
+        for model in report.get("models", []):
+            probs = model.get("probabilities", {})
+            expected = model.get("expected_goals", {})
+            rows.append({
+                "No.": fixture.get("id", ""),
+                "Fecha": fixture.get("date", ""),
+                "Grupo": fixture.get("group", ""),
+                "Partido": fixture.get("label", ""),
+                "Consenso": consensus.get("outcome_label", ""),
+                "Fuerza": consensus.get("strength", ""),
+                "Modelo": model.get("model_label", ""),
+                "Disponible": "Si" if model.get("available") else "No",
+                "Cuenta consenso": "Si" if model.get("consensus_eligible") else "No",
+                "Pick": (model.get("decision") or {}).get("label", ""),
+                "Top score": model.get("top_score", ""),
+                "Lambda Local": expected.get("home", ""),
+                "Lambda Visita": expected.get("away", ""),
+                "1 %": probs.get("home", ""),
+                "X %": probs.get("draw", ""),
+                "2 %": probs.get("away", ""),
+                "O0.5": probs.get("over05", ""),
+                "U0.5": probs.get("under05", ""),
+                "O1.5": probs.get("over15", ""),
+                "U1.5": probs.get("under15", ""),
+                "O2.5": probs.get("over25", ""),
+                "U2.5": probs.get("under25", ""),
+                "O3.5": probs.get("over35", ""),
+                "U3.5": probs.get("under35", ""),
+                "Warnings": " | ".join(model.get("warnings", [])),
+            })
+    return rows
+
+
+def persist_upcoming_report(report: Dict[str, Any]) -> Dict[str, Any]:
+    REPORTS_ROOT.mkdir(parents=True, exist_ok=True)
+    safe_report = jsonable(report)
+    created_at = str(safe_report.get("created_at") or datetime.now(timezone.utc).isoformat())
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    digest = hashlib.sha256(json.dumps(safe_report, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:10]
+    report_id = f"report_{timestamp}_{digest}"
+    report_path = REPORTS_ROOT / f"{report_id}.json"
+    output = {
+        "report_id": report_id,
+        "report_path": str(report_path),
+        "created_at": created_at,
+        **safe_report,
+    }
+    report_path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (REPORTS_ROOT / "latest.json").write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return output
+
+
+def score_model_display_label(key: Any) -> str:
+    normalized = normalize_score_model_key(key)
+    for option in score_model_options():
+        if option.get("key") == normalized:
+            return str(option.get("label") or normalized)
+    if str(key) == "default_ai_poisson":
+        return "IA + Poisson simple"
+    return str(key or "Poisson independiente")
+
+
+def unique_strings(values: Iterable[Any]) -> List[str]:
+    seen = set()
+    output = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return output
 
 
 def monte_carlo_match_prediction(

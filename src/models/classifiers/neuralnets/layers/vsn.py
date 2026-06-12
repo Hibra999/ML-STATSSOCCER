@@ -1,3 +1,5 @@
+from src.models.classifiers.neuralnets.runtime import configure_tensorflow_runtime
+configure_tensorflow_runtime()
 import tensorflow as tf
 from typing import Optional, Tuple
 from src.models.classifiers.neuralnets.layers.grn import GatedResidualNetwork

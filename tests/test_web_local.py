@@ -104,6 +104,7 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/maintenance/clear" in paths
     assert "/api/mundial/predict-match" in paths
     assert "/api/mundial/predict-upcoming" in paths
+    assert "/api/mundial/predict-upcoming-report" in paths
     assert "/api/mundial/procedure" in paths
     assert "/api/jobs/{job_id}" in paths
     assert "/api/worldcup/overview" not in paths
@@ -169,6 +170,27 @@ def test_requirements_use_windows_tensorflow_io_marker():
     assert 'tensorflow-io-gcs-filesystem==0.31.0; platform_system == "Windows"' in source
 
 
+def test_tensorflow_runtime_is_configured_before_direct_imports():
+    tf_files = [
+        "src/models/classifiers/neuralnets/tfmodel.py",
+        "src/models/classifiers/neuralnets/optimizers/adam.py",
+        "src/models/classifiers/neuralnets/optimizers/adabelief.py",
+        "src/models/classifiers/neuralnets/optimizers/adan.py",
+        "src/models/classifiers/neuralnets/optimizers/lookahead.py",
+        "src/models/classifiers/neuralnets/optimizers/ranger25.py",
+        "src/models/classifiers/neuralnets/layers/grn.py",
+        "src/models/classifiers/neuralnets/layers/vsn.py",
+    ]
+
+    for path in tf_files:
+        source = open(path, "r", encoding="utf-8").read()
+        assert "configure_tensorflow_runtime()" in source
+        assert source.index("configure_tensorflow_runtime()") < source.index("import tensorflow as tf")
+
+    runtime = open("src/models/classifiers/neuralnets/runtime.py", "r", encoding="utf-8").read()
+    assert 'TF_ENABLE_ONEDNN_OPTS", "0"' in runtime
+
+
 def test_training_progress_payload_shape():
     from src.web import services
 
@@ -216,6 +238,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     nav_source = html_source.split("<nav>", 1)[1].split("</nav>", 1)[0]
     nav_order = ["Resumen", "Grupos", "Calendario", "Entrenamiento y Modelo", "Predicciones Futuras", "Datos"]
     assert [nav_source.index(label) for label in nav_order] == sorted(nav_source.index(label) for label in nav_order)
+    assert "Simulación" not in nav_source
     assert "11 Iniciales" not in nav_source
     assert "scrollIntoView" not in app_source
     assert "switchWorldcupView" in app_source
@@ -263,6 +286,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "training-tuning-flow" in html_source
     assert "Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson" in html_source
     assert "upcoming-predict-limit" in html_source
+    assert "upcoming-pipeline-mode" in html_source
+    assert "upcoming-report" in html_source
+    assert "worldcup-upcoming-progress" in html_source
     assert "upcoming-predictions" in html_source
     assert "hero-countdown" in html_source
     assert "hero-countdown-vs" in html_source
@@ -327,6 +353,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert 'if (kind !== "simulation") return' not in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
+    assert "/api/mundial/predict-upcoming-report" in app_source
+    assert "renderUpcomingReport" in app_source
+    assert "flagHtml(homeAsset)" in app_source
     assert "renderHeroCountdown" in app_source
     assert "heroNextCardHtml" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" not in app_source
@@ -371,6 +400,48 @@ def test_mundial_training_model_endpoint_returns_job_and_progress(monkeypatch):
     assert job["progress"]["stage"] == "tuning"
     assert job["progress"]["best_value"] == 0.75
     assert job["result"]["model"]["model_id"] == "fake-worldcup"
+
+
+def test_mundial_upcoming_report_endpoint_returns_job_and_progress(monkeypatch):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    from src.web import mundial_services
+    from src.web.mundial import create_mundial_app
+
+    def fake_predict_upcoming_report(payload, progress_callback=None):
+        if progress_callback:
+            progress_callback({
+                "stage": "predicting",
+                "current": 1,
+                "total": 2,
+                "percent": 50,
+                "message": "Dixon-Coles MLE",
+                "model_index": 2,
+                "model_total": 10,
+                "model_key": "dixon_coles_mle",
+                "fixture_index": 1,
+                "fixture_total": 1,
+                "elapsed_seconds": 1.2,
+                "eta_seconds": 2,
+                "hardware": {"actual_device": "cpu"},
+            })
+        return {"report_id": "fake-report", "summary": {"pipeline_mode": "poisson_sota"}, "fixture_reports": [], "table": {"columns": [], "rows": [], "total": 0}}
+
+    monkeypatch.setattr(mundial_services, "predict_upcoming_report", fake_predict_upcoming_report)
+    client = TestClient(create_mundial_app())
+
+    response = client.post("/api/mundial/predict-upcoming-report", json={"pipeline_mode": "poisson_sota", "limit": 1})
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["data"]["job_id"]
+
+    job = wait_for_job(client, payload["data"]["job_id"])
+    assert job["status"] == "succeeded"
+    assert job["progress"]["model_key"] == "dixon_coles_mle"
+    assert job["progress"]["eta_seconds"] == 2
+    assert job["result"]["report_id"] == "fake-report"
 
 
 def test_mundial_training_job_failure_is_pollable(monkeypatch):

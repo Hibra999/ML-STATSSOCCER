@@ -1,3 +1,5 @@
+from src.models.classifiers.neuralnets.runtime import configure_tensorflow_runtime
+configure_tensorflow_runtime()
 import tensorflow as tf
 from typing import Any, Dict, List, Optional, Union
 

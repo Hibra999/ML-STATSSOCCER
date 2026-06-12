@@ -1,5 +1,7 @@
 import random
 import numpy as np
+from src.models.classifiers.neuralnets.runtime import configure_tensorflow_runtime
+configure_tensorflow_runtime()
 import tensorflow as tf
 from typing import List, Optional, Tuple, Union
 from sklearn.base import BaseEstimator, ClassifierMixin

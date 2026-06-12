@@ -135,6 +135,10 @@ def create_mundial_app() -> FastAPI:
     def predict_upcoming(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.predict_upcoming, payload)
 
+    @app.post("/api/mundial/predict-upcoming-report")
+    def predict_upcoming_report(payload: Dict[str, Any] = Body(default={})):
+        return _submit("Generando reporte de predicciones Mundial", services.predict_upcoming_report, payload, with_progress=True, lock_key="mundial-report")
+
     @app.post("/api/mundial/monte-carlo-matches")
     def monte_carlo_matches(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.predict_upcoming_monte_carlo, payload)
