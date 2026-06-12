@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import shutil
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -799,6 +800,169 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "active_model": read_model_metadata(model_id=config["model_id"] or None),
         },
     }
+
+
+def predict_upcoming_monte_carlo(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    config = simulation_config({**payload, "mode": "poisson_live", "use_ml_model": False})
+    tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    model, history_source = build_model(tournament, config)
+    international_matches = load_international_matches(required=False)
+    limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
+    group_filter = str(payload.get("group") or "").strip()
+    fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter)
+    rng = np.random.default_rng(int(config["seed"]))
+    predictions = []
+    rows = []
+    for _, fixture in fixture_df.head(limit).iterrows():
+        result = monte_carlo_match_prediction(
+            fixture=fixture,
+            base_model=model,
+            config=config,
+            rng=rng,
+            international_matches=international_matches,
+        )
+        predictions.append(result)
+        rows.append(monte_carlo_match_row(result))
+    return {
+        "predictions": predictions,
+        "table": table_payload(pd.DataFrame(rows), page=1, page_size=limit),
+        "summary": {
+            "method": "Monte Carlo Poisson por partido",
+            "requested": limit,
+            "returned": len(predictions),
+            "group": group_filter or "Todos",
+            "iterations": config["iterations"],
+            "seed": config["seed"],
+            "poisson_recent_matches": config["poisson_recent_matches"],
+            "fixture_source": fixture_source,
+            "history_source": history_source,
+            "source": "Poisson contextual + simulacion de marcador por fixture",
+        },
+    }
+
+
+def monte_carlo_match_prediction(
+        fixture: pd.Series,
+        base_model: WorldCupModel,
+        config: Dict[str, Any],
+        rng: np.random.Generator,
+        international_matches: pd.DataFrame,
+) -> Dict[str, Any]:
+    home_team = str(fixture.get("Equipo 1", ""))
+    away_team = str(fixture.get("Equipo 2", ""))
+    context = contextual_poisson_for_match(
+        home_team,
+        away_team,
+        base_model=base_model,
+        before_date=fixture.get("Fecha", ""),
+        max_goals=int(config["max_goals"]),
+        matches=international_matches,
+        limit=int(config["poisson_recent_matches"]),
+    )
+    lambda_home, lambda_away = contextual_lambdas(context, base_model, home_team, away_team)
+    iterations = int(config["iterations"])
+    sampled_home = rng.poisson(lambda_home, size=iterations)
+    sampled_away = rng.poisson(lambda_away, size=iterations)
+    total_goals = sampled_home + sampled_away
+    probabilities = {
+        "home": _pct_array(sampled_home > sampled_away),
+        "draw": _pct_array(sampled_home == sampled_away),
+        "away": _pct_array(sampled_away > sampled_home),
+    }
+    for line in TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        probabilities[f"over{suffix}"] = _pct_array(total_goals > float(line))
+        probabilities[f"under{suffix}"] = _pct_array(total_goals <= float(line))
+    top_scores = monte_carlo_top_scores(sampled_home, sampled_away, iterations)
+    return {
+        "fixture": {
+            "id": str(fixture.get("No.", "")),
+            "date": fixture.get("Fecha", ""),
+            "time": fixture.get("Hora", ""),
+            "group": fixture.get("Grupo", ""),
+            "home": home_team,
+            "away": away_team,
+            "venue": fixture.get("Sede", ""),
+        },
+        "probabilities": probabilities,
+        "expected_goals": {
+            "home": round(float(lambda_home), 3),
+            "away": round(float(lambda_away), 3),
+        },
+        "simulated_goals": {
+            "home": round(float(np.mean(sampled_home)), 3),
+            "away": round(float(np.mean(sampled_away)), 3),
+        },
+        "top_scores": top_scores,
+        "modal_score": (top_scores[0] or {}).get("score", "") if top_scores else "",
+        "iterations": iterations,
+        "seed": int(config["seed"]),
+        "poisson_recent_matches": int(config["poisson_recent_matches"]),
+        "contextual_poisson": context,
+        "source": "Poisson contextual" if context.get("available") else "Poisson base",
+    }
+
+
+def contextual_lambdas(context: Dict[str, Any], base_model: WorldCupModel, home: str, away: str) -> Tuple[float, float]:
+    try:
+        lambda_home = float(context.get("context_lambda_home") or (context.get("lambdas") or {}).get("home") or 0.0)
+        lambda_away = float(context.get("context_lambda_away") or (context.get("lambdas") or {}).get("away") or 0.0)
+    except (TypeError, ValueError):
+        lambda_home = 0.0
+        lambda_away = 0.0
+    if lambda_home > 0 and lambda_away > 0:
+        return lambda_home, lambda_away
+    probabilities = base_model.match_probabilities(home, away)
+    return float(probabilities.get("lambda1", 1.0)), float(probabilities.get("lambda2", 1.0))
+
+
+def monte_carlo_top_scores(sampled_home: np.ndarray, sampled_away: np.ndarray, iterations: int) -> List[Dict[str, Any]]:
+    pairs = Counter(zip(sampled_home.astype(int).tolist(), sampled_away.astype(int).tolist()))
+    return [
+        {
+            "score": f"{home_goals}-{away_goals}",
+            "home_goals": int(home_goals),
+            "away_goals": int(away_goals),
+            "probability": round(float(count) * 100.0 / max(iterations, 1), 2),
+            "count": int(count),
+        }
+        for (home_goals, away_goals), count in pairs.most_common(5)
+    ]
+
+
+def monte_carlo_match_row(result: Dict[str, Any]) -> Dict[str, Any]:
+    fixture = result.get("fixture", {})
+    probs = result.get("probabilities", {})
+    expected = result.get("expected_goals", {})
+    top_score = (result.get("top_scores") or [{}])[0]
+    return {
+        "No.": fixture.get("id", ""),
+        "Fecha": fixture.get("date", ""),
+        "Grupo": fixture.get("group", ""),
+        "Partido": f"{fixture.get('home', '')} vs {fixture.get('away', '')}",
+        "MC 1 %": probs.get("home", ""),
+        "MC X %": probs.get("draw", ""),
+        "MC 2 %": probs.get("away", ""),
+        "Over 0.5 %": probs.get("over05", ""),
+        "Under 0.5 %": probs.get("under05", ""),
+        "Over 1.5 %": probs.get("over15", ""),
+        "Under 1.5 %": probs.get("under15", ""),
+        "Over 2.5 %": probs.get("over25", ""),
+        "Under 2.5 %": probs.get("under25", ""),
+        "Over 3.5 %": probs.get("over35", ""),
+        "Under 3.5 %": probs.get("under35", ""),
+        "Lambda Local": expected.get("home", ""),
+        "Lambda Visita": expected.get("away", ""),
+        "Top score": top_score.get("score", ""),
+        "Top score %": top_score.get("probability", ""),
+        "Iteraciones": result.get("iterations", ""),
+        "Fuente": result.get("source", ""),
+    }
+
+
+def _pct_array(mask: np.ndarray) -> float:
+    return round(float(np.mean(mask)) * 100.0, 2)
 
 
 def upcoming_fixture_rows(tournament: Dict[str, Any], group_filter: str = "") -> pd.DataFrame:

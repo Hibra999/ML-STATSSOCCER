@@ -819,7 +819,7 @@ h3 { font-size: 16px; }
   background: #fff;
 }
 .clean-dock {
-  grid-template-columns: minmax(220px, 1fr) 110px 120px minmax(180px, 240px) minmax(170px, 240px) auto;
+  grid-template-columns: minmax(220px, 1fr) 110px 120px minmax(170px, 220px) minmax(160px, 220px) 110px auto;
 }
 .training-panel {
   grid-template-columns: minmax(220px, 1fr) auto;
@@ -839,7 +839,7 @@ h3 { font-size: 16px; }
 }
 .simulation-layout {
   display: grid;
-  grid-template-columns: minmax(360px, 0.95fr) minmax(360px, 1.05fr);
+  grid-template-columns: 1fr;
   gap: 14px;
   margin-bottom: 14px;
 }
@@ -866,6 +866,17 @@ h3 { font-size: 16px; }
 }
 .simulation-results-grid {
   margin-top: 12px;
+}
+.monte-carlo-grid {
+  margin-top: 14px;
+}
+.monte-carlo-card {
+  background:
+    linear-gradient(145deg, rgba(15, 122, 95, 0.05), rgba(36, 86, 166, 0.04)),
+    #fff;
+}
+.simulation-table-drawer {
+  margin-top: 14px;
 }
 .model-flow {
   display: grid;

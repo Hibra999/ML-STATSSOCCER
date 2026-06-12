@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260612-v3">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260612-v4">
 </head>
 <body>
   <header class="topbar">
@@ -52,7 +52,6 @@
           <header><strong>Grupo activo</strong><small id="overview-standings-source"></small></header>
           <div id="overview-standings" class="overview-standings"></div>
         </article>
-        <article id="quick-simulation-panel" class="overview-panel quick-simulation-panel hidden"></article>
       </div>
     </section>
 
@@ -94,6 +93,7 @@
         <label>Poisson últimos<input id="upcoming-poisson-recent-matches" type="number" min="3" max="50" step="1" value="15"></label>
         <select id="upcoming-model-select"></select>
         <select id="upcoming-group-filter"></select>
+        <label class="check"><input id="sim-use-ml-model" type="checkbox"> ML híbrido</label>
         <button id="upcoming-predict-btn" class="primary" type="button">Predecir próximos</button>
       </div>
       <div id="upcoming-predictions" class="upcoming-grid"></div>
@@ -214,51 +214,38 @@
 
     <section id="simulacion" class="section-block worldcup-view simulation-section">
       <div class="section-heading">
-        <h2>Simulación Monte Carlo</h2>
-        <small id="model-source">Elo + Poisson live</small>
+        <h2>Monte Carlo por partido</h2>
+        <small id="model-source">Poisson contextual por fixture</small>
       </div>
       <div class="simulation-layout">
         <article class="visual-panel simulation-control-panel">
           <header>
-            <h3>Motor de simulación</h3>
-            <small>Poisson live usa resultados confirmados y N partidos recientes por selección</small>
+            <h3>Próximos partidos</h3>
+            <small>Simula marcador por fixture con lambdas Poisson de últimos N partidos</small>
           </header>
           <div class="control-grid compact-controls simulation-grid">
+            <label>N próximos<input id="sim-match-limit" type="number" min="1" max="72" step="1" value="8"></label>
+            <label>Grupo<select id="sim-group-filter"></select></label>
             <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="20000" step="100" value="5000"></label>
             <label>Seed<input id="sim-seed" type="number" value="2026"></label>
             <label>Partidos recientes<input id="sim-poisson-recent-matches" type="number" min="3" max="50" step="1" value="15"></label>
             <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
             <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
             <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
-            <label>Peso ML híbrido<input id="sim-ml-weight" type="number" min="0" max="1" step="0.05" value="0.5"></label>
-            <label class="check"><input id="sim-use-ml-model" type="checkbox"> ML híbrido</label>
           </div>
           <input id="sim-max-goals" type="hidden" value="10">
           <div class="actions-row simulation-actions">
-            <button id="simulate-poisson-btn" class="primary" type="button">Monte Carlo Poisson</button>
-            <button id="simulate-btn" type="button">Simular híbrido</button>
+            <button id="simulate-poisson-btn" class="primary" type="button">Simular próximos partidos</button>
           </div>
           <div id="worldcup-simulation-progress" class="worldcup-progress hidden"></div>
           <div id="simulation-summary" class="status-strip"></div>
         </article>
-        <article class="visual-panel simulation-highlight-panel">
-          <header>
-            <h3>Candidatos al título</h3>
-            <small>Última corrida Monte Carlo</small>
-          </header>
-          <div id="champion-strip" class="champion-strip"></div>
-        </article>
       </div>
-      <div class="results-grid simulation-results-grid">
-        <div>
-          <h3>Avance por selección</h3>
-          <div id="advancement-table"></div>
-        </div>
-        <div>
-          <h3>Probabilidades por partido</h3>
-          <div id="match-probs-table"></div>
-        </div>
-      </div>
+      <div id="match-simulation-grid" class="upcoming-grid monte-carlo-grid"></div>
+      <details class="data-drawer simulation-table-drawer">
+        <summary>Tabla Monte Carlo por partido</summary>
+        <div id="match-simulation-table"></div>
+      </details>
     </section>
 
     <section id="datos" class="section-block worldcup-view">
@@ -284,6 +271,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260612-v3"></script>
+  <script src="/static/mundial.js?v=20260612-v4"></script>
 </body>
 </html>

@@ -46,8 +46,7 @@ function bindEvents() {
     button.addEventListener("click", () => switchWorldcupView(button.dataset.section));
   });
   document.getElementById("refresh-btn").addEventListener("click", () => loadAll(true));
-  document.getElementById("simulate-btn").addEventListener("click", () => runSimulation("hybrid"));
-  document.getElementById("simulate-poisson-btn").addEventListener("click", () => runSimulation("poisson_live"));
+  document.getElementById("simulate-poisson-btn").addEventListener("click", runMatchMonteCarlo);
   document.getElementById("worldcup-new-model").addEventListener("click", startNewWorldcupModel);
   document.getElementById("model-load").addEventListener("click", loadSelectedModel);
   document.getElementById("model-delete").addEventListener("click", deleteSelectedModel);
@@ -113,6 +112,7 @@ async function loadAll(refresh) {
     renderFixtureFilters();
     renderFixtures();
     fillUpcomingGroupFilter();
+    fillSimulationGroupFilter();
     renderPlayers(players);
     renderTrainingStatus(training);
     renderModelsCatalog(models);
@@ -137,6 +137,8 @@ function setLoading() {
   document.getElementById("training-model-params").innerHTML = loadingHtml("Parametros pendientes");
   renderWorldcupJobProgress("training");
   document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones pendientes");
+  document.getElementById("match-simulation-grid").innerHTML = loadingHtml("Monte Carlo pendiente");
+  document.getElementById("match-simulation-table").innerHTML = "";
   document.getElementById("active-model-state").innerHTML = loadingHtml("Modelo pendiente");
   document.getElementById("models-list").innerHTML = loadingHtml("Modelos pendientes");
   document.getElementById("simulation-summary").innerHTML = "";
@@ -160,7 +162,8 @@ function applyDefaultConfig(config) {
     const input = document.getElementById(id);
     if (input && value !== undefined) input.value = value;
   });
-  document.getElementById("sim-use-ml-model").checked = Boolean(config.use_ml_model);
+  const simMlToggle = document.getElementById("sim-use-ml-model");
+  if (simMlToggle) simMlToggle.checked = Boolean(config.use_ml_model);
   state.defaultsApplied = true;
 }
 
@@ -307,6 +310,13 @@ function renderFixtures() {
 function fillUpcomingGroupFilter() {
   const groups = [...new Set(state.fixtures.map((fixture) => fixture.group).filter(Boolean))];
   document.getElementById("upcoming-group-filter").innerHTML = `<option value="">Todos los grupos</option>${groups.map((group) => `<option value="${escapeAttr(group)}">${escapeHtml(group)}</option>`).join("")}`;
+}
+
+function fillSimulationGroupFilter() {
+  const groups = [...new Set(state.fixtures.map((fixture) => fixture.group).filter(Boolean))];
+  const select = document.getElementById("sim-group-filter");
+  if (!select) return;
+  select.innerHTML = `<option value="">Todos los grupos</option>${groups.map((group) => `<option value="${escapeAttr(group)}">${escapeHtml(group)}</option>`).join("")}`;
 }
 
 function renderHeroCountdown(targetIso, stateLabel, highlight) {
@@ -477,7 +487,8 @@ function startNewWorldcupModel() {
   modelId.dataset.autofilled = "true";
   document.getElementById("worldcup-tuning-enabled").checked = false;
   applyTuningLocks();
-  document.getElementById("sim-use-ml-model").checked = false;
+  const simMlToggle = document.getElementById("sim-use-ml-model");
+  if (simMlToggle) simMlToggle.checked = false;
   document.getElementById("upcoming-summary").textContent = "Nuevo modelo pendiente de entrenamiento";
   document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Sin modelo seleccionado");
   document.getElementById("upcoming-predictions-table").innerHTML = "";
@@ -518,7 +529,8 @@ async function loadSelectedModel() {
     renderModelState(result.selected || {}, state.training || {});
     renderTrainingVisuals(result.selected || {}, state.training || {});
     renderTrainingTables(result.selected || {}, state.training || {});
-    document.getElementById("sim-use-ml-model").checked = true;
+    const simMlToggle = document.getElementById("sim-use-ml-model");
+    if (simMlToggle) simMlToggle.checked = true;
     document.getElementById("simulation-summary").textContent = `Híbrido activo: ${result.selected.model_name || result.selected.model_id}`;
   } catch (error) {
     showError(error.message);
@@ -1410,15 +1422,110 @@ function metricsTableFromModel(model) {
   return { columns, rows, total: rows.length };
 }
 
+async function runMatchMonteCarlo() {
+  clearAlert();
+  const button = document.getElementById("simulate-poisson-btn");
+  const limit = Number(document.getElementById("sim-match-limit").value || 8);
+  const group = document.getElementById("sim-group-filter").value || "";
+  document.getElementById("simulation-summary").textContent =
+    `Simulando ${limit} partido${limit === 1 ? "" : "s"} con Monte Carlo Poisson...`;
+  if (button) button.disabled = true;
+  try {
+    const result = await api("/api/mundial/monte-carlo-matches", jsonOptions({
+      ...simulationPayload({ use_ml_model: false, mode: "poisson_live" }),
+      limit,
+      group,
+    }));
+    renderMatchMonteCarlo(result);
+  } catch (error) {
+    document.getElementById("match-simulation-grid").innerHTML = loadingHtml("Monte Carlo no disponible");
+    document.getElementById("simulation-summary").textContent = "";
+    showError(error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function renderMatchMonteCarlo(result) {
+  const summary = result.summary || {};
+  document.getElementById("simulation-summary").textContent =
+    `${summary.method || "Monte Carlo Poisson por partido"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.iterations || 0} iteraciones - seed ${summary.seed || ""} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()}`;
+  document.getElementById("match-simulation-grid").innerHTML = (result.predictions || [])
+    .map((prediction) => monteCarloMatchCardHtml(prediction))
+    .join("") || loadingHtml("Sin fixtures para simular");
+  renderTable("match-simulation-table", result.table);
+}
+
+function monteCarloMatchCardHtml(prediction) {
+  const fixture = prediction.fixture || {};
+  const probs = prediction.probabilities || {};
+  const expected = prediction.expected_goals || {};
+  const simulated = prediction.simulated_goals || {};
+  const topScores = prediction.top_scores || [];
+  const homeAsset = assetFor(fixture.home || "");
+  const awayAsset = assetFor(fixture.away || "");
+  const outcomes = [
+    { key: "home", label: "1", team: fixture.home || "Local", value: probs.home ?? 0 },
+    { key: "draw", label: "X", team: "Empate", value: probs.draw ?? 0 },
+    { key: "away", label: "2", team: fixture.away || "Visitante", value: probs.away ?? 0 },
+  ];
+  const totals = [
+    { label: "0.5", over: probs.over05, under: probs.under05 },
+    { label: "1.5", over: probs.over15, under: probs.under15 },
+    { label: "2.5", over: probs.over25, under: probs.under25 },
+    { label: "3.5", over: probs.over35, under: probs.under35 },
+  ];
+  const favorite = [...outcomes].sort((a, b) => Number(b.value || 0) - Number(a.value || 0))[0] || outcomes[0];
+  return `<article class="upcoming-card monte-carlo-card">
+    <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
+    <div class="upcoming-match">
+      <div class="upcoming-team">${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
+      <span>vs</span>
+      <div class="upcoming-team away">${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
+    </div>
+    <div class="prediction-pick">
+      <span>Monte Carlo favorito</span>
+      <strong>${escapeHtml(favorite.label)} · ${escapeHtml(favorite.team)}</strong>
+    </div>
+    <div class="outcome-list">
+      ${outcomes.map((item) => `
+        <div class="outcome-row ${escapeAttr(item.key === favorite.key ? "active" : "")}">
+          <span>${escapeHtml(item.label)}</span>
+          <div><i style="width:${escapeAttr(clampPercent(item.value))}%"></i></div>
+          <b>${escapeHtml(item.value)}%</b>
+        </div>`).join("")}
+    </div>
+    <div class="totals-list">
+      ${totals.map((line) => `
+        <div class="total-row">
+          <span>U/O ${escapeHtml(line.label)}</span>
+          <b>O ${escapeHtml(line.over ?? "-")}%</b>
+          <b>U ${escapeHtml(line.under ?? "-")}%</b>
+        </div>`).join("")}
+    </div>
+    <div class="top-scores">
+      ${topScores.map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(score.probability)}%</b></span>`).join("")}
+    </div>
+    <div class="source-strip">
+      <span>λ ${escapeHtml(expected.home ?? "-")} / ${escapeHtml(expected.away ?? "-")}</span>
+      <span>Media sim ${escapeHtml(simulated.home ?? "-")} / ${escapeHtml(simulated.away ?? "-")}</span>
+      <span>${escapeHtml(prediction.iterations || 0)} iteraciones</span>
+      <span>${escapeHtml(prediction.source || "Poisson")}</span>
+    </div>
+    ${contextualPoissonHtml(prediction.contextual_poisson || {}, fixture)}
+  </article>`;
+}
+
 async function runSimulation(mode = "hybrid") {
   clearAlert();
   const poissonLive = mode === "poisson_live";
   document.getElementById("simulation-summary").textContent = poissonLive ? "Ejecutando Monte Carlo Poisson live..." : "Ejecutando Monte Carlo...";
   try {
+    const simMlToggle = document.getElementById("sim-use-ml-model");
     const job = await api("/api/mundial/simulate", jsonOptions(simulationPayload({
       mode,
       include_confirmed_results: poissonLive,
-      use_ml_model: poissonLive ? false : document.getElementById("sim-use-ml-model").checked,
+      use_ml_model: poissonLive ? false : Boolean(simMlToggle && simMlToggle.checked),
     })));
     trackWorldcupJob(job, "simulation");
   } catch (error) {
@@ -1562,7 +1669,8 @@ async function handleWorldcupJobComplete(job) {
       }
       renderModelState(active, state.training || {});
     }
-    document.getElementById("sim-use-ml-model").checked = true;
+    const simMlToggle = document.getElementById("sim-use-ml-model");
+    if (simMlToggle) simMlToggle.checked = true;
     document.getElementById("simulation-summary").textContent = `Modelo listo: ${(result.model || {}).model_name || (result.model || {}).model_id || "híbrido"}`;
   }
   if (job.kind === "simulation") {
@@ -1653,7 +1761,7 @@ function isTerminalJob(job) {
 
 function setWorldcupJobBusy(kind, busy) {
   const ids = kind === "simulation"
-    ? ["simulate-btn", "simulate-poisson-btn"]
+    ? ["simulate-poisson-btn"]
     : ["training-train", "training-retrain-base"];
   ids.forEach((id) => {
     const button = document.getElementById(id);
@@ -1728,6 +1836,8 @@ function trainingPayload(walkForwardMode = "none") {
 }
 
 function simulationPayload(overrides = {}) {
+  const mlWeightInput = document.getElementById("sim-ml-weight");
+  const mlToggle = document.getElementById("sim-use-ml-model");
   return {
     model_id: selectedModelId(),
     iterations: Number(document.getElementById("sim-iterations").value || 5000),
@@ -1737,8 +1847,8 @@ function simulationPayload(overrides = {}) {
     recency_weight: Number(document.getElementById("sim-recency-weight").value || 0),
     host_advantage: Number(document.getElementById("sim-host-advantage").value || 45),
     max_goals: Number(document.getElementById("sim-max-goals").value || 10),
-    ml_weight: Number(document.getElementById("sim-ml-weight").value || 0.5),
-    use_ml_model: document.getElementById("sim-use-ml-model").checked,
+    ml_weight: Number((mlWeightInput && mlWeightInput.value) || 0.5),
+    use_ml_model: Boolean(mlToggle && mlToggle.checked),
     ...overrides,
   };
 }
@@ -1769,6 +1879,7 @@ function renderSimulation(result) {
   const recentLimit = config.poisson_recent_matches || currentPoissonRecentMatches();
   document.getElementById("simulation-summary").textContent =
     `${summary.model || "Modelo"} - ${config.iterations || ""} iteraciones - seed ${config.seed || ""} - Poisson ultimos ${recentLimit} - historial ${config.history_weight || ""} - recencia ${config.recency_weight || ""} - ${mlState} - ${layers}`;
+  if (!document.getElementById("champion-strip")) return;
   const rows = (result.advancement && result.advancement.rows) || [];
   const topChampions = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 8);
   document.getElementById("champion-strip").innerHTML = topChampions.map((row) => {
@@ -1787,33 +1898,8 @@ function renderSimulation(result) {
 function renderQuickSimulationPanel(result) {
   const panel = document.getElementById("quick-simulation-panel");
   if (!panel) return;
-  const rows = (result && result.advancement && result.advancement.rows) || [];
-  if (!rows.length) {
-    panel.classList.add("hidden");
-    panel.innerHTML = "";
-    return;
-  }
-  const summary = result.summary || {};
-  const top = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 4);
-  const champion = top[0] || {};
-  const groupA = rows.filter((row) => {
-    const group = String(row.Grupo || "").trim().toLowerCase();
-    return group === "a" || group === "group a";
-  }).slice(0, 4);
-  panel.classList.remove("hidden");
-  panel.innerHTML = `
-    <header><strong>Monte Carlo rápido</strong><small>${escapeHtml(summary.result_policy || "Poisson live + resultados confirmados")}</small></header>
-    <div class="quick-champion">
-      ${flagHtml(assetFor(champion.Equipo || ""), "large")}
-      <div><span>Campeón más probable</span><strong>${escapeHtml(champion.Equipo || "-")}</strong><small>${escapeHtml(champion["Campeon %"] ?? "-")}%</small></div>
-    </div>
-    <div class="quick-top-list">
-      ${top.map((row) => `<span>${escapeHtml(row.Equipo || "")}<b>${escapeHtml(row["Campeon %"] ?? 0)}%</b></span>`).join("")}
-    </div>
-    <div class="quick-group">
-      <strong>Grupo A</strong>
-      ${groupA.map((row) => `<span>${escapeHtml(row.Equipo || "")}<b>${escapeHtml(row["Pasa grupo %"] ?? 0)}%</b></span>`).join("")}
-    </div>`;
+  panel.classList.add("hidden");
+  panel.innerHTML = "";
 }
 
 function renderProcedure(payload) {
