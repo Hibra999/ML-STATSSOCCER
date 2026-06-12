@@ -1792,11 +1792,12 @@ function scoreHeatmapHtml(contextual) {
     <b>${escapeHtml(homeGoal)}</b>
     ${awayGoals.map((awayGoal) => {
       const cell = cellMap.get(`${homeGoal}-${awayGoal}`) || {};
+      const score = cell.score || `${homeGoal}-${awayGoal}`;
       const heat = Math.max(0.04, Math.min(1, Number(cell.probability || 0) / maxProb));
-      return `<span title="${escapeAttr(cell.score || "")}: ${escapeAttr(cell.probability ?? 0)}%" style="--heat:${escapeAttr(heat)}">${escapeHtml(cell.probability ?? "")}</span>`;
+      return `<span title="${escapeAttr(score)}: ${escapeAttr(cell.probability ?? 0)}%" style="--heat:${escapeAttr(heat)}"><em>${escapeHtml(score)}</em><small>${escapeHtml(cell.probability ?? "")}%</small></span>`;
     }).join("")}
   `).join("");
-  return `<div class="score-heatmap" style="grid-template-columns: 24px repeat(${awayGoals.length}, minmax(28px, 1fr))">${header}${rows}</div>`;
+  return `<div class="score-heatmap" style="grid-template-columns: 28px repeat(${awayGoals.length}, minmax(48px, 1fr))">${header}${rows}</div>`;
 }
 
 function recentMatchesMiniTable(rows, team) {

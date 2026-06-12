@@ -2062,15 +2062,28 @@ h3 { font-size: 16px; }
 .score-heatmap b {
   display: grid;
   place-items: center;
-  min-height: 24px;
+  min-height: 34px;
   border-radius: 4px;
 }
 .score-heatmap b {
   color: var(--muted);
 }
 .score-heatmap span {
+  align-content: center;
+  gap: 1px;
   background: rgba(15, 122, 95, calc(0.08 + (var(--heat, 0) * 0.42)));
   color: var(--ink);
+  line-height: 1.05;
+}
+.score-heatmap span em {
+  color: var(--ink);
+  font-style: normal;
+  font-weight: 900;
+}
+.score-heatmap span small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
 }
 .recent15-drawer {
   border: 1px solid var(--line);
