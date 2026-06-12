@@ -87,6 +87,10 @@ def create_mundial_app() -> FastAPI:
     def training_prepare(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.training_prepare, payload)
 
+    @app.post("/api/mundial/training/player-snapshots")
+    def training_player_snapshots(payload: Dict[str, Any] = Body(default={})):
+        return _wrap(services.refresh_player_snapshots, payload)
+
     @app.get("/api/mundial/training/dataset")
     def training_dataset():
         return _wrap(services.training_dataset)

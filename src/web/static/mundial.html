@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260612-v1">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260612-v2">
 </head>
 <body>
   <header class="topbar">
@@ -25,26 +25,33 @@
   <main>
     <section id="alert" class="alert hidden"></section>
 
-    <section id="resumen" class="hero section-block worldcup-view active">
-      <div class="hero-copy">
-        <span class="eyebrow">Apartado independiente</span>
-        <h1>Mundial 2026 <span class="version-badge hero-version">v1</span></h1>
-        <p id="hero-meta">Cargando fixture inaugural...</p>
-        <div class="hero-match" id="hero-match">
-          <div class="hero-vs-block">
-            <span class="versus">VS</span>
-            <div id="hero-countdown" class="hero-countdown hero-countdown-vs"></div>
-          </div>
+    <section id="resumen" class="hero dashboard-hero section-block worldcup-view active">
+      <div class="dashboard-hero-main">
+        <div class="hero-copy">
+          <span class="eyebrow">Dashboard Mundial</span>
+          <h1>Mundial 2026 <span class="version-badge hero-version">v1</span></h1>
+          <p id="hero-meta">Cargando fixture inaugural...</p>
+          <div class="hero-match" id="hero-match"></div>
         </div>
-        <div id="hero-hardware" class="hero-hardware"></div>
+        <div id="hero-countdown" class="dashboard-countdown"></div>
       </div>
-      <div class="hero-metrics">
+      <aside class="hero-metrics dashboard-metrics">
         <div class="metric"><span>Equipos</span><strong id="metric-teams">0</strong></div>
         <div class="metric"><span>Grupos</span><strong id="metric-groups">0</strong></div>
         <div class="metric"><span>Partidos</span><strong id="metric-fixtures">0</strong></div>
-        <div class="metric"><span>Jugadores</span><strong id="metric-players">0</strong></div>
-        <div id="hero-next-grid" class="hero-next-grid"></div>
-        <div id="overview-standings" class="overview-standings"></div>
+        <div class="metric"><span>Resultados</span><strong id="metric-results">0</strong></div>
+        <div id="hero-hardware" class="hero-hardware"></div>
+      </aside>
+      <div class="dashboard-bottom">
+        <article class="overview-panel">
+          <header><strong>Hoy y próximos</strong><small id="overview-next-source"></small></header>
+          <div id="hero-next-grid" class="hero-next-grid"></div>
+        </article>
+        <article class="overview-panel">
+          <header><strong>Grupo activo</strong><small id="overview-standings-source"></small></header>
+          <div id="overview-standings" class="overview-standings"></div>
+        </article>
+        <article id="quick-simulation-panel" class="overview-panel quick-simulation-panel hidden"></article>
       </div>
     </section>
 
@@ -107,6 +114,7 @@
             <button id="training-download" type="button">Descargar datos Kaggle + All matches</button>
             <button id="training-prepare-etl" class="primary" type="button">Preparar ETL</button>
             <button id="refresh-btn" type="button">Actualizar datos</button>
+            <button id="training-refresh-snapshots" type="button">Actualizar snapshots jugadores</button>
           </div>
           <div id="training-walkforward-notice" class="status-strip"></div>
           <div id="training-summary" class="dataset-summary"></div>
@@ -167,7 +175,7 @@
           </div>
           <div class="actions-row training-actions">
             <button id="training-train" class="primary" type="button">Entrenar híbrido Mundial</button>
-            <button id="training-retrain-base" type="button">Reentrenar con partido nuevo</button>
+            <button id="training-retrain-base" type="button">Reentreno base con resultados</button>
           </div>
           <div id="worldcup-training-progress" class="worldcup-progress hidden"></div>
           <div id="training-model-state" class="model-state-grid"></div>
@@ -213,6 +221,7 @@
           <input id="sim-max-goals" type="hidden" value="10">
           <div class="actions-row">
             <button id="simulate-btn" class="primary" type="button">Simular torneo</button>
+            <button id="simulate-poisson-btn" type="button">Monte Carlo Poisson</button>
           </div>
           <div id="worldcup-simulation-progress" class="worldcup-progress hidden"></div>
           <div id="simulation-summary" class="status-strip"></div>
@@ -254,6 +263,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260612-v1"></script>
+  <script src="/static/mundial.js?v=20260612-v2"></script>
 </body>
 </html>

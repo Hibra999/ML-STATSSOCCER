@@ -41,6 +41,8 @@ def simulate_worldcup(
         model: WorldCupModel,
         iterations: int = 5000,
         seed: int = 2026,
+        include_confirmed_results: bool = False,
+        confirmed_results: List[Dict[str, Any]] | None = None,
         progress_callback=None,
 ) -> Dict[str, pd.DataFrame]:
     iterations = min(max(int(iterations or 5000), 100), 20000)
@@ -55,7 +57,14 @@ def simulate_worldcup(
     ratings = np.asarray([model.profile(team).rating for team in teams], dtype=float)
     group_infos = _group_simulation_infos(groups, team_index)
     group_lookup = {info["group"]: index for index, info in enumerate(group_infos)}
-    group_specs = _group_match_specs(group_matches, group_lookup, group_infos, team_index, model)
+    confirmed_specs = _confirmed_group_result_specs(
+        confirmed_results or [],
+        group_lookup,
+        group_infos,
+        team_index,
+    ) if include_confirmed_results else []
+    confirmed_keys = {spec[5] for spec in confirmed_specs}
+    group_specs = _group_match_specs(group_matches, group_lookup, group_infos, team_index, model, skip_keys=confirmed_keys)
     group_lambda_home = np.asarray([spec[3] for spec in group_specs], dtype=float)
     group_lambda_away = np.asarray([spec[4] for spec in group_specs], dtype=float)
     pair_cache: Dict[Tuple[int, int], Tuple[float, float, float]] = {}
@@ -66,6 +75,18 @@ def simulate_worldcup(
         points = [np.zeros(len(info["teams"]), dtype=np.int16) for info in group_infos]
         goals_for = [np.zeros(len(info["teams"]), dtype=np.int16) for info in group_infos]
         goals_against = [np.zeros(len(info["teams"]), dtype=np.int16) for info in group_infos]
+        for group_idx, pos1, pos2, goals1, goals2, _ in confirmed_specs:
+            goals_for[group_idx][pos1] += goals1
+            goals_against[group_idx][pos1] += goals2
+            goals_for[group_idx][pos2] += goals2
+            goals_against[group_idx][pos2] += goals1
+            if goals1 > goals2:
+                points[group_idx][pos1] += 3
+            elif goals2 > goals1:
+                points[group_idx][pos2] += 3
+            else:
+                points[group_idx][pos1] += 1
+                points[group_idx][pos2] += 1
         if group_specs:
             sampled_home = rng.poisson(group_lambda_home)
             sampled_away = rng.poisson(group_lambda_away)
@@ -140,7 +161,7 @@ def simulate_worldcup(
     advancement = _advancement_dataframe_from_counts(groups, model, counts, team_index, iterations)
     match_probs = match_probabilities_dataframe(group_matches, model)
     _emit_progress(progress_callback, "simulation", iterations, iterations, "Monte Carlo completado")
-    return {"advancement": advancement, "matches": match_probs}
+    return {"advancement": advancement, "matches": match_probs, "confirmed_results": pd.DataFrame(confirmed_results or [])}
 
 
 def _emit_progress(callback, stage: str, current: int, total: int, message: str) -> None:
@@ -181,12 +202,17 @@ def _group_match_specs(
         group_infos: List[Dict[str, Any]],
         team_index: Dict[str, int],
         model: WorldCupModel,
+        skip_keys: set[Tuple[str, str, str]] | None = None,
 ) -> List[Tuple[int, int, int, float, float]]:
     specs: List[Tuple[int, int, int, float, float]] = []
+    skip_keys = skip_keys or set()
     for match in group_matches:
-        group_idx = group_lookup.get(str(match.get("group") or ""))
+        group = str(match.get("group") or "")
+        group_idx = group_lookup.get(group)
         team1 = str(match.get("team1") or "")
         team2 = str(match.get("team2") or "")
+        if _result_match_key(group, team1, team2) in skip_keys:
+            continue
         team1_idx = team_index.get(team1)
         team2_idx = team_index.get(team2)
         if group_idx is None or team1_idx is None or team2_idx is None:
@@ -197,6 +223,45 @@ def _group_match_specs(
         lambda1, lambda2 = model.expected_goals(team1, team2)
         specs.append((int(group_idx), int(positions[team1_idx]), int(positions[team2_idx]), float(lambda1), float(lambda2)))
     return specs
+
+
+def _confirmed_group_result_specs(
+        confirmed_results: List[Dict[str, Any]],
+        group_lookup: Dict[str, int],
+        group_infos: List[Dict[str, Any]],
+        team_index: Dict[str, int],
+) -> List[Tuple[int, int, int, int, int, Tuple[str, str, str]]]:
+    specs: List[Tuple[int, int, int, int, int, Tuple[str, str, str]]] = []
+    for result in confirmed_results:
+        group = str(result.get("group") or result.get("Grupo") or "")
+        team1 = str(result.get("team1") or result.get("home") or result.get("Equipo 1") or "")
+        team2 = str(result.get("team2") or result.get("away") or result.get("Equipo 2") or "")
+        group_idx = group_lookup.get(group)
+        team1_idx = team_index.get(team1)
+        team2_idx = team_index.get(team2)
+        if group_idx is None or team1_idx is None or team2_idx is None:
+            continue
+        try:
+            goals1 = int(float(result.get("goals1", result.get("home_goals", result.get("Goles 1")))))
+            goals2 = int(float(result.get("goals2", result.get("away_goals", result.get("Goles 2")))))
+        except (TypeError, ValueError):
+            continue
+        positions = group_infos[group_idx]["positions"]
+        if team1_idx not in positions or team2_idx not in positions:
+            continue
+        specs.append((
+            int(group_idx),
+            int(positions[team1_idx]),
+            int(positions[team2_idx]),
+            goals1,
+            goals2,
+            _result_match_key(group, team1, team2),
+        ))
+    return specs
+
+
+def _result_match_key(group: str, team1: str, team2: str) -> Tuple[str, str, str]:
+    return (str(group or "").strip().lower(), str(team1 or "").strip().lower(), str(team2 or "").strip().lower())
 
 
 def _rank_group_arrays(info: Dict[str, Any], points: np.ndarray, goals_for: np.ndarray, goals_against: np.ndarray) -> List[int]:

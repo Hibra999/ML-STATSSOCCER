@@ -42,6 +42,7 @@ from src.worldcup.lanus_provider import (
 )
 from src.worldcup.training import (
     KAGGLE_ROOT,
+    FEATURE_STORE_ROOT,
     WALK_FORWARD_ROOT,
     WORLD_CUP_MODELS_ROOT,
     capture_walk_forward_snapshot,
@@ -57,6 +58,8 @@ from src.worldcup.training import (
     set_active_worldcup_model,
     training_options as worldcup_training_options,
     train_hybrid_model,
+    walk_forward_refresh_state,
+    walk_forward_status,
 )
 
 
@@ -73,6 +76,7 @@ DEFAULT_CONFIG = {
     "max_goals": 10,
     "refresh": False,
 }
+LAST_SIMULATION_RESULT: Dict[str, Any] = {}
 
 
 class BlendedWorldCupModel:
@@ -317,6 +321,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
         "group_standings": standings,
         "default_config": DEFAULT_CONFIG,
         "model": "Elo + Poisson Monte Carlo",
+        "last_simulation": LAST_SIMULATION_RESULT,
         "assets_policy": "Banderas locales/publicas y fotos publicas de SofaScore con fallback visual.",
     }
 
@@ -331,6 +336,7 @@ def groups(refresh: bool = False) -> Dict[str, Any]:
         items.append({
             "name": group_name,
             "letter": group_letter(group_name),
+            "played_matches": group_finished_fixture_count(group_name, fixture_df),
             "standings": group_standing_rows(group_name, team_names, fixture_df),
             "teams": [
                 {
@@ -551,6 +557,22 @@ def training_prepare(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return status
 
 
+def refresh_player_snapshots(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    payload = payload or {}
+    tournament, _ = load_tournament_2026(refresh=bool(payload.get("refresh_fixtures", False)))
+    limit = int(_clamp_int(payload.get("limit", 8), 1, 48))
+    lineups_result = auto_refresh_lineups(
+        tournament=tournament,
+        refresh_events=bool(payload.get("refresh", True)),
+        limit=limit,
+    )
+    return {
+        "lineups": lineups_result,
+        "walk_forward": walk_forward_status(),
+        "walk_forward_refresh": walk_forward_refresh_state(),
+    }
+
+
 def training_dataset() -> Dict[str, Any]:
     return dataset_status()
 
@@ -588,7 +610,7 @@ def maintenance_clear(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     clear_cache = bool(payload.get("clear_cache", True))
     removed: List[str] = []
     recreated: List[str] = []
-    for root in (WORLD_CUP_MODELS_ROOT, LINEUPS_ROOT, PLAYER_STATS_ROOT, SOFASCORE_ROOT, WALK_FORWARD_ROOT):
+    for root in (WORLD_CUP_MODELS_ROOT, FEATURE_STORE_ROOT, LINEUPS_ROOT, PLAYER_STATS_ROOT, SOFASCORE_ROOT, WALK_FORWARD_ROOT):
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
             removed.append(str(root))
@@ -754,20 +776,26 @@ def lineup_response(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+    global LAST_SIMULATION_RESULT
     config = simulation_config(payload)
     emit_job_progress(progress_callback, "preparing", 0, 100, "Preparando Monte Carlo")
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     model, history_source = build_model(tournament, config)
     active_model = read_model_metadata(model_id=config["model_id"] or None)
     hybrid_layers = ["Poisson base"]
+    if config["include_confirmed_results"]:
+        hybrid_layers.append("resultados confirmados")
     if config["use_ml_model"] and active_model.get("trained"):
         model = BlendedWorldCupModel(model, model_id=config["model_id"], ml_weight=float(config["ml_weight"]))
         hybrid_layers.extend(["ML blend 1X2", "ML ajuste lambdas"])
+    confirmed_results = confirmed_group_results(tournament) if config["include_confirmed_results"] else []
     result = simulate_worldcup(
         tournament=tournament,
         model=model,
         iterations=int(config["iterations"]),
         seed=int(config["seed"]),
+        include_confirmed_results=bool(config["include_confirmed_results"]),
+        confirmed_results=confirmed_results,
         progress_callback=progress_callback,
     )
     emit_job_progress(progress_callback, "rendering", 100, 100, "Preparando resultados")
@@ -775,22 +803,26 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         "summary": {
             "model": "Elo + Poisson Monte Carlo",
             "config": config,
+            "mode": config["mode"],
             "fixture_source": fixture_source,
             "history_source": history_source,
             "use_ml_model": config["use_ml_model"],
             "model_id": config["model_id"],
             "active_model": active_model,
             "hybrid_layers": hybrid_layers,
+            "confirmed_results": len(confirmed_results),
+            "result_policy": "Poisson live + resultados confirmados" if config["include_confirmed_results"] else "Poisson prospectivo sin resultados 2026",
             "anti_leakage": [
                 "Historico filtrado antes del 2026-06-11.",
                 "Modelo ML entrenado/evaluado con partidos internacionales no Mundial y sin partidos 2026.",
-                "No se usan resultados del Mundial 2026 para entrenar ni calibrar.",
+                "Los resultados 2026 confirmados solo fijan standings de simulacion live; no entrenan ni calibran el modelo.",
             ],
         },
         "advancement": table_payload(result["advancement"], page=1, page_size=80),
         "matches": table_payload(result["matches"], page=1, page_size=120),
         "procedure": procedure()["steps"],
     }
+    LAST_SIMULATION_RESULT = output
     emit_job_progress(progress_callback, "complete", 100, 100, "Monte Carlo completado")
     return output
 
@@ -872,10 +904,17 @@ def build_model(tournament: Dict[str, Any], config: Dict[str, Any]) -> Tuple[Wor
 
 def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload = payload or {}
+    mode = str(payload.get("mode") or "hybrid").strip().lower()
+    if mode not in {"hybrid", "poisson_live"}:
+        mode = "hybrid"
+    use_ml_model = bool(payload.get("use_ml_model", DEFAULT_CONFIG["use_ml_model"]))
+    if mode == "poisson_live":
+        use_ml_model = False
     return {
+        "mode": mode,
         "iterations": int(_clamp_int(payload.get("iterations", DEFAULT_CONFIG["iterations"]), 100, 20000)),
         "seed": int(payload.get("seed") if payload.get("seed") is not None else DEFAULT_CONFIG["seed"]),
-        "use_ml_model": bool(payload.get("use_ml_model", DEFAULT_CONFIG["use_ml_model"])),
+        "use_ml_model": use_ml_model,
         "ml_weight": _clamp_float(payload.get("ml_weight", DEFAULT_CONFIG["ml_weight"]), 0.0, 1.0),
         "history_weight": _clamp_float(payload.get("history_weight", DEFAULT_CONFIG["history_weight"]), 0.2, 2.0),
         "recency_weight": _clamp_float(payload.get("recency_weight", DEFAULT_CONFIG["recency_weight"]), 0.0, 1.0),
@@ -883,7 +922,37 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "max_goals": int(_clamp_int(payload.get("max_goals", DEFAULT_CONFIG["max_goals"]), 6, 14)),
         "refresh": bool(payload.get("refresh", DEFAULT_CONFIG["refresh"])),
         "model_id": str(payload.get("model_id") or "").strip(),
+        "include_confirmed_results": bool(payload.get("include_confirmed_results", mode == "poisson_live")),
     }
+
+
+def confirmed_group_results(tournament: Dict[str, Any]) -> List[Dict[str, Any]]:
+    fixture_df = tournament_fixtures_dataframe(tournament)
+    if fixture_df.empty or not {"Goles 1", "Goles 2"}.issubset(fixture_df.columns):
+        return []
+    working = fixture_df.copy()
+    working["HG"] = pd.to_numeric(working["Goles 1"], errors="coerce")
+    working["AG"] = pd.to_numeric(working["Goles 2"], errors="coerce")
+    working = working[
+        working["Grupo"].astype(str).str.len().gt(0) &
+        working["Equipo 1"].astype(str).str.len().gt(1) &
+        working["Equipo 2"].astype(str).str.len().gt(1) &
+        working["HG"].notna() &
+        working["AG"].notna()
+    ].copy()
+    rows: List[Dict[str, Any]] = []
+    for _, fixture in working.iterrows():
+        rows.append({
+            "fixture_id": str(fixture.get("No.", "")),
+            "date": fixture.get("Fecha", ""),
+            "group": fixture.get("Grupo", ""),
+            "team1": fixture.get("Equipo 1", ""),
+            "team2": fixture.get("Equipo 2", ""),
+            "goals1": int(fixture.get("HG")),
+            "goals2": int(fixture.get("AG")),
+            "source": fixture.get("Fuente Resultado", ""),
+        })
+    return rows
 
 
 def enrich_lineup_payload(payload: Dict[str, Any]) -> Dict[str, Any]:

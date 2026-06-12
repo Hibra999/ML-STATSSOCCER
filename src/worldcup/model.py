@@ -232,6 +232,20 @@ class WorldCupModel:
 
 
 def score_grid_features(lambda1: float, lambda2: float, max_goals: int = 10, score_cap: int = 4) -> Dict[str, float]:
+    return dict(_score_grid_features_cached(
+        round(float(lambda1), 4),
+        round(float(lambda2), 4),
+        int(max_goals),
+        int(score_cap),
+    ))
+
+
+@lru_cache(maxsize=8192)
+def _score_grid_features_cached(lambda1: float, lambda2: float, max_goals: int = 10, score_cap: int = 4) -> Tuple[Tuple[str, float], ...]:
+    return tuple(sorted(_score_grid_features_uncached(lambda1, lambda2, max_goals=max_goals, score_cap=score_cap).items()))
+
+
+def _score_grid_features_uncached(lambda1: float, lambda2: float, max_goals: int = 10, score_cap: int = 4) -> Dict[str, float]:
     grid = poisson_score_grid(lambda1=lambda1, lambda2=lambda2, max_goals=max_goals)
     max_goals = grid.shape[0] - 1
     masks = _score_grid_masks(max_goals)
@@ -309,6 +323,20 @@ def poisson_score_grid(lambda1: float, lambda2: float, max_goals: int = 10) -> n
 
 
 def dixon_coles_probabilities(lambda1: float, lambda2: float, rho: float = 0.0, max_goals: int = 10) -> Dict[str, float]:
+    return dict(_dixon_coles_probabilities_cached(
+        round(float(lambda1), 4),
+        round(float(lambda2), 4),
+        round(float(rho), 5),
+        int(max_goals),
+    ))
+
+
+@lru_cache(maxsize=8192)
+def _dixon_coles_probabilities_cached(lambda1: float, lambda2: float, rho: float = 0.0, max_goals: int = 10) -> Tuple[Tuple[str, float], ...]:
+    return tuple(sorted(_dixon_coles_probabilities_uncached(lambda1, lambda2, rho=rho, max_goals=max_goals).items()))
+
+
+def _dixon_coles_probabilities_uncached(lambda1: float, lambda2: float, rho: float = 0.0, max_goals: int = 10) -> Dict[str, float]:
     adjusted = dixon_coles_score_grid(lambda1=lambda1, lambda2=lambda2, rho=rho, max_goals=max_goals)
     max_goals = adjusted.shape[0] - 1
     masks = _score_grid_masks(max_goals)

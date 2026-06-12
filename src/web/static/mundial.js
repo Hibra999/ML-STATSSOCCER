@@ -16,6 +16,7 @@ const state = {
   jobTimer: null,
   jobPollingInFlight: false,
   newModelMode: false,
+  lastSimulation: null,
 };
 
 const jobLabels = {
@@ -44,7 +45,8 @@ function bindEvents() {
     button.addEventListener("click", () => switchWorldcupView(button.dataset.section));
   });
   document.getElementById("refresh-btn").addEventListener("click", () => loadAll(true));
-  document.getElementById("simulate-btn").addEventListener("click", runSimulation);
+  document.getElementById("simulate-btn").addEventListener("click", () => runSimulation("hybrid"));
+  document.getElementById("simulate-poisson-btn").addEventListener("click", () => runSimulation("poisson_live"));
   document.getElementById("worldcup-new-model").addEventListener("click", startNewWorldcupModel);
   document.getElementById("model-load").addEventListener("click", loadSelectedModel);
   document.getElementById("model-delete").addEventListener("click", deleteSelectedModel);
@@ -57,6 +59,7 @@ function bindEvents() {
   document.getElementById("training-refresh").addEventListener("click", loadTrainingStatus);
   document.getElementById("training-download").addEventListener("click", downloadTrainingDataset);
   document.getElementById("training-prepare-etl").addEventListener("click", prepareTrainingEtl);
+  document.getElementById("training-refresh-snapshots").addEventListener("click", refreshPlayerSnapshots);
   document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
   document.getElementById("training-retrain-base").addEventListener("click", () => trainWorldCupModel("result_only"));
   document.getElementById("upcoming-predict-btn").addEventListener("click", runUpcomingPredictions);
@@ -96,6 +99,7 @@ async function loadAll(refresh) {
     state.models = models.models || [];
     state.activeModelId = models.active_model_id || "";
     state.trainingOptions = training.options || null;
+    state.lastSimulation = overview.last_simulation || state.lastSimulation;
     rebuildTeamAssets();
     applyDefaultConfig(overview.default_config || {});
     renderOverview(overview);
@@ -157,7 +161,7 @@ function renderOverview(overview) {
   document.getElementById("metric-teams").textContent = overview.teams || 0;
   document.getElementById("metric-groups").textContent = overview.groups || 0;
   document.getElementById("metric-fixtures").textContent = overview.fixtures || 0;
-  document.getElementById("metric-players").textContent = overview.players || 0;
+  document.getElementById("metric-results").textContent = overview.confirmed_results || 0;
   const resultSource = overview.result_source ? ` · resultados: ${overview.result_source}` : "";
   document.getElementById("model-source").textContent = `${overview.model || "Modelo"} - ${overview.fixture_source || ""}${resultSource}`;
   const featured = overview.featured_matches || [];
@@ -167,12 +171,15 @@ function renderOverview(overview) {
     : "Sin próximos partidos futuros";
   document.getElementById("hero-match").innerHTML = featured.length
     ? featured.map((fixture, index) => heroFeaturedMatchHtml(fixture, index === 0)).join("")
-    : `<article class="hero-featured-card empty"><strong>Sin próximos partidos</strong><small>Todos los partidos cargados ya iniciaron o finalizaron.</small><div id="hero-countdown" class="hero-countdown hero-countdown-vs"></div></article>`;
+    : `<article class="hero-featured-card empty"><strong>Sin próximos partidos</strong><small>Todos los partidos cargados ya iniciaron o finalizaron.</small></article>`;
   renderHeroCountdown(overview.countdown_target, overview.countdown_state, highlight);
   renderHeroHardware((state.trainingOptions || {}).hardware || {});
+  document.getElementById("overview-next-source").textContent = overview.fixture_source || "";
+  document.getElementById("overview-standings-source").textContent = overview.result_source || "fixture-cache";
   document.getElementById("hero-next-grid").innerHTML = (overview.next_matches || []).map((fixture) => heroNextCardHtml(fixture)).join("")
     || `<article class="hero-next-card empty"><strong>Sin más partidos cargados</strong><small>El calendario adicional aparecerá aquí.</small></article>`;
   renderOverviewStandings(overview.group_standings || [], overview);
+  renderQuickSimulationPanel(state.lastSimulation);
 }
 
 function matchTeamHtml(asset, side) {
@@ -185,11 +192,10 @@ function matchTeamHtml(asset, side) {
 
 function heroFeaturedMatchHtml(fixture, withCountdown) {
   const kickoffLabel = `${fixture.date || ""} ${fixture.time || ""}`.trim();
-  return `<article class="hero-featured-card">
+  return `<article class="hero-featured-card ${withCountdown ? "featured" : ""}">
     ${matchTeamHtml(fixture.home || {}, "home")}
     <div class="hero-vs-block">
       <span class="versus">VS</span>
-      ${withCountdown ? `<div id="hero-countdown" class="hero-countdown hero-countdown-vs"></div>` : ""}
       <div class="hero-kickoff">
         <strong>${escapeHtml(kickoffLabel || "Horario pendiente")}</strong>
         <small>${escapeHtml(fixture.venue || "Sede por confirmar")}</small>
@@ -201,42 +207,53 @@ function heroFeaturedMatchHtml(fixture, withCountdown) {
 }
 
 function renderOverviewStandings(groups, overview = {}) {
-  const rows = (groups || []).slice(0, 12);
-  const confirmed = Number(overview.confirmed_results || 0);
-  const applied = Number(overview.result_override_applied || 0);
-  const updated = overview.results_updated_at ? `Actualizado ${overview.results_updated_at}` : "Sin hora de actualizacion";
   const source = overview.result_source || "fixture-cache";
-  const summary = `<article class="overview-standing-card overview-results-card">
-    <header><strong>Resultados</strong><span>Marc.</span><span></span><span>Local</span></header>
-    <div>
-      <span>${escapeHtml(source)}</span>
-      <b>${escapeHtml(String(confirmed))}</b>
-      <small></small>
-      <small>${escapeHtml(String(applied))}</small>
-    </div>
-    <div class="overview-results-meta">
-      <small>${escapeHtml(updated)}</small>
-    </div>
-  </article>`;
-  document.getElementById("overview-standings").innerHTML = summary + rows.map((group) => `
+  const updated = overview.results_updated_at ? `Actualizado ${overview.results_updated_at}` : "Sin hora de actualizacion";
+  const highlightGroup = (overview.highlight || {}).group || "";
+  const candidates = groups || [];
+  const selected = candidates.find((group) => Number(group.played_matches || 0) > 0)
+    || candidates.find((group) => group.name === highlightGroup)
+    || candidates.find((group) => group.letter === "A")
+    || candidates[0];
+  if (!selected) {
+    document.getElementById("overview-standings").innerHTML = loadingHtml("Grupo pendiente");
+    return;
+  }
+  document.getElementById("overview-standings").innerHTML = `
     <article class="overview-standing-card">
-      <header><strong>${escapeHtml(group.letter || group.name || "")}</strong><span>PJ</span><span>Pts</span><span>DG</span></header>
-      ${(group.rows || []).map((row) => `
+      <header><strong>${escapeHtml(selected.name || selected.letter || "")}</strong><span>PJ</span><span>Pts</span><span>DG</span></header>
+      ${(selected.rows || []).map((row) => `
         <div>
           <span>${flagHtml(row)}${escapeHtml(row.team || row.name || "")}</span>
           <small>${escapeHtml(row.PJ ?? 0)}</small>
           <b>${escapeHtml(row.Pts ?? 0)}</b>
           <small>${escapeHtml(row.DG ?? 0)}</small>
         </div>`).join("")}
-    </article>`).join("");
+      <footer>${escapeHtml(source)} · ${escapeHtml(updated)}</footer>
+    </article>`;
 }
 
 function renderGroups(payload) {
-  document.getElementById("groups-source").textContent = payload.source || "";
+  const sourceParts = [
+    payload.source || "",
+    payload.result_source ? `resultados: ${payload.result_source}` : "",
+    payload.results_updated_at ? `actualizado ${payload.results_updated_at}` : "",
+  ].filter(Boolean);
+  document.getElementById("groups-source").textContent = sourceParts.join(" · ");
   document.getElementById("groups-grid").innerHTML = state.groups.map((group) => `
-    <article class="group-card">
+    <article class="group-card ${Number(group.played_matches || 0) > 0 ? "has-results" : ""}">
       <header><h3>${escapeHtml(group.name)}</h3><strong>${escapeHtml(group.letter)}</strong></header>
-      <ol>${(group.standings || []).map((team) => `<li class="team-line standings-line">${flagHtml(team)}<strong>${escapeHtml(team.team || team.name)}</strong><span>${escapeHtml(team.PJ ?? 0)} PJ</span><span>${escapeHtml(team.Pts ?? 0)} pts</span><small>${escapeHtml(team.DG ?? 0)} DG</small></li>`).join("")}</ol>
+      <table class="standings-table">
+        <thead><tr><th>Equipo</th><th>PJ</th><th>GF</th><th>GC</th><th>DG</th><th>Pts</th></tr></thead>
+        <tbody>${(group.standings || []).map((team) => `<tr>
+          <td>${flagHtml(team)}<strong>${escapeHtml(team.team || team.name)}</strong></td>
+          <td>${escapeHtml(team.PJ ?? 0)}</td>
+          <td>${escapeHtml(team.GF ?? 0)}</td>
+          <td>${escapeHtml(team.GC ?? 0)}</td>
+          <td>${escapeHtml(team.DG ?? 0)}</td>
+          <td><b>${escapeHtml(team.Pts ?? 0)}</b></td>
+        </tr>`).join("")}</tbody>
+      </table>
     </article>`).join("");
 }
 
@@ -287,34 +304,51 @@ function fillUpcomingGroupFilter() {
 
 function renderHeroCountdown(targetIso, stateLabel, highlight) {
   const container = document.getElementById("hero-countdown");
+  if (!container) return;
   if (state.countdownTimer) {
     window.clearInterval(state.countdownTimer);
     state.countdownTimer = null;
   }
+  const matchLine = highlight && highlight.match ? highlight.match : "Horario por confirmar";
+  const kickoffLine = [highlight && highlight.date, highlight && highlight.time, highlight && highlight.venue].filter(Boolean).join(" · ");
   if (!targetIso) {
-    container.innerHTML = `<div class="countdown-chip"><span>Kickoff</span><strong>Hora pendiente</strong></div>`;
+    const label = stateLabel === "finished" ? "Finalizado" : "Sin horario";
+    container.innerHTML = dashboardCountdownHtml(label, matchLine, kickoffLine, null);
     return;
   }
   const render = () => {
     const diff = Date.parse(targetIso) - Date.now();
     if (Number.isNaN(diff)) {
-      container.innerHTML = `<div class="countdown-chip"><span>Kickoff</span><strong>Hora pendiente</strong></div>`;
+      container.innerHTML = dashboardCountdownHtml("Sin horario", matchLine, kickoffLine, null);
       return;
     }
     if (diff <= 0) {
-      container.innerHTML = `<div class="countdown-chip live"><span>${escapeHtml(highlight.group || highlight.round || "Partido")}</span><strong>En curso o ya inició</strong></div>`;
+      container.innerHTML = dashboardCountdownHtml("En curso", matchLine, kickoffLine, null);
       return;
     }
     const remaining = countdownParts(diff);
-    container.innerHTML = [
+    container.innerHTML = dashboardCountdownHtml("Próximo", matchLine, kickoffLine, remaining);
+  };
+  render();
+  state.countdownTimer = window.setInterval(render, 1000);
+}
+
+function dashboardCountdownHtml(label, matchLine, kickoffLine, remaining) {
+  const cells = remaining
+    ? [
       countdownChip("Días", remaining.days),
       countdownChip("Horas", remaining.hours),
       countdownChip("Min", remaining.minutes),
       countdownChip("Seg", remaining.seconds),
-    ].join("");
-  };
-  render();
-  state.countdownTimer = window.setInterval(render, 1000);
+    ].join("")
+    : `<div class="countdown-chip live"><span>Estado</span><strong>${escapeHtml(label)}</strong></div>`;
+  return `
+    <div class="countdown-head">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(matchLine || "Partido pendiente")}</strong>
+      <small>${escapeHtml(kickoffLine || "Horario pendiente")}</small>
+    </div>
+    <div class="hero-countdown">${cells}</div>`;
 }
 
 function countdownParts(milliseconds) {
@@ -583,6 +617,24 @@ async function prepareTrainingEtl() {
   }
 }
 
+async function refreshPlayerSnapshots() {
+  clearAlert();
+  document.getElementById("training-status").textContent = "Actualizando snapshots de jugadores...";
+  try {
+    const result = await api("/api/mundial/training/player-snapshots", jsonOptions({ refresh: true, limit: 8 }));
+    const refreshed = await api("/api/mundial/training/status");
+    state.training = {
+      ...refreshed,
+      snapshot_refresh: result,
+    };
+    state.trainingOptions = refreshed.options || state.trainingOptions;
+    renderTrainingStatus(state.training);
+  } catch (error) {
+    showError(error.message);
+    await loadTrainingStatus();
+  }
+}
+
 async function trainWorldCupModel(walkForwardMode = "none") {
   clearAlert();
   if (!state.training || !state.training.etl_ready) {
@@ -701,7 +753,7 @@ function datasetSummaryHtml(payload) {
     datasetCard(`Predicción ${targetYear}`, payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
     datasetCard("All matches", internationalReady ? international.rows || 0 : "faltante", internationalStatusDetail(international)),
-    datasetCard("Walk-forward", walkForward.matches || 0, `${refresh.ready_result_only || 0} con resultado listo`),
+    datasetCard("Walk-forward", refresh.completed_results || walkForward.completed_results || 0, `${refresh.ready_result_only || 0} resultado listo · ${refresh.needs_player_snapshot || 0} snapshot pendiente`),
     datasetCard("Target", targetDisplayLabel(payload.target_column || "-"), "label entrenable"),
   ].join("");
 }
@@ -719,12 +771,14 @@ function internationalStatusDetail(international) {
 
 function trainingStatusWarnings(payload) {
   const international = (payload && payload.international_recent) || {};
+  const snapshotWarning = (payload && payload.snapshot_refresh && payload.snapshot_refresh.warning) || "";
   const warnings = [
     ...((payload && payload.prepared_warnings) || []),
     ...((payload && payload.market_warnings) || []),
     ...((payload && payload.api_football_warnings) || []),
     ...((payload && payload.download_warnings) || []),
     international.warning || "",
+    snapshotWarning,
     !international.available && international.reason ? `All matches: ${international.reason}` : "",
   ].filter(Boolean).map((item) => String(item));
   return [...new Set(warnings)];
@@ -919,8 +973,9 @@ function renderWalkForwardNotice(refresh) {
   const container = document.getElementById("training-walkforward-notice");
   if (!container) return;
   const items = [];
-  if (refresh.requires_reload) items.push(`Recarga pendiente: ${refresh.stale_match_ids?.length || 0} partidos jugados sin snapshot.`);
-  if (refresh.ready_result_only) items.push(`Reentreno base listo: ${refresh.ready_result_only}`);
+  if (refresh.ready_result_only) items.push(`Resultado listo para reentreno base: ${refresh.ready_result_only}`);
+  if (refresh.needs_player_snapshot) items.push(`Snapshot de jugadores pendiente: ${refresh.needs_player_snapshot}`);
+  if (refresh.pending_results) items.push(`Resultados pendientes: ${refresh.pending_results}`);
   if (refresh.latest_played_fixture) items.push(`Último jugado: ${refresh.latest_played_fixture}`);
   if (refresh.note && !items.includes(refresh.note)) items.push(refresh.note);
   container.innerHTML = items.map((item) => `<span>${escapeHtml(item)}</span>`).join("") || `<span>Sin alertas de walk-forward.</span>`;
@@ -1344,11 +1399,16 @@ function metricsTableFromModel(model) {
   return { columns, rows, total: rows.length };
 }
 
-async function runSimulation() {
+async function runSimulation(mode = "hybrid") {
   clearAlert();
-  document.getElementById("simulation-summary").textContent = "Ejecutando Monte Carlo...";
+  const poissonLive = mode === "poisson_live";
+  document.getElementById("simulation-summary").textContent = poissonLive ? "Ejecutando Monte Carlo Poisson live..." : "Ejecutando Monte Carlo...";
   try {
-    const job = await api("/api/mundial/simulate", jsonOptions(simulationPayload()));
+    const job = await api("/api/mundial/simulate", jsonOptions(simulationPayload({
+      mode,
+      include_confirmed_results: poissonLive,
+      use_ml_model: poissonLive ? false : document.getElementById("sim-use-ml-model").checked,
+    })));
     trackWorldcupJob(job, "simulation");
   } catch (error) {
     document.getElementById("simulation-summary").textContent = "";
@@ -1520,6 +1580,8 @@ function renderWorldcupJobProgress(kind) {
     : `<span>Mejor ${escapeHtml(formatNumber(progress.best_value))}</span>`;
   const stateText = progress.last_state ? `<span>${escapeHtml(progress.last_state)}</span>` : "";
   const market = progress.market ? `<span>${escapeHtml(progress.market)}</span>` : "";
+  const throughput = progress.rows_per_second ? `<span>${escapeHtml(progress.rows_per_second)} filas/s</span>` : "";
+  const eta = progress.eta_seconds ? `<span>ETA ${escapeHtml(formatElapsed(progress.eta_seconds))}</span>` : "";
   const error = job.error ? `<span>${escapeHtml(cleanMessage(job.error))}</span>` : "";
   const activity = worldcupJobActivityLabel(job);
   target.className = `worldcup-progress ${escapeAttr(job.status || "queued")}`;
@@ -1536,6 +1598,8 @@ function renderWorldcupJobProgress(kind) {
       <span>${escapeHtml(progress.stage || job.status || "queued")}</span>
       <span>${escapeHtml(current)}/${escapeHtml(total)}</span>
       ${market}
+      ${throughput}
+      ${eta}
       ${best}
       ${stateText}
       ${activity ? `<span>${escapeHtml(activity)}</span>` : ""}
@@ -1547,7 +1611,7 @@ function worldcupJobActivityLabel(job) {
   if (!job || !job.updated_at || isTerminalJob(job)) return "";
   const seconds = secondsSinceIso(job.updated_at);
   if (seconds === null) return "";
-  if (seconds >= 20) return `Sigue ejecutándose; sin nuevo evento hace ${formatElapsed(seconds)}`;
+  if (seconds >= 20) return `Procesando lote; última actualización hace ${formatElapsed(seconds)}`;
   return `Actualizado hace ${formatElapsed(seconds)}`;
 }
 
@@ -1578,7 +1642,7 @@ function isTerminalJob(job) {
 
 function setWorldcupJobBusy(kind, busy) {
   const ids = kind === "simulation"
-    ? ["simulate-btn"]
+    ? ["simulate-btn", "simulate-poisson-btn"]
     : ["training-train", "training-retrain-base"];
   ids.forEach((id) => {
     const button = document.getElementById(id);
@@ -1652,7 +1716,7 @@ function trainingPayload(walkForwardMode = "none") {
   return payload;
 }
 
-function simulationPayload() {
+function simulationPayload(overrides = {}) {
   return {
     model_id: selectedModelId(),
     iterations: Number(document.getElementById("sim-iterations").value || 5000),
@@ -1663,10 +1727,12 @@ function simulationPayload() {
     max_goals: Number(document.getElementById("sim-max-goals").value || 10),
     ml_weight: Number(document.getElementById("sim-ml-weight").value || 0.5),
     use_ml_model: document.getElementById("sim-use-ml-model").checked,
+    ...overrides,
   };
 }
 
 function renderSimulation(result) {
+  state.lastSimulation = result;
   const summary = result.summary || {};
   const config = summary.config || {};
   const mlState = config.use_ml_model ? "ML híbrido activo" : "ML híbrido off";
@@ -1685,6 +1751,39 @@ function renderSimulation(result) {
   }).join("");
   renderTable("advancement-table", result.advancement);
   renderTable("match-probs-table", result.matches);
+  renderQuickSimulationPanel(result);
+}
+
+function renderQuickSimulationPanel(result) {
+  const panel = document.getElementById("quick-simulation-panel");
+  if (!panel) return;
+  const rows = (result && result.advancement && result.advancement.rows) || [];
+  if (!rows.length) {
+    panel.classList.add("hidden");
+    panel.innerHTML = "";
+    return;
+  }
+  const summary = result.summary || {};
+  const top = [...rows].sort((a, b) => Number(b["Campeon %"] || 0) - Number(a["Campeon %"] || 0)).slice(0, 4);
+  const champion = top[0] || {};
+  const groupA = rows.filter((row) => {
+    const group = String(row.Grupo || "").trim().toLowerCase();
+    return group === "a" || group === "group a";
+  }).slice(0, 4);
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
+    <header><strong>Monte Carlo rápido</strong><small>${escapeHtml(summary.result_policy || "Poisson live + resultados confirmados")}</small></header>
+    <div class="quick-champion">
+      ${flagHtml(assetFor(champion.Equipo || ""), "large")}
+      <div><span>Campeón más probable</span><strong>${escapeHtml(champion.Equipo || "-")}</strong><small>${escapeHtml(champion["Campeon %"] ?? "-")}%</small></div>
+    </div>
+    <div class="quick-top-list">
+      ${top.map((row) => `<span>${escapeHtml(row.Equipo || "")}<b>${escapeHtml(row["Campeon %"] ?? 0)}%</b></span>`).join("")}
+    </div>
+    <div class="quick-group">
+      <strong>Grupo A</strong>
+      ${groupA.map((row) => `<span>${escapeHtml(row.Equipo || "")}<b>${escapeHtml(row["Pasa grupo %"] ?? 0)}%</b></span>`).join("")}
+    </div>`;
 }
 
 function renderProcedure(payload) {

@@ -8,6 +8,8 @@ import pickle
 import re
 import shutil
 import subprocess
+import hashlib
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -53,6 +55,7 @@ logger = logging.getLogger("uvicorn.error")
 KAGGLE_DATASET_SLUG = "harrachimustapha/fifa-world-cup-team-dataset"
 KAGGLE_ROOT = Path("storage") / "worldcup" / "kaggle"
 WORLD_CUP_MODELS_ROOT = Path("storage") / "worldcup" / "models"
+FEATURE_STORE_ROOT = Path("storage") / "worldcup" / "features"
 HYBRID_MODEL_FILE = WORLD_CUP_MODELS_ROOT / "hybrid_worldcup_model.pkl"
 HYBRID_MODEL_META_FILE = WORLD_CUP_MODELS_ROOT / "hybrid_worldcup_model.json"
 PREPARED_DATASET_FILE = CACHE_ROOT / "worldcup_training_prepared.pkl"
@@ -138,6 +141,7 @@ WALK_FORWARD_TEAM_FEATURES_FILE = WALK_FORWARD_ROOT / "team_match_features.csv"
 FUTURE_LABEL_EXCLUDED_YEAR = 2026
 TARGET_WORLDCUP_YEAR = FUTURE_LABEL_EXCLUDED_YEAR
 PREPARED_SCHEMA_VERSION = "worldcup_2026_international_labels_v2"
+FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v1"
 EVAL_STRATEGY_LAST_30 = "last_30_international_test"
 BENCHMARK_POLICY = EVAL_STRATEGY_LAST_30
 WORLDCUP_XGBOOST_DEFAULTS = {
@@ -174,6 +178,8 @@ class WorldCupFeatureBuildCache:
         self.stats: Dict[str, int] = {
             "matrix_hits": 0,
             "matrix_misses": 0,
+            "persistent_matrix_hits": 0,
+            "persistent_matrix_misses": 0,
             "snapshot_hits": 0,
             "snapshot_misses": 0,
             "recent15_hits": 0,
@@ -240,6 +246,10 @@ def emit_training_progress(callback, stage: str, current: int, total: int, messa
         details.append(f"overall_trial={extra['overall_trial_current']}/{extra['total_trial_budget']}")
     if extra.get("elapsed_seconds") not in {None, ""}:
         details.append(f"elapsed={extra['elapsed_seconds']}s")
+    if extra.get("rows_per_second") not in {None, ""}:
+        details.append(f"rows_per_second={extra['rows_per_second']}")
+    if extra.get("eta_seconds") not in {None, ""}:
+        details.append(f"eta={extra['eta_seconds']}s")
     if extra.get("rows") not in {None, ""}:
         details.append(f"rows={extra['rows']}")
     if extra.get("features") not in {None, ""}:
@@ -271,7 +281,7 @@ def format_feature_cache_for_progress(value: Any) -> str:
     if value is None or value == "":
         return ""
     if isinstance(value, dict):
-        keys = ("matrix_hits", "matrix_misses", "recent15_hits", "recent15_misses")
+        keys = ("matrix_hits", "matrix_misses", "persistent_matrix_hits", "persistent_matrix_misses", "recent15_hits", "recent15_misses")
         return ",".join(f"{key}:{int(value.get(key, 0) or 0)}" for key in keys)
     return str(value)
 
@@ -2316,6 +2326,53 @@ def feature_rows_signature(rows: pd.DataFrame) -> Tuple[Any, ...]:
     )
 
 
+def dataframe_fingerprint(frame: Optional[pd.DataFrame]) -> str:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return "empty"
+    working = frame.copy()
+    meta = {
+        "shape": [int(working.shape[0]), int(working.shape[1])],
+        "columns": [str(column) for column in working.columns],
+        "dtypes": [str(dtype) for dtype in working.dtypes],
+    }
+    digest = hashlib.sha256(json.dumps(meta, sort_keys=True, default=str).encode("utf-8"))
+    try:
+        digest.update(pd.util.hash_pandas_object(working, index=True).values.tobytes())
+    except Exception:
+        digest.update(working.astype(str).to_csv(index=True).encode("utf-8", errors="ignore"))
+    return digest.hexdigest()
+
+
+def api_football_fingerprint(api_football: Optional[Dict[str, pd.DataFrame]]) -> Tuple[str, ...]:
+    api_football = api_football or {}
+    return tuple(
+        dataframe_fingerprint(api_football.get(key))
+        for key in ("team_stats", "lineups", "injuries")
+    )
+
+
+def worldcup_model_fingerprint(model: Optional[WorldCupModel]) -> str:
+    if model is None:
+        return "none"
+    rows = []
+    for team, profile in sorted(getattr(model, "_profiles", {}).items()):
+        rows.append((
+            str(team),
+            round(float(profile.rating), 8),
+            int(profile.matches),
+            round(float(profile.attack), 8),
+            round(float(profile.defense), 8),
+        ))
+    payload = {
+        "profiles": rows,
+        "global_g1": round(float(getattr(model, "global_g1", 0.0)), 8),
+        "global_g2": round(float(getattr(model, "global_g2", 0.0)), 8),
+        "host_advantage": round(float(getattr(model, "host_advantage", 0.0)), 8),
+        "max_goals": int(getattr(model, "max_goals", 0) or 0),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
 def feature_matrix_cache_key(
         rows: pd.DataFrame,
         base_model: Optional[WorldCupModel],
@@ -2336,17 +2393,16 @@ def feature_matrix_cache_key(
 ) -> Tuple[Any, ...]:
     api_football = api_football or {}
     return (
+        FEATURE_STORE_SCHEMA_VERSION,
         feature_rows_signature(rows),
-        id(base_model) if base_model is not None else None,
-        dataframe_cache_id(history_df),
-        dataframe_cache_id(team_features),
-        dataframe_cache_id(market_rows),
-        dataframe_cache_id(qualifier_rows),
-        dataframe_cache_id(api_football.get("team_stats")),
-        dataframe_cache_id(api_football.get("lineups")),
-        dataframe_cache_id(api_football.get("injuries")),
-        dataframe_cache_id(international_matches),
-        dataframe_cache_id(fixture_feature_rows),
+        worldcup_model_fingerprint(base_model),
+        dataframe_fingerprint(history_df),
+        dataframe_fingerprint(team_features),
+        dataframe_fingerprint(market_rows),
+        dataframe_fingerprint(qualifier_rows),
+        *api_football_fingerprint(api_football),
+        dataframe_fingerprint(international_matches),
+        dataframe_fingerprint(fixture_feature_rows),
         tuple(sorted(str(team) for team in teams)),
         tuple(sorted(int(year) for year in frozen_years)),
         round(float(dc_rho or 0.0), 8),
@@ -2355,6 +2411,55 @@ def feature_matrix_cache_key(
         round(float(host_advantage or 0.0), 8),
         int(max_goals),
     )
+
+
+def feature_store_fingerprint(matrix_key: Tuple[Any, ...]) -> str:
+    payload = json.dumps(json_safe(matrix_key), sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def feature_store_path(matrix_key: Tuple[Any, ...]) -> Path:
+    return FEATURE_STORE_ROOT / f"{feature_store_fingerprint(matrix_key)}.pkl"
+
+
+def load_feature_matrix_from_store(matrix_key: Tuple[Any, ...]) -> Optional[pd.DataFrame]:
+    path = feature_store_path(matrix_key)
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != FEATURE_STORE_SCHEMA_VERSION:
+        return None
+    if payload.get("fingerprint") != feature_store_fingerprint(matrix_key):
+        return None
+    matrix = payload.get("matrix")
+    if not isinstance(matrix, pd.DataFrame):
+        return None
+    return matrix
+
+
+def save_feature_matrix_to_store(matrix_key: Tuple[Any, ...], matrix: pd.DataFrame) -> None:
+    if matrix is None or matrix.empty:
+        return
+    FEATURE_STORE_ROOT.mkdir(parents=True, exist_ok=True)
+    path = feature_store_path(matrix_key)
+    payload = {
+        "schema_version": FEATURE_STORE_SCHEMA_VERSION,
+        "fingerprint": feature_store_fingerprint(matrix_key),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "rows": int(matrix.shape[0]),
+        "columns": list(matrix.columns),
+        "matrix": matrix,
+    }
+    tmp_path = path.with_suffix(".tmp")
+    with tmp_path.open("wb") as handle:
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp_path.replace(path)
 
 
 def normalize_build_progress_every(value: Optional[int], row_count: int) -> int:
@@ -2569,8 +2674,27 @@ def build_training_matrix(
             feature_cache_state="hit",
             progress_every=normalize_build_progress_every(progress_every, int(max(working.shape[0], 1))),
         )
+    persisted_x = load_feature_matrix_from_store(matrix_key)
+    if persisted_x is not None:
+        feature_cache.stats["matrix_hits"] += 1
+        feature_cache.stats["persistent_matrix_hits"] += 1
+        feature_cache.matrices[matrix_key] = persisted_x.copy()
+        return finalize_training_matrix_from_features(
+            persisted_x.copy(),
+            working,
+            target,
+            feature_columns,
+            progress_callback=progress_callback,
+            progress_stage=progress_stage or "features",
+            progress_message=progress_message or "Features reutilizadas desde feature store",
+            progress_market=progress_market,
+            progress_model_id=progress_model_id,
+            feature_cache_state="persistent-hit",
+            progress_every=normalize_build_progress_every(progress_every, int(max(working.shape[0], 1))),
+        )
 
     feature_cache.stats["matrix_misses"] += 1
+    feature_cache.stats["persistent_matrix_misses"] += 1
     market_key = dataframe_cache_id(market_rows)
     if market_key not in feature_cache.market_lookup:
         feature_cache.market_lookup[market_key] = build_market_lookup(market_rows)
@@ -2580,6 +2704,8 @@ def build_training_matrix(
     progress_total = int(max(working.shape[0], 1))
     progress_every = normalize_build_progress_every(progress_every, progress_total)
     working_records = working.to_dict(orient="records")
+    feature_started_at = time.monotonic()
+    last_progress_at = feature_started_at
     for row_index, row in enumerate(working_records, start=1):
         row_year = match_year_from_row(row)
         row_date = match_date_from_row(row)
@@ -2701,7 +2827,12 @@ def build_training_matrix(
                 feature_lookups=row_feature_lookups,
             )
         )
-        if progress_callback is not None and (row_index == 1 or row_index == progress_total or row_index % progress_every == 0):
+        now = time.monotonic()
+        time_due = (now - last_progress_at) >= 12.0
+        if progress_callback is not None and (row_index == 1 or row_index == progress_total or row_index % progress_every == 0 or time_due):
+            elapsed = max(now - feature_started_at, 1e-9)
+            rows_per_second = float(row_index / elapsed)
+            eta_seconds = int(max((progress_total - row_index) / max(rows_per_second, 1e-9), 0.0))
             emit_training_progress(
                 progress_callback,
                 progress_stage or "features",
@@ -2714,9 +2845,14 @@ def build_training_matrix(
                 features=len(records[-1]) if records else 0,
                 feature_cache="miss",
                 progress_every=progress_every,
+                elapsed_seconds=int(elapsed),
+                rows_per_second=round(rows_per_second, 2),
+                eta_seconds=eta_seconds,
             )
+            last_progress_at = now
     x = pd.DataFrame(records).fillna(0.0)
     feature_cache.matrices[matrix_key] = x.copy()
+    save_feature_matrix_to_store(matrix_key, x)
     return finalize_training_matrix_from_features(
         x,
         working,
@@ -3869,7 +4005,7 @@ def normalize_market_mode(value: Any, target: str = "result") -> str:
 def normalize_walk_forward_mode(value: Any) -> str:
     key = str(value or "none").strip().lower().replace("-", "_")
     if key in {"players", "with_players", "player_features"}:
-        return "result_only"
+        return "players"
     if key in {"result_only", "base", "match_only", "without_players"}:
         return "result_only"
     return "none"
@@ -4055,6 +4191,9 @@ def supplemental_training_rows(
     }
     if normalized_mode == "none":
         return empty
+    if normalized_mode == "players":
+        empty["warnings"] = ["El modo con jugadores requiere actualizar snapshots; el reentreno base usa result_only."]
+        return empty
     if dataset_mode != "match_result":
         empty["warnings"] = ["El reentreno walk-forward solo aplica cuando el dataset Kaggle es de partidos (match_result)."]
         return empty
@@ -4062,10 +4201,7 @@ def supplemental_training_rows(
     if completed.empty:
         empty["warnings"] = ["No hay partidos 2026 con marcador oficial disponible para incorporar al reentreno."]
         return empty
-    completed, removed_future = drop_future_label_rows(sanitize_match_rows(completed))
-    if removed_future:
-        empty["warnings"] = [f"{removed_future} partidos 2026 con marcador quedaron fuera del reentreno por politica anti-leakage."]
-        return empty
+    completed = sanitize_match_rows(completed)
     return {
         "mode": normalized_mode,
         "rows": completed.reset_index(drop=True),
@@ -4087,7 +4223,9 @@ def walk_forward_refresh_state() -> Dict[str, Any]:
     played = worldcup_played_fixture_rows(tournament)
     completed = completed_worldcup_training_rows(tournament)
     matches = read_optional_csv(WALK_FORWARD_MATCHES_FILE)
+    fixture_features = read_fixture_feature_rows()
     snapshot_ids = set(matches["fixture_id"].astype(str)) if not matches.empty and "fixture_id" in matches.columns else set()
+    player_ready_ids = player_ready_fixture_ids(fixture_features)
     included_result_ids = set()
     if not matches.empty and "fixture_id" in matches.columns:
         if "included_result_only_at" in matches.columns:
@@ -4095,7 +4233,7 @@ def walk_forward_refresh_state() -> Dict[str, Any]:
     due_ids = set(due["No."].astype(str)) if not due.empty else set()
     played_ids = set(played["No."].astype(str)) if not played.empty else set()
     completed_ids = set(completed["FixtureId"].astype(str)) if not completed.empty else set()
-    stale_ids = sorted(played_ids - snapshot_ids)
+    needs_player_snapshot_ids = sorted(completed_ids - player_ready_ids)
     pending_result_ids = sorted(due_ids - completed_ids)
     ready_result_ids = sorted(completed_ids - included_result_ids)
     latest_fixture = ""
@@ -4103,10 +4241,10 @@ def walk_forward_refresh_state() -> Dict[str, Any]:
         latest = played.iloc[-1]
         latest_fixture = f"{latest.get('Equipo 1', '')} vs {latest.get('Equipo 2', '')} ({latest.get('Fecha', '')})"
     note = ""
-    if stale_ids:
-        note = f"Hay {len(stale_ids)} partidos ya jugados sin snapshot. Conviene recargar datos."
-    elif ready_result_ids:
+    if ready_result_ids:
         note = f"Hay {len(ready_result_ids)} partidos listos para reentreno base."
+    elif needs_player_snapshot_ids:
+        note = f"Hay {len(needs_player_snapshot_ids)} partidos con snapshot de jugadores pendiente."
     elif pending_result_ids:
         note = f"Hay {len(pending_result_ids)} partidos con fecha pasada esperando marcador final."
     return {
@@ -4114,11 +4252,15 @@ def walk_forward_refresh_state() -> Dict[str, Any]:
         "date_passed_matches": int(len(due_ids)),
         "completed_results": int(len(completed_ids)),
         "snapshot_matches": int(len(snapshot_ids)),
-        "stale_match_ids": stale_ids,
+        "player_snapshot_matches": int(len(player_ready_ids)),
+        "stale_match_ids": needs_player_snapshot_ids,
+        "needs_player_snapshot_ids": needs_player_snapshot_ids,
         "pending_result_ids": pending_result_ids,
+        "pending_results": int(len(pending_result_ids)),
         "ready_result_ids": ready_result_ids,
         "ready_result_only": int(len(ready_result_ids)),
-        "requires_reload": bool(stale_ids),
+        "needs_player_snapshot": int(len(needs_player_snapshot_ids)),
+        "requires_reload": bool(needs_player_snapshot_ids),
         "latest_played_fixture": latest_fixture,
         "note": note,
     }
@@ -6141,7 +6283,10 @@ def walk_forward_status() -> Dict[str, int]:
         "matches": int(matches.shape[0]),
         "players": int(players.shape[0]),
         "team_rows": int(team_features.shape[0]),
+        "completed_results": int(refresh_state.get("completed_results", 0)),
         "pending_results": pending_results,
+        "needs_player_snapshot": int(refresh_state.get("needs_player_snapshot", 0)),
+        "ready_result_only": ready_for_retrain,
         "ready_for_retrain": ready_for_retrain,
     }
 
