@@ -93,6 +93,7 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/player-features" not in paths
     assert "/api/mundial/training/download-kaggle" in paths
     assert "/api/mundial/training/prepare-etl" in paths
+    assert "/api/mundial/training/auto-prepare" in paths
     assert "/api/mundial/training/dataset" in paths
     assert "/api/mundial/training/train" in paths
     assert "/api/mundial/training/status" in paths
@@ -276,7 +277,10 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "worldcup-tuning-enabled" in html_source
     assert "worldcup-device" in html_source
     assert "worldcup-n-jobs" in html_source
-    assert "training-prepare-etl" in html_source
+    assert "training-auto-prepare" in html_source
+    assert "training-prepare-etl" not in html_source
+    assert "training-download" not in html_source
+    assert "training-refresh-snapshots" not in html_source
     assert "training-tuning-lock-status" in html_source
     assert "training-model-params" in html_source
     assert "training-model-state" in html_source
@@ -314,7 +318,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "/api/mundial/player-features" not in app_source
     assert "/api/mundial/models" in app_source
     assert "/api/mundial/models/train" in app_source
-    assert "/api/mundial/training/prepare-etl" in app_source
+    assert "/api/mundial/training/auto-prepare" in app_source
+    assert "/api/mundial/training/prepare-etl" not in app_source
     assert "/api/mundial/models/select" in app_source
     assert "/api/mundial/maintenance/clear" in app_source
     assert "trainingPayload" in app_source
@@ -1324,18 +1329,20 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     prediction = training.predict_match_payload(fallback_tournament_2026(), model, fixture_id=1, use_ml_model=True, ml_weight=0.5)
 
     assert prepared["etl_ready"] is True
-    assert status["raw_training_mode"] == "team_strength"
+    assert status["raw_training_mode"] == ""
     assert status["training_mode"] == "match_result"
     assert status["prepared_label_source"] == "all_matches.csv"
     assert status["target_column"] == "Label + GoalsDistribution + OverUnder05/15/25/35"
     assert status["test_rows"] > 0
-    assert status["prediction_rows"] == 2
+    assert status["validation_rows"] > 0
+    assert status["prediction_rows"] == 0
     assert status["eval_rows"] > 0
     assert status["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
     assert status["final_test_year"] == ""
     assert result["mode"] == "match_result"
     assert result["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
-    assert result["prediction_rows"] == 2
+    assert result["validation_rows"] > 0
+    assert result["prediction_rows"] == 0
     assert result["model"]["target_column"] == "Label + GoalsDistribution + OverUnder05/15/25/35"
     assert result["model"]["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
     expected_markets = {"result", "over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"}
@@ -1460,6 +1467,14 @@ def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp
     monkeypatch.setattr(training, "WALK_FORWARD_TEAM_FEATURES_FILE", walk_root / "team_match_features.csv")
     monkeypatch.setattr(training, "PREPARED_DATASET_FILE", cache_root / "worldcup_training_prepared.pkl")
     monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", cache_root / "worldcup_training_prepared.json")
+    monkeypatch.setattr(training, "international_results_status", lambda: {
+        "available": True,
+        "exists": True,
+        "source_path": str(tmp_path / "international" / "all_matches.csv"),
+        "file_path": str(tmp_path / "international" / "all_matches.csv"),
+        "rows": 42,
+        "all_matches_rows": 42,
+    })
 
     result = mundial_services.maintenance_clear({"clear_cache": True})
 
@@ -1471,7 +1486,7 @@ def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp
     assert result["models"]["models"] == []
 
 
-def test_worldcup_last_30_international_test_never_uses_worldcup_labels():
+def test_worldcup_last_30_international_test_includes_worldcup_labels_temporally():
     from src.worldcup import training
     from src.worldcup import international_provider
 
@@ -1487,11 +1502,10 @@ def test_worldcup_last_30_international_test_never_uses_worldcup_labels():
 
     train, test, warning = training.split_last_30_international_test(rows)
 
-    assert train.shape[0] == 5
+    assert train.shape[0] == 7
     assert test.shape[0] == 30
-    assert "FIFA World Cup quedaron fuera" in warning
-    assert not train["is_worldcup_match"].map(bool).any()
-    assert not test["is_worldcup_match"].map(bool).any()
+    assert "FIFA World Cup incluidos" in warning
+    assert pd.concat([train, test])["is_worldcup_match"].map(bool).any()
 
 
 def test_worldcup_temporal_features_exclude_current_and_future_matches():

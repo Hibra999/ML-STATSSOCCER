@@ -191,21 +191,50 @@ def test_deduplicate_prefers_worldcup_metadata_on_same_match_key():
     assert bool(deduped.iloc[0]["is_worldcup_match"]) is True
 
 
-def test_last_30_international_split_excludes_worldcups_from_train_and_test():
+def test_last_30_international_split_includes_worldcups_temporally():
     matches = make_international_matches(rows=35, include_worldcup=True)
     rows = training.international_match_rows(international_provider.normalize_international_matches(matches))
 
     train, test, warning = training.split_last_30_international_test(rows)
 
-    assert train.shape[0] == 5
+    assert train.shape[0] == 7
     assert test.shape[0] == 30
-    assert not train["is_worldcup_match"].map(bool).any()
-    assert not test["is_worldcup_match"].map(bool).any()
+    assert pd.concat([train, test])["is_worldcup_match"].map(bool).any()
     assert pd.to_datetime(train["Date"]).max() < pd.to_datetime(test["Date"]).min()
-    assert "FIFA World Cup quedaron fuera" in warning
+    assert "FIFA World Cup incluidos" in warning
 
 
-def test_last_30_international_split_requires_31_non_worldcup_rows():
+def test_validation_last_30_split_reserves_validation_before_test():
+    rows = training.international_match_rows(international_provider.normalize_international_matches(make_international_matches(rows=42, include_worldcup=True)))
+
+    train, validation, test, warning = training.split_validation_last_30_international_test(rows)
+
+    assert train.shape[0] == 12
+    assert validation.shape[0] == 2
+    assert test.shape[0] == 30
+    assert pd.to_datetime(train["Date"]).max() < pd.to_datetime(validation["Date"]).min()
+    assert pd.to_datetime(validation["Date"]).max() < pd.to_datetime(test["Date"]).min()
+    assert "validacion=2" in warning
+
+
+def test_international_training_scope_keeps_since_2014_and_drops_future_dates():
+    matches = pd.DataFrame([
+        {"date": "2013-12-31", "home_team": "Mexico", "away_team": "Canada", "home_score": 1, "away_score": 0, "tournament": "Friendly"},
+        {"date": "2014-01-01", "home_team": "Mexico", "away_team": "Canada", "home_score": 2, "away_score": 0, "tournament": "Friendly"},
+        {"date": "2026-06-01", "home_team": "Canada", "away_team": "Mexico", "home_score": 0, "away_score": 1, "tournament": "FIFA World Cup qualification"},
+        {"date": "2026-07-01", "home_team": "Brazil", "away_team": "France", "home_score": 1, "away_score": 1, "tournament": "Friendly"},
+    ])
+    rows = training.international_match_rows(international_provider.normalize_international_matches(matches))
+
+    filtered, stats = training.filter_international_training_scope(rows, max_date="2026-06-13")
+
+    assert filtered.shape[0] == 2
+    assert pd.to_datetime(filtered["Date"]).dt.year.min() == 2014
+    assert stats["removed_before_start"] == 1
+    assert stats["removed_future"] == 1
+
+
+def test_last_30_international_split_requires_31_international_rows():
     rows = training.international_match_rows(international_provider.normalize_international_matches(make_international_matches(rows=30)))
 
     with pytest.raises(training.WorldCupTrainingError, match="al menos 31"):
@@ -213,7 +242,7 @@ def test_last_30_international_split_requires_31_non_worldcup_rows():
 
 
 def test_prepared_dataset_metadata_uses_last_30_international_test_and_policy_notes(tmp_path, monkeypatch):
-    matches = make_international_matches(rows=35, include_worldcup=True)
+    matches = make_international_matches(rows=42, include_worldcup=True)
 
     monkeypatch.setattr(training, "load_historical_matches", lambda refresh=False: (pd.DataFrame(), "none"))
     monkeypatch.setattr(training, "load_market_data", lambda **kwargs: empty_market_bundle())
@@ -240,12 +269,13 @@ def test_prepared_dataset_metadata_uses_last_30_international_test_and_policy_no
     assert prepared["benchmark_policy"] == training.BENCHMARK_POLICY
     assert prepared["worldcup_rows"] == 2
     assert prepared["label_source"] == "all_matches.csv"
-    assert prepared["split_policy"] == training.EVAL_STRATEGY_LAST_30
+    assert prepared["split_policy"] == training.SPLIT_POLICY_VALIDATION_LAST_30
+    assert prepared["training_start_year"] == 2014
     assert prepared["test"].shape[0] == 30
-    assert not prepared["train"]["is_worldcup_match"].map(bool).any()
-    assert not prepared["test"]["is_worldcup_match"].map(bool).any()
+    assert prepared["validation"].shape[0] == 2
+    assert pd.concat([prepared["train"], prepared["validation"], prepared["test"]])["is_worldcup_match"].map(bool).any()
     assert pd.to_datetime(prepared["train"]["Date"]).max() < pd.to_datetime(prepared["test"]["Date"]).min()
-    assert any("Mundiales historicos" in note for note in prepared["label_policy_notes"])
+    assert any("desde 2014" in note for note in prepared["label_policy_notes"])
     assert not any("Test final bloqueado" in warning for warning in prepared["warnings"])
     assert not any("anti-leakage" in warning and "2026" in warning for warning in prepared["warnings"])
 
@@ -318,7 +348,7 @@ def test_ensure_prepared_dataset_current_regenerates_old_schema(tmp_path, monkey
     with prepared_path.open("wb") as handle:
         pickle.dump(old_dataset, handle)
     rows = training.international_match_rows(international_provider.normalize_international_matches(make_international_matches(rows=36)))
-    train_rows, test_rows, _ = training.split_last_30_international_test(rows)
+    train_rows, validation_rows, test_rows, _ = training.split_validation_last_30_international_test(rows)
     regenerated = {
         **minimal_normalized_dataset(),
         "prepared_schema_version": training.PREPARED_SCHEMA_VERSION,
@@ -327,8 +357,10 @@ def test_ensure_prepared_dataset_current_regenerates_old_schema(tmp_path, monkey
         "over_under_ready": True,
         "goals_distribution_ready": True,
         "train": train_rows,
+        "validation": validation_rows,
         "test": test_rows,
-        "split_policy": training.EVAL_STRATEGY_LAST_30,
+        "split_policy": training.SPLIT_POLICY_VALIDATION_LAST_30,
+        "training_start_year": training.INTERNATIONAL_TRAINING_START_YEAR,
     }
     calls = {"prepare": 0}
 
@@ -340,7 +372,7 @@ def test_ensure_prepared_dataset_current_regenerates_old_schema(tmp_path, monkey
     monkeypatch.setattr(training, "KAGGLE_ROOT", kaggle_root)
     monkeypatch.setattr(training, "PREPARED_DATASET_FILE", prepared_path)
     monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", meta_path)
-    monkeypatch.setattr(training, "international_results_status", lambda: {"available": False})
+    monkeypatch.setattr(training, "international_results_status", lambda: {"available": True, "source_path": str(tmp_path / "all_matches.csv")})
     monkeypatch.setattr(training, "prepare_training_dataset", fake_prepare_training_dataset)
 
     current = training.ensure_prepared_dataset_current({}, progress_callback=None)

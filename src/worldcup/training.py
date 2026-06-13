@@ -24,9 +24,12 @@ from src.models.classifiers.boosting import catboost_device_params, lightgbm_dev
 from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
 from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, group_letter, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
 from src.worldcup.international_provider import (
+    INTERNATIONAL_DATASET_SLUG,
     INTERNATIONAL_MATCHES_FILE,
+    INTERNATIONAL_ROOT,
     build_recent15_match_index,
     contextual_poisson_for_match,
+    download_international_results,
     international_results_status,
     is_worldcup_tournament,
     load_international_matches,
@@ -141,9 +144,12 @@ WALK_FORWARD_PLAYERS_FILE = WALK_FORWARD_ROOT / "player_match_stats.csv"
 WALK_FORWARD_TEAM_FEATURES_FILE = WALK_FORWARD_ROOT / "team_match_features.csv"
 FUTURE_LABEL_EXCLUDED_YEAR = 2026
 TARGET_WORLDCUP_YEAR = FUTURE_LABEL_EXCLUDED_YEAR
-PREPARED_SCHEMA_VERSION = "worldcup_2026_international_labels_v2"
-FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v1"
+INTERNATIONAL_TRAINING_START_YEAR = 2014
+INTERNATIONAL_TRAINING_START_DATE = f"{INTERNATIONAL_TRAINING_START_YEAR}-01-01"
+PREPARED_SCHEMA_VERSION = "worldcup_2026_international_since_2014_v3"
+FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v2"
 EVAL_STRATEGY_LAST_30 = "last_30_international_test"
+SPLIT_POLICY_VALIDATION_LAST_30 = "temporal_since_2014_validation_last_30_test"
 BENCHMARK_POLICY = EVAL_STRATEGY_LAST_30
 WORLDCUP_XGBOOST_DEFAULTS = {
     "n_estimators": 450,
@@ -499,49 +505,52 @@ def worldcup_model_defaults(model_key: str) -> Dict[str, Any]:
 
 
 def download_kaggle_dataset(force: bool = False) -> Dict[str, Any]:
-    if KAGGLE_ROOT.exists() and list(discover_dataset_files(KAGGLE_ROOT)) and not force:
-        return dataset_status()
     try:
-        import kagglehub
-    except ImportError as exc:
-        raise WorldCupTrainingError("kagglehub no esta instalado. Ejecuta pip install -r requirements.txt.") from exc
-
-    source_path = Path(kagglehub.dataset_download(KAGGLE_DATASET_SLUG))
-    if not source_path.exists():
-        raise WorldCupTrainingError(f"Kaggle no devolvio una ruta valida para {KAGGLE_DATASET_SLUG}.")
-    KAGGLE_ROOT.mkdir(parents=True, exist_ok=True)
-    copied = []
-    for path in source_path.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in {".csv", ".xlsx", ".xls"}:
-            continue
-        target = KAGGLE_ROOT / path.relative_to(source_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if force or not target.exists():
-            shutil.copy2(path, target)
-        copied.append(str(target))
+        international_status = download_international_results(force=bool(force))
+    except Exception as exc:
+        raise WorldCupTrainingError(f"No se pudo descargar all_matches.csv internacional: {exc}") from exc
     status = dataset_status()
-    status["downloaded_path"] = str(source_path)
-    status["copied_files"] = copied
+    status["international_recent"] = international_status
+    status["downloaded_path"] = international_status.get("downloaded_path", "")
+    status["copied_files"] = international_status.get("copied_files", [])
     return status
 
 
+def empty_international_training_dataset() -> Dict[str, Any]:
+    return {
+        "train": pd.DataFrame(),
+        "validation": pd.DataFrame(),
+        "test": pd.DataFrame(),
+        "team_train": pd.DataFrame(),
+        "team_test": pd.DataFrame(),
+        "team_prediction": pd.DataFrame(),
+        "team_features": pd.DataFrame(),
+        "target_column": "",
+        "team_columns": [],
+        "training_mode": "",
+        "trainable": False,
+        "preview": {"columns": [], "rows": [], "total": 0},
+    }
+
+
 def dataset_status() -> Dict[str, Any]:
-    files = list(discover_dataset_files(KAGGLE_ROOT))
-    normalized = normalize_dataset_files(files)
+    international_status = international_results_status()
+    files = [Path(str(international_status.get("source_path") or international_status.get("file_path") or INTERNATIONAL_MATCHES_FILE))] if international_status.get("exists") or international_status.get("available") else []
+    normalized = empty_international_training_dataset()
     prepared = prepared_dataset_status(files=files, normalized=normalized)
     model_meta = read_model_metadata()
     active_dataset = prepared["dataset"] if prepared["ready"] else normalized
     train_rows = labeled_train_row_count(active_dataset)
+    validation_rows = labeled_validation_row_count(active_dataset)
     test_rows = labeled_test_row_count(active_dataset)
     eval_strategy = evaluation_strategy(active_dataset)
     walk_forward = walk_forward_status()
     refresh_state = walk_forward_refresh_state()
-    international_status = international_results_status()
     return {
-        "dataset_slug": KAGGLE_DATASET_SLUG,
-        "local_path": str(KAGGLE_ROOT),
+        "dataset_slug": INTERNATIONAL_DATASET_SLUG,
+        "local_path": str(INTERNATIONAL_ROOT),
         "files": [str(path) for path in files],
-        "available": bool(files),
+        "available": bool(international_status.get("available")),
         "etl_ready": bool(prepared["ready"]),
         "etl_stale": bool(prepared["stale"]),
         "etl_status": prepared["status"],
@@ -564,6 +573,8 @@ def dataset_status() -> Dict[str, Any]:
         "class_distribution": prepared.get("class_distribution", {}),
         "sample_weight_policy": prepared.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "data_quality": prepared.get("data_quality", {}),
+        "training_start_year": int(prepared.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR)),
+        "max_label_date": prepared.get("max_label_date", ""),
         "market_rows": int(prepared.get("market_rows", 0)),
         "qualifier_feature_rows": int(prepared.get("qualifier_feature_rows", 0)),
         "market_status": prepared.get("market_status", {}),
@@ -574,6 +585,7 @@ def dataset_status() -> Dict[str, Any]:
         "api_football_stat_rows": int(prepared.get("api_football_stat_rows", 0)),
         "api_football_market_rows": int(prepared.get("api_football_market_rows", 0)),
         "train_rows": train_rows,
+        "validation_rows": validation_rows,
         "test_rows": test_rows,
         "eval_rows": test_rows if test_rows else planned_holdout_rows(train_rows),
         "prediction_rows": int(active_dataset["team_prediction"].shape[0]),
@@ -594,8 +606,8 @@ def dataset_status() -> Dict[str, Any]:
 
 
 def prepare_training_dataset(force: bool = False, refresh_history: bool = False) -> Dict[str, Any]:
-    files = list(discover_dataset_files(KAGGLE_ROOT))
-    normalized = normalize_dataset_files(files)
+    files: List[Path] = []
+    normalized = empty_international_training_dataset()
     if PREPARED_DATASET_FILE.exists() and not force:
         current = prepared_dataset_status(files=files, normalized=normalized)
         if current["ready"] and not current["stale"]:
@@ -606,20 +618,20 @@ def prepare_training_dataset(force: bool = False, refresh_history: bool = False)
 
 
 def ensure_prepared_dataset_current(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
-    files = list(discover_dataset_files(KAGGLE_ROOT))
-    normalized = normalize_dataset_files(files)
+    files: List[Path] = []
+    normalized = empty_international_training_dataset()
     current = prepared_dataset_status(files=files, normalized=normalized)
     if current["ready"] and not current["stale"]:
         dataset = current.get("dataset") or {}
         if prepared_dataset_schema_valid(dataset):
             return dataset
     international_status = international_results_status()
-    if not files and not international_status.get("available"):
+    if not international_status.get("available"):
         if current["ready"]:
             raise WorldCupTrainingError(
                 "El artifact ETL Mundial esta desactualizado y no existe all_matches.csv para regenerarlo."
             )
-        raise WorldCupTrainingError("Primero descarga o guarda all_matches.csv y ejecuta Preparar ETL.")
+        raise WorldCupTrainingError("Primero descarga o guarda all_matches.csv internacional y ejecuta Preparar ETL.")
     reason = "schema/targets desactualizados" if current["ready"] else "artifact ausente"
     emit_training_progress(
         progress_callback,
@@ -651,13 +663,19 @@ def prepared_dataset_schema_valid(dataset: Dict[str, Any]) -> bool:
         return False
     if str(dataset.get("target_column") or "") != "Label + GoalsDistribution + OverUnder05/15/25/35":
         return False
-    if str(dataset.get("split_policy") or "") != EVAL_STRATEGY_LAST_30:
+    if str(dataset.get("split_policy") or "") != SPLIT_POLICY_VALIDATION_LAST_30:
+        return False
+    if int(dataset.get("training_start_year", 0) or 0) != INTERNATIONAL_TRAINING_START_YEAR:
+        return False
+    validation_rows = dataset.get("validation", pd.DataFrame())
+    if not isinstance(validation_rows, pd.DataFrame) or validation_rows.empty:
         return False
     test_rows = dataset.get("test", pd.DataFrame())
     if not isinstance(test_rows, pd.DataFrame) or int(test_rows.shape[0]) != 30:
         return False
-    for frame in (train_rows, test_rows):
-        if "is_worldcup_match" in frame.columns and frame["is_worldcup_match"].map(coerce_bool_value).any():
+    for frame in (train_rows, validation_rows, test_rows):
+        dates = pd.to_datetime(frame.get("Date", pd.Series(index=frame.index, dtype=object)), errors="coerce")
+        if dates.notna().any() and int(dates.dt.year.min()) < INTERNATIONAL_TRAINING_START_YEAR:
             return False
     return bool(dataset.get("over_under_ready", False)) and bool(dataset.get("goals_distribution_ready", False))
 
@@ -692,9 +710,10 @@ def train_single_hybrid_model(
     single_total_steps = 7
     emit_training_progress(progress_callback, "loading", 1, single_total_steps, f"Cargando artifact/contexto {label}", market=label, model_id=model_id)
     shared_context = shared_context or {}
-    files = shared_context.get("files") or list(discover_dataset_files(KAGGLE_ROOT))
+    files = shared_context.get("files") or []
     normalized = shared_context.get("normalized") or load_prepared_dataset(required=True)
     train_rows = normalized["train"].copy()
+    validation_rows = normalized.get("validation", pd.DataFrame()).copy()
     test_rows = normalized["test"].copy()
     if not normalized["trainable"]:
         raise WorldCupTrainingError("El ETL no genero columnas trainables de partido con goles y resultado reales.")
@@ -709,7 +728,12 @@ def train_single_hybrid_model(
         train_rows = pd.concat([train_rows, supplemental_rows], ignore_index=True)
 
     group_teams = teams_from_tournament(tournament)
-    model_teams = sorted(set(group_teams) | set(teams_from_rows(train_rows)) | set(teams_from_rows(test_rows)))
+    model_teams = sorted(
+        set(group_teams)
+        | set(teams_from_rows(train_rows))
+        | set(teams_from_rows(validation_rows))
+        | set(teams_from_rows(test_rows))
+    )
     history_df = shared_context.get("history_df")
     history_source = shared_context.get("history_source", "")
     if history_df is None:
@@ -740,6 +764,7 @@ def train_single_hybrid_model(
         raise WorldCupTrainingError("El ETL preparado no contiene goles suficientes para entrenar distribucion de goles.")
     eval_size = float(payload.get("eval_size", 0.25) or 0.25)
     train_rows = sort_match_rows(train_rows)
+    validation_rows = sort_match_rows(validation_rows)
     fit_train_rows = train_rows
     emit_training_progress(
         progress_callback,
@@ -750,8 +775,11 @@ def train_single_hybrid_model(
         market=label,
         model_id=model_id,
         train_rows=int(train_rows.shape[0]),
+        validation_rows=int(validation_rows.shape[0]),
         test_rows=int(test_rows.shape[0]),
     )
+    x_validation = pd.DataFrame()
+    y_validation = pd.Series(dtype=object)
     if test_rows.empty:
         eval_strategy = "holdout_temporal"
         split_train_rows, split_eval_rows = safe_temporal_row_split(
@@ -851,6 +879,37 @@ def train_single_hybrid_model(
             progress_every=train_progress_every,
         )
         emit_training_progress(progress_callback, "features_train", 4, single_total_steps, f"Features train {label} listas", market=label, model_id=model_id, rows=int(x_train.shape[0]), features=int(x_train.shape[1]), progress_every=train_progress_every, feature_cache=feature_cache.summary())
+        if not validation_rows.empty:
+            validation_progress_every = feature_progress_every_from_payload(payload, int(validation_rows.shape[0]))
+            emit_training_progress(progress_callback, "features_validation", 4, single_total_steps, f"Construyendo features validacion {label}", market=label, model_id=model_id, rows=int(validation_rows.shape[0]), progress_every=validation_progress_every, feature_cache=feature_cache.summary())
+            x_validation, y_validation, _ = build_training_matrix(
+                validation_rows,
+                history_df=history_df,
+                teams=model_teams,
+                team_features=feature_store,
+                market_rows=market_rows,
+                qualifier_rows=qualifier_rows,
+                api_football=api_football,
+                international_matches=international_matches,
+                recent15_match_index=recent15_match_index,
+                fixture_feature_rows=fixture_feature_rows,
+                dc_rho=dc_rho,
+                feature_columns=feature_columns,
+                frozen_years=years_from_rows(validation_rows),
+                history_weight=float(payload.get("history_weight", 1.0) or 1.0),
+                recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
+                host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
+                max_goals=int(payload.get("max_goals", 10) or 10),
+                target=effective_target,
+                feature_cache=feature_cache,
+                progress_callback=progress_callback,
+                progress_stage="features_validation",
+                progress_message=f"Construyendo features validacion {label}",
+                progress_market=label,
+                progress_model_id=model_id,
+                progress_every=validation_progress_every,
+            )
+            emit_training_progress(progress_callback, "features_validation", 4, single_total_steps, f"Features validacion {label} listas", market=label, model_id=model_id, rows=int(x_validation.shape[0]), features=int(x_validation.shape[1]), progress_every=validation_progress_every, feature_cache=feature_cache.summary())
         eval_progress_every = feature_progress_every_from_payload(payload, int(test_rows.shape[0]))
         emit_training_progress(progress_callback, "features_eval", 5, single_total_steps, f"Construyendo features eval {label}", market=label, model_id=model_id, rows=int(test_rows.shape[0]), progress_every=eval_progress_every, feature_cache=feature_cache.summary())
         x_eval, y_eval, _ = build_training_matrix(
@@ -884,39 +943,53 @@ def train_single_hybrid_model(
 
     if x_train.empty or pd.Series(y_train).dropna().empty:
         raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
-    train_sample_weight = align_sample_weights(sample_weights_for_rows(fit_train_rows, effective_target), len(y_train))
-    y_train_encoded, label_classes = encode_target_labels(y_train, effective_target)
+    has_validation_matrix = isinstance(x_validation, pd.DataFrame) and not x_validation.empty and not pd.Series(y_validation).dropna().empty
+    label_seed = pd.concat([pd.Series(y_train), pd.Series(y_validation)], ignore_index=True) if has_validation_matrix else pd.Series(y_train)
+    _, label_classes = encode_target_labels(label_seed, effective_target)
+    y_train_encoded = encode_existing_labels(y_train, label_classes)
     y_eval_encoded = encode_existing_labels(y_eval, label_classes)
+    y_validation_encoded = encode_existing_labels(y_validation, label_classes) if has_validation_matrix else pd.Series(dtype=int)
+    base_train_sample_weight = align_sample_weights(sample_weights_for_rows(fit_train_rows, effective_target), len(y_train))
     tuned = tune_model_if_requested(
         train_config,
         x_train,
         y_train_encoded,
-        sample_weight=train_sample_weight,
+        sample_weight=base_train_sample_weight,
+        x_validation=x_validation if has_validation_matrix else None,
+        y_validation=y_validation_encoded if not y_validation_encoded.empty else None,
         progress_callback=progress_callback,
         market_label=label,
     )
     if tuned.get("best_params"):
         train_config["params"].update(tuned["best_params"])
+    x_fit_final = x_train
+    y_fit_final = y_train_encoded
+    fit_sample_weight = base_train_sample_weight
+    if has_validation_matrix:
+        x_fit_final = pd.concat([x_train, x_validation], ignore_index=True)
+        y_fit_final = pd.concat([pd.Series(y_train_encoded), pd.Series(y_validation_encoded)], ignore_index=True)
+        fit_train_rows = pd.concat([fit_train_rows, validation_rows], ignore_index=True)
+        fit_sample_weight = align_sample_weights(sample_weights_for_rows(fit_train_rows, effective_target), len(y_fit_final))
     emit_training_progress(progress_callback, "fit", 6, single_total_steps, f"Entrenando clasificador final {label}", market=label, model_id=model_id)
     fit_result = fit_configured_classifier(
-        x_train=x_train,
-        y_train=y_train_encoded,
+        x_train=x_fit_final,
+        y_train=y_fit_final,
         model_key=train_config["model_type"],
         params=train_config["params"],
         n_jobs=train_config["n_jobs"],
         requested_device=train_config["device"],
         seed=train_config["seed"],
         num_classes=len(label_classes),
-        sample_weight=train_sample_weight,
+        sample_weight=fit_sample_weight,
     )
     clf = fit_result["classifier"]
-    y_train_pred = classifier_predict(clf, x_train)
+    y_train_pred = classifier_predict(clf, x_fit_final)
     y_eval_pred = classifier_predict(clf, x_eval)
-    y_train_proba = classifier_predict_proba(clf, x_train)
+    y_train_proba = classifier_predict_proba(clf, x_fit_final)
     y_eval_proba = classifier_predict_proba(clf, x_eval)
     emit_training_progress(progress_callback, "metrics", 7, single_total_steps, f"Calculando metricas {label}", market=label, model_id=model_id)
     metrics = classification_metrics_from_predictions(
-        y_train_encoded,
+        y_fit_final,
         y_train_pred,
         y_eval_encoded,
         y_eval_pred,
@@ -924,23 +997,25 @@ def train_single_hybrid_model(
         y_eval_proba=y_eval_proba,
         classes=label_classes,
         target=effective_target,
-        x_train=x_train,
+        x_train=x_fit_final,
         x_eval=x_eval,
     )
     calibration = calibration_payload(
-        y_train_encoded,
+        y_fit_final,
         y_train_proba,
         y_eval_encoded,
         y_eval_proba,
         classes=label_classes,
         target=effective_target,
-        x_train=x_train,
+        x_train=x_fit_final,
         x_eval=x_eval,
     )
-    metrics["split_support"] = split_support_payload(y_train, y_eval, effective_target)
+    y_fit_labels = pd.concat([pd.Series(y_train), pd.Series(y_validation)], ignore_index=True) if has_validation_matrix else pd.Series(y_train)
+    metrics["split_support"] = split_support_payload(y_fit_labels, y_eval, effective_target)
+    metrics["validation_rows"] = int(x_validation.shape[0]) if isinstance(x_validation, pd.DataFrame) else 0
     confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes, target=effective_target)
     derived_total_markets = derived_total_market_metrics(
-        y_train=y_train,
+        y_train=y_fit_labels,
         y_train_pred=decode_encoded_predictions(y_train_pred, label_classes),
         y_eval=y_eval,
         y_eval_pred=decode_encoded_predictions(y_eval_pred, label_classes),
@@ -976,10 +1051,11 @@ def train_single_hybrid_model(
         "worldcup_rows": int(normalized.get("worldcup_rows", 0) or 0),
         "class_distribution": normalized.get("class_distribution", {}),
         "sample_weight_policy": normalized.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
-        "sample_weight_summary": sample_weight_summary(train_sample_weight),
+        "sample_weight_summary": sample_weight_summary(fit_sample_weight),
         "data_quality": normalized.get("data_quality", {}),
         "dc_rho": dc_rho,
-        "kaggle_files": [str(path) for path in files],
+        "source_files": [str(path) for path in normalized.get("source_files", [])],
+        "kaggle_files": [],
         "history_source": normalized.get("history_source", history_source),
         "metrics": metrics,
         "confusion_matrix": confusion,
@@ -1005,7 +1081,7 @@ def train_single_hybrid_model(
         "hardware": hardware,
         "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *normalized.get("api_football_warnings", []), *fit_result.get("warnings", [])] if warning]),
         "top_features": top_feature_importances(clf, feature_columns),
-        "feature_inventory": feature_inventory_payload(feature_columns, x_train=x_train, x_eval=x_eval),
+        "feature_inventory": feature_inventory_payload(feature_columns, x_train=x_fit_final, x_eval=x_eval),
         "feature_cache": feature_cache.summary(),
         "walk_forward_mode": walk_forward_mode,
         "walk_forward_summary": walk_forward_summary,
@@ -1016,6 +1092,9 @@ def train_single_hybrid_model(
         "label_policy_notes": normalized.get("label_policy_notes", []),
         "final_test_year": normalized.get("final_test_year", ""),
         "split_policy": normalized.get("split_policy", ""),
+        "training_start_year": int(normalized.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
+        "max_label_date": normalized.get("max_label_date", ""),
+        "validation_rows": int(x_validation.shape[0]) if isinstance(x_validation, pd.DataFrame) else 0,
     }
     if walk_forward_summary["warnings"]:
         record["warnings"] = unique_strings([*record["warnings"], *walk_forward_summary["warnings"]])
@@ -1029,9 +1108,10 @@ def train_single_hybrid_model(
         "calibration": calibration,
         "features": feature_columns,
         "feature_inventory": record["feature_inventory"],
-        "train_rows": int(len(y_train)),
+        "train_rows": int(len(y_fit_final)),
+        "validation_rows": int(x_validation.shape[0]) if isinstance(x_validation, pd.DataFrame) else 0,
         "eval_rows": int(len(y_eval)),
-        "source": normalized.get("label_source", KAGGLE_DATASET_SLUG),
+        "source": normalized.get("label_source", INTERNATIONAL_DATASET_SLUG),
         "mode": normalized["training_mode"],
         "eval_strategy": eval_strategy,
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
@@ -1052,6 +1132,8 @@ def train_single_hybrid_model(
         "label_policy_notes": record["label_policy_notes"],
         "final_test_year": normalized.get("final_test_year", ""),
         "split_policy": normalized.get("split_policy", ""),
+        "training_start_year": record["training_start_year"],
+        "max_label_date": record["max_label_date"],
         "all_matches_rows": int(normalized.get("all_matches_rows", 0) or 0),
         "worldcup_rows": int(normalized.get("worldcup_rows", 0) or 0),
         "class_distribution": normalized.get("class_distribution", {}),
@@ -1070,11 +1152,11 @@ def train_dual_market_model(
     train_config = train_config or training_config(payload)
     bundle_id = train_config["model_id"]
     bundle_name = train_config["model_name"]
-    files = list(discover_dataset_files(KAGGLE_ROOT))
+    files: List[Path] = []
     normalized = load_prepared_dataset(required=True)
     if not prepared_dataset_schema_valid(normalized):
         normalized = ensure_prepared_dataset_current(payload, progress_callback=progress_callback)
-        files = list(discover_dataset_files(KAGGLE_ROOT))
+        files = []
     if not normalized["trainable"]:
         raise WorldCupTrainingError("El ETL preparado no dejo filas entrenables para el modelo 1X2.")
     history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
@@ -1194,7 +1276,8 @@ def train_dual_market_model(
         "sample_weight_summary": result_record.get("sample_weight_summary", {}),
         "data_quality": result_record.get("data_quality", normalized.get("data_quality", {})),
         "dc_rho": float(result_record.get("dc_rho", 0.0) or 0.0),
-        "kaggle_files": [str(path) for path in files],
+        "source_files": result_record.get("source_files", normalized.get("source_files", [])),
+        "kaggle_files": [],
         "history_source": result_record.get("history_source", ""),
         "metrics": result_record.get("metrics", {}),
         "confusion_matrix": result_record.get("confusion_matrix", {}),
@@ -1233,6 +1316,9 @@ def train_dual_market_model(
         "label_policy_notes": normalized.get("label_policy_notes", []),
         "final_test_year": normalized.get("final_test_year", ""),
         "split_policy": normalized.get("split_policy", ""),
+        "training_start_year": int(normalized.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
+        "max_label_date": normalized.get("max_label_date", ""),
+        "validation_rows": int(result_record.get("validation_rows", 0) or 0),
     }
     emit_training_progress(progress_callback, "saving", total_steps - 1, total_steps, "Guardando bundle de mercados", model_id=bundle_id)
     save_hybrid_model(bundle_record, model_id=bundle_id)
@@ -1246,8 +1332,9 @@ def train_dual_market_model(
         "features": bundle_record["feature_columns"],
         "feature_inventory": bundle_record["feature_inventory"],
         "train_rows": int(result_result.get("train_rows", 0)),
+        "validation_rows": int(result_result.get("validation_rows", 0)),
         "eval_rows": int(result_result.get("eval_rows", 0)),
-        "source": normalized.get("label_source", KAGGLE_DATASET_SLUG),
+        "source": normalized.get("label_source", INTERNATIONAL_DATASET_SLUG),
         "mode": normalized["training_mode"],
         "eval_strategy": bundle_record["eval_strategy"],
         "prediction_rows": int(normalized["team_prediction"].shape[0]),
@@ -1270,6 +1357,8 @@ def train_dual_market_model(
         "label_policy_notes": bundle_record["label_policy_notes"],
         "final_test_year": bundle_record["final_test_year"],
         "split_policy": bundle_record["split_policy"],
+        "training_start_year": bundle_record["training_start_year"],
+        "max_label_date": bundle_record["max_label_date"],
         "all_matches_rows": bundle_record["all_matches_rows"],
         "worldcup_rows": bundle_record["worldcup_rows"],
         "class_distribution": bundle_record["class_distribution"],
@@ -1295,7 +1384,7 @@ def predict_match_payload(
     poisson = base_model.match_probabilities(home_team, away_team)
     base_probs = {"H": poisson["home"], "D": poisson["draw"], "A": poisson["away"]}
     base_totals = total_line_probabilities_from_probs(poisson)
-    ml_outputs = {"result": {}, "over_under_ml": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
+    ml_outputs = {"result": {}, "over_under_ml": {}, "over_under_25": {}, "notes": ["Modelo internacional no entrenado."]}
     if use_ml_model:
         ml_outputs = predict_ml_outputs(base_model, home_team, away_team, model_id=model_id, fixture_id=fixture.get("No."))
     result_ml = ml_outputs.get("result", {})
@@ -1536,30 +1625,33 @@ def build_prepared_dataset(
     warnings: List[str] = []
     label_policy_notes: List[str] = [
         f"Objetivo operativo: Mundial {TARGET_WORLDCUP_YEAR}.",
-        "Labels obligatorios desde all_matches.csv; Kaggle y Mundiales historicos quedan solo como features/contexto.",
-        "Los partidos FIFA World Cup se excluyen de train/test para que los Mundiales historicos no sean labels.",
-        f"Resultados con Year >= {FUTURE_LABEL_EXCLUDED_YEAR} se excluyen de labels por politica anti-leakage; solo pueden servir como contexto pre-partido.",
-        "Evaluacion: ultimos 30 partidos internacionales no Mundial por fecha.",
+        "Labels obligatorios desde all_matches.csv; train.csv/test.csv y el Kaggle Mundial legacy se ignoran por completo.",
+        f"Corpus entrenable: partidos internacionales desde {INTERNATIONAL_TRAINING_START_YEAR}, incluyendo FIFA World Cup y resultados 2026 ya jugados.",
+        "Anti-leakage: split temporal con test final en los ultimos 30 partidos y validacion inmediatamente anterior.",
     ]
     label_source = "all_matches.csv"
-    raw_train = normalized["train"].copy()
-    raw_test = normalized["test"].copy()
-    raw_mode = normalized["training_mode"]
-    team_features = normalized["team_features"].copy()
+    raw_mode = "international_only"
+    team_features = pd.DataFrame()
 
-    if raw_mode and not raw_train.empty:
-        label_policy_notes.append(f"Kaggle detectado en modo {raw_mode}; se usa como features/equipos, no como labels.")
     if international_status.get("warning"):
         warnings.append(str(international_status.get("warning")))
     if all_matches_label_rows.empty:
         raise WorldCupTrainingError("all_matches.csv no contiene partidos internacionales validos con marcador para construir labels.")
 
     labeled_rows = deduplicate_labeled_matches(sanitize_match_rows(all_matches_label_rows))
-    labeled_rows, future_label_rows = drop_future_label_rows(labeled_rows)
-    if future_label_rows:
-        label_policy_notes.append(f"{future_label_rows} partidos con Year >= {FUTURE_LABEL_EXCLUDED_YEAR} quedaron fuera de labels por politica anti-leakage.")
+    labeled_rows, scope_stats = filter_international_training_scope(labeled_rows)
+    if scope_stats["removed_before_start"]:
+        label_policy_notes.append(
+            f"{scope_stats['removed_before_start']} partidos anteriores a {INTERNATIONAL_TRAINING_START_YEAR} quedaron fuera del entrenamiento."
+        )
+    if scope_stats["removed_future"]:
+        label_policy_notes.append(
+            f"{scope_stats['removed_future']} partidos posteriores a {scope_stats['max_label_date']} quedaron fuera por fecha futura."
+        )
+    if labeled_rows.empty:
+        raise WorldCupTrainingError(f"all_matches.csv no contiene partidos internacionales entrenables desde {INTERNATIONAL_TRAINING_START_YEAR}.")
     worldcup_rows_count = int(labeled_rows["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in labeled_rows.columns else 0
-    train_df, test_df, split_warning = split_last_30_international_test(labeled_rows)
+    train_df, validation_df, test_df, split_warning = split_validation_last_30_international_test(labeled_rows)
     if split_warning:
         label_policy_notes.append(split_warning)
     over_under_ready = has_over_under_target(train_df)
@@ -1570,7 +1662,7 @@ def build_prepared_dataset(
     prepared_at = datetime.now(timezone.utc).isoformat()
     preview_source = train_df if not train_df.empty else test_df if not test_df.empty else team_features
     dc_rho = estimate_dixon_coles_rho(history_df)
-    class_distribution = split_class_distribution(train_df, test_df)
+    class_distribution = split_class_distribution(train_df, test_df, validation_df=validation_df)
     all_matches_rows_count = int(all_matches_label_rows.shape[0])
     market_status_payload = {
         "status": "ok" if combined_has_1x2 or combined_has_ou25 else market_bundle.get("status", "missing"),
@@ -1609,10 +1701,11 @@ def build_prepared_dataset(
         "source_mode": raw_mode,
         "training_mode": "match_result",
         "train": train_df,
+        "validation": validation_df,
         "test": test_df,
         "team_train": pd.DataFrame(),
         "team_test": pd.DataFrame(),
-        "team_prediction": normalized["team_prediction"].copy(),
+        "team_prediction": pd.DataFrame(),
         "team_features": team_features,
         "market_data": market_data,
         "qualifier_matches": qualifier_matches,
@@ -1636,9 +1729,13 @@ def build_prepared_dataset(
         "class_distribution": class_distribution,
         "sample_weight_policy": SAMPLE_WEIGHT_POLICY,
         "data_quality": data_quality,
+        "training_start_year": INTERNATIONAL_TRAINING_START_YEAR,
+        "max_label_date": scope_stats["max_label_date"],
+        "removed_before_start_rows": scope_stats["removed_before_start"],
+        "removed_future_rows": scope_stats["removed_future"],
         "dc_rho": float(dc_rho),
         "target_column": "Label + GoalsDistribution + OverUnder05/15/25/35",
-        "team_columns": normalized["team_columns"],
+        "team_columns": [],
         "trainable": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
         "preview": preview_payload(preview_source),
         "warnings": unique_strings(warnings),
@@ -1649,37 +1746,94 @@ def build_prepared_dataset(
         "benchmark_worldcup_year": "",
         "benchmark_policy": BENCHMARK_POLICY,
         "final_test_year": "",
-        "split_policy": EVAL_STRATEGY_LAST_30,
+        "split_policy": SPLIT_POLICY_VALIDATION_LAST_30,
         "over_under_ready": over_under_ready,
         "goals_distribution_ready": goals_distribution_ready,
         "result_ready": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
     }
 
 
+def filter_international_training_scope(
+        rows: pd.DataFrame,
+        start_year: int = INTERNATIONAL_TRAINING_START_YEAR,
+        max_date: Optional[Any] = None,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    if rows.empty:
+        return sanitize_match_rows(rows), {
+            "removed_before_start": 0,
+            "removed_future": 0,
+            "max_label_date": str(max_date or datetime.now(timezone.utc).date()),
+        }
+    working = sort_match_rows(sanitize_match_rows(rows))
+    date_values = pd.to_datetime(working.get("Date"), errors="coerce")
+    start_ts = pd.Timestamp(f"{int(start_year)}-01-01")
+    max_ts = pd.Timestamp(max_date if max_date is not None else datetime.now(timezone.utc).date())
+    if max_ts.tzinfo is not None:
+        max_ts = max_ts.tz_convert(None)
+    date_only = date_values.dt.normalize()
+    before_start = date_only.notna() & date_only.lt(start_ts)
+    future = date_only.notna() & date_only.gt(max_ts.normalize())
+    keep = date_only.notna() & ~before_start & ~future
+    filtered = sort_match_rows(working[keep].copy()).reset_index(drop=True)
+    return filtered, {
+        "removed_before_start": int(before_start.sum()),
+        "removed_future": int(future.sum()),
+        "max_label_date": max_ts.date().isoformat(),
+    }
+
+
 def split_last_30_international_test(rows: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
     if rows.empty:
-        raise WorldCupTrainingError("all_matches.csv no contiene partidos internacionales no Mundial validos para train/test.")
+        raise WorldCupTrainingError("all_matches.csv no contiene partidos internacionales validos para train/test.")
     working = sort_match_rows(sanitize_match_rows(rows))
-    if "is_worldcup_match" in working.columns:
-        worldcup_mask = working["is_worldcup_match"].map(coerce_bool_value)
-    else:
-        worldcup_mask = working.get("tournament", pd.Series(index=working.index, dtype=object)).map(is_worldcup_tournament)
     date_values = pd.to_datetime(working.get("Date"), errors="coerce")
-    valid = working[(~worldcup_mask) & date_values.notna()].copy()
+    valid = working[date_values.notna()].copy()
     valid = sort_match_rows(valid).reset_index(drop=True)
     if valid.shape[0] < 31:
         raise WorldCupTrainingError(
-            f"all_matches.csv debe contener al menos 31 partidos internacionales no Mundial validos; encontro {valid.shape[0]}."
+            f"all_matches.csv debe contener al menos 31 partidos internacionales validos; encontro {valid.shape[0]}."
         )
     train = valid.iloc[:-30].copy().reset_index(drop=True)
     test = valid.iloc[-30:].copy().reset_index(drop=True)
-    removed_worldcup = int(worldcup_mask.sum())
+    worldcup_rows = int(valid["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in valid.columns else 0
     warning = (
-        f"{removed_worldcup} partidos FIFA World Cup quedaron fuera de train/test y solo sirven como contexto."
-        if removed_worldcup
+        f"{worldcup_rows} partidos FIFA World Cup incluidos en el split temporal."
+        if worldcup_rows
         else ""
     )
     return train, test, warning
+
+
+def split_validation_last_30_international_test(
+        rows: pd.DataFrame,
+        validation_fraction: float = 0.10,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
+    if rows.empty:
+        raise WorldCupTrainingError("all_matches.csv no contiene partidos internacionales validos para train/validacion/test.")
+    working = sort_match_rows(sanitize_match_rows(rows))
+    date_values = pd.to_datetime(working.get("Date"), errors="coerce")
+    valid = sort_match_rows(working[date_values.notna()].copy()).reset_index(drop=True)
+    if valid.shape[0] < 32:
+        raise WorldCupTrainingError(
+            f"all_matches.csv debe contener al menos 32 partidos internacionales validos para train/validacion/test; encontro {valid.shape[0]}."
+        )
+    pre_test_rows = int(valid.shape[0] - 30)
+    if pre_test_rows < 2:
+        raise WorldCupTrainingError(
+            f"all_matches.csv debe dejar al menos 2 partidos antes de los ultimos 30 para train/validacion; encontro {pre_test_rows}."
+        )
+    validation_size = max(1, int(math.ceil(pre_test_rows * float(validation_fraction))))
+    validation_size = min(validation_size, pre_test_rows - 1)
+    train_end = int(valid.shape[0] - 30 - validation_size)
+    validation_end = int(valid.shape[0] - 30)
+    train = valid.iloc[:train_end].copy().reset_index(drop=True)
+    validation = valid.iloc[train_end:validation_end].copy().reset_index(drop=True)
+    test = valid.iloc[-30:].copy().reset_index(drop=True)
+    worldcup_rows = int(valid["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in valid.columns else 0
+    warning = (
+        f"Split temporal desde {INTERNATIONAL_TRAINING_START_YEAR}: train={train.shape[0]}, validacion={validation.shape[0]}, test=30; {worldcup_rows} partidos FIFA World Cup incluidos."
+    )
+    return train, validation, test, warning
 
 
 def split_latest_worldcup_test(rows: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, str, str]:
@@ -1981,8 +2135,8 @@ def load_prepared_dataset(required: bool = False) -> Optional[Dict[str, Any]]:
 
 
 def prepared_source_files(files: Iterable[Path], international_status: Optional[Dict[str, Any]] = None) -> List[str]:
-    paths = [str(path) for path in files]
     status = international_status or {}
+    paths: List[str] = []
     source_path = str(status.get("source_path") or "")
     if status.get("available") and source_path:
         paths.append(source_path)
@@ -1991,9 +2145,14 @@ def prepared_source_files(files: Iterable[Path], international_status: Optional[
     return unique_strings(paths)
 
 
-def split_class_distribution(train_df: pd.DataFrame, test_df: pd.DataFrame) -> Dict[str, Any]:
+def split_class_distribution(
+        train_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        validation_df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
     return {
         "train": class_distribution_for_rows(train_df),
+        "validation": class_distribution_for_rows(validation_df if validation_df is not None else pd.DataFrame()),
         "test": class_distribution_for_rows(test_df),
     }
 
@@ -2044,6 +2203,8 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
             "class_distribution": {},
             "sample_weight_policy": SAMPLE_WEIGHT_POLICY,
             "data_quality": {},
+            "training_start_year": INTERNATIONAL_TRAINING_START_YEAR,
+            "max_label_date": "",
             "warnings": [],
         }
     current_international_status = international_results_status()
@@ -2087,6 +2248,8 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "class_distribution": dataset.get("class_distribution", {}),
         "sample_weight_policy": dataset.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "data_quality": {} if schema_stale else dataset.get("data_quality", {}),
+        "training_start_year": int(dataset.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
+        "max_label_date": "" if schema_stale else str(dataset.get("max_label_date") or ""),
         "warnings": [] if schema_stale else dataset.get("warnings", []),
     }
 
@@ -2107,6 +2270,7 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "target_column": dataset.get("target_column", ""),
         "team_columns": dataset.get("team_columns", []),
         "train_rows": labeled_train_row_count(dataset),
+        "validation_rows": labeled_validation_row_count(dataset),
         "test_rows": labeled_test_row_count(dataset),
         "prediction_rows": int(dataset.get("team_prediction", pd.DataFrame()).shape[0]),
         "team_feature_rows": int(dataset.get("team_features", pd.DataFrame()).shape[0]),
@@ -2125,6 +2289,10 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "class_distribution": dataset.get("class_distribution", {}),
         "sample_weight_policy": dataset.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "data_quality": dataset.get("data_quality", {}),
+        "training_start_year": int(dataset.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
+        "max_label_date": dataset.get("max_label_date", ""),
+        "removed_before_start_rows": int(dataset.get("removed_before_start_rows", 0) or 0),
+        "removed_future_rows": int(dataset.get("removed_future_rows", 0) or 0),
         "dc_rho": float(dataset.get("dc_rho", 0.0) or 0.0),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
         "goals_distribution_ready": bool(dataset.get("goals_distribution_ready", dataset.get("over_under_ready", False))),
@@ -3976,13 +4144,18 @@ def labeled_train_row_count(normalized: Dict[str, Any]) -> int:
     return int(normalized["train"].shape[0] or normalized["team_train"].shape[0])
 
 
+def labeled_validation_row_count(normalized: Dict[str, Any]) -> int:
+    validation = normalized.get("validation", pd.DataFrame())
+    return int(validation.shape[0]) if isinstance(validation, pd.DataFrame) else 0
+
+
 def labeled_test_row_count(normalized: Dict[str, Any]) -> int:
     return int(normalized["test"].shape[0] or normalized["team_test"].shape[0])
 
 
 def evaluation_strategy(normalized: Dict[str, Any]) -> str:
     split_policy = str(normalized.get("split_policy") or "")
-    if split_policy == EVAL_STRATEGY_LAST_30:
+    if split_policy in {EVAL_STRATEGY_LAST_30, SPLIT_POLICY_VALIDATION_LAST_30}:
         return EVAL_STRATEGY_LAST_30
     if labeled_test_row_count(normalized) > 0:
         if normalized.get("final_test_year"):
@@ -4305,7 +4478,7 @@ def supplemental_training_rows(
         empty["warnings"] = ["El modo con jugadores requiere actualizar snapshots; el reentreno base usa result_only."]
         return empty
     if dataset_mode != "match_result":
-        empty["warnings"] = ["El reentreno walk-forward solo aplica cuando el dataset Kaggle es de partidos (match_result)."]
+        empty["warnings"] = ["El reentreno walk-forward solo aplica cuando el dataset internacional esta preparado como partidos (match_result)."]
         return empty
     completed = completed_worldcup_training_rows(tournament)
     if completed.empty:
@@ -4659,6 +4832,8 @@ def tune_model_if_requested(
         x_train: pd.DataFrame,
         y_train: pd.Series,
         sample_weight: Optional[pd.Series] = None,
+        x_validation: Optional[pd.DataFrame] = None,
+        y_validation: Optional[pd.Series] = None,
         progress_callback=None,
         market_label: str = "",
 ) -> Dict[str, Any]:
@@ -4672,13 +4847,28 @@ def tune_model_if_requested(
     except ImportError as exc:
         raise WorldCupTrainingError("Optuna no esta instalado. Ejecuta pip install -r requirements.txt.") from exc
 
-    x_fit, x_eval, y_fit, y_eval = safe_train_eval_split(
-        x_train,
-        y_train,
-        test_size=0.25,
-        random_state=config["seed"],
+    explicit_validation = (
+        isinstance(x_validation, pd.DataFrame)
+        and not x_validation.empty
+        and y_validation is not None
+        and not pd.Series(y_validation).dropna().empty
     )
-    weight_fit = split_weights_like_safe_train_eval(sample_weight, len(y_train), len(y_fit)) if sample_weight is not None else None
+    if explicit_validation:
+        x_fit = x_train
+        y_fit = pd.Series(y_train).reset_index(drop=True)
+        x_eval = x_validation.copy()
+        y_eval = pd.Series(y_validation).reset_index(drop=True)
+        weight_fit = align_sample_weights(sample_weight, len(y_fit)) if sample_weight is not None else None
+        validation_source = "temporal_validation"
+    else:
+        x_fit, x_eval, y_fit, y_eval = safe_train_eval_split(
+            x_train,
+            y_train,
+            test_size=0.25,
+            random_state=config["seed"],
+        )
+        weight_fit = split_weights_like_safe_train_eval(sample_weight, len(y_train), len(y_fit)) if sample_weight is not None else None
+        validation_source = "internal_split"
     objective_name = normalize_metric_name(config["objective"])
 
     def objective(trial):
@@ -4781,6 +4971,7 @@ def tune_model_if_requested(
         "trials_per_market": config.get("trials_per_market") or total_trials,
         "total_trial_budget": total_trial_budget,
         "trial_offset": trial_offset,
+        "validation_source": validation_source,
         "elapsed_seconds": int((datetime.now(timezone.utc) - tuning_started_at).total_seconds()),
     }
 
@@ -4968,7 +5159,7 @@ def predict_ml_probs(base_model: WorldCupModel, home: str, away: str, model_id: 
 def predict_ml_outputs(base_model: WorldCupModel, home: str, away: str, model_id: Optional[str] = None, fixture_id: Optional[Any] = None) -> Dict[str, Any]:
     record = load_hybrid_model(model_id=model_id)
     if not record:
-        return {"result": {}, "over_under_ml": {}, "over_under_25": {}, "notes": ["Modelo Kaggle no entrenado."]}
+        return {"result": {}, "over_under_ml": {}, "over_under_25": {}, "notes": ["Modelo internacional no entrenado."]}
     if record.get("bundle") and record.get("market_models"):
         return predict_bundle_ml_outputs(base_model, home, away, record, fixture_id=fixture_id)
     return predict_single_record_ml_outputs(base_model, home, away, record, fixture_id=fixture_id)
@@ -5063,7 +5254,7 @@ def predict_bundle_ml_outputs(base_model: WorldCupModel, home: str, away: str, r
 
 def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away: str, record: Dict[str, Any], fixture_id: Optional[Any] = None) -> Dict[str, Any]:
     active_id = str(record.get("model_id") or active_worldcup_model_id() or "")
-    model_name = str(record.get("model_name") or active_id or record.get("model_label", "Kaggle"))
+    model_name = str(record.get("model_name") or active_id or record.get("model_label", "Internacional"))
     if record.get("mode") == "team_strength":
         home_strength = team_strength_score(record, home)
         away_strength = team_strength_score(record, away)
@@ -5357,6 +5548,7 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "classes": record.get("classes", []),
         "eval_strategy": record.get("eval_strategy", result.get("eval_strategy", "")),
         "train_rows": int(result.get("train_rows", 0) or 0),
+        "validation_rows": int(result.get("validation_rows", record.get("validation_rows", 0)) or 0),
         "eval_rows": int(result.get("eval_rows", 0) or 0),
         "tuning": record.get("tuning", result.get("tuning", {})),
         "tuning_trace": record.get("tuning_trace", result.get("tuning_trace", {})),
@@ -5811,6 +6003,7 @@ def etl_steps(
 ) -> List[Dict[str, Any]]:
     file_list = list(files)
     train_rows = labeled_train_row_count(normalized)
+    validation_rows = labeled_validation_row_count(normalized)
     test_rows = labeled_test_row_count(normalized)
     prediction_rows = int(normalized["team_prediction"].shape[0])
     feature_rows = int(normalized["team_features"].shape[0])
@@ -5838,7 +6031,7 @@ def etl_steps(
         or ""
     )
     international_detail = (
-        f"all_matches.csv disponible como corpus principal ({all_matches_rows or international_status.get('rows', 0)} labels normalizados, {worldcup_rows} filas Mundial FIFA senior excluidas de train/test)."
+        f"all_matches.csv disponible como corpus principal ({all_matches_rows or international_status.get('rows', 0)} labels normalizados, {worldcup_rows} partidos FIFA World Cup incluidos si caen desde {INTERNATIONAL_TRAINING_START_YEAR})."
         if international_status.get("available")
         else f"All matches faltante: {international_status.get('reason') or 'sin CSV valido'} Ruta esperada: {international_status.get('file_path') or 'storage/worldcup/international/all_matches.csv'}."
     )
@@ -5846,10 +6039,10 @@ def etl_steps(
         international_detail = f"{international_detail} {international_status.get('warning')}"
     return [
         {
-            "name": "Descarga Kaggle",
-            "status": "ok" if file_list else "pending",
-            "count": len(file_list),
-            "detail": "Archivos CSV/XLS disponibles localmente.",
+            "name": "Dataset internacional",
+            "status": "ok" if international_status.get("available") else "pending",
+            "count": all_matches_rows or int(international_status.get("rows", 0) or 0),
+            "detail": f"Fuente canonica: {international_status.get('source_path') or international_status.get('file_path') or INTERNATIONAL_MATCHES_FILE}.",
         },
         {
             "name": "Preparar ETL",
@@ -5861,19 +6054,19 @@ def etl_steps(
             "name": "Lectura y normalizacion",
             "status": "ok" if train_rows else "pending",
             "count": train_rows,
-            "detail": f"Modo activo: {normalized.get('training_mode') or 'sin modo'}; fuente labels: {prepared_label_source or normalized.get('training_mode') or 'sin modo'}; train={train_rows}, eval={test_rows}.",
+            "detail": f"Modo activo: {normalized.get('training_mode') or 'sin modo'}; fuente labels: {prepared_label_source or normalized.get('training_mode') or 'sin modo'}; train={train_rows}, validacion={validation_rows}, test={test_rows}.",
         },
         {
             "name": "Split evaluacion",
             "status": "ok" if eval_strategy != "unavailable" else "pending",
             "count": test_rows if test_rows else planned_holdout_rows(train_rows),
-            "detail": "Ultimos 30 partidos internacionales no Mundial" if eval_strategy == EVAL_STRATEGY_LAST_30 else f"Benchmark historico: Mundial {benchmark_year}" if eval_strategy == "final_worldcup_test" and benchmark_year else "Benchmark historico Mundial" if eval_strategy == "final_worldcup_test" else "Test etiquetado" if eval_strategy == "test_file" else "Holdout temporal desde train" if eval_strategy == "holdout_temporal" else "Sin evaluacion.",
+            "detail": f"Validacion temporal previa ({validation_rows}) + ultimos 30 partidos internacionales como test" if eval_strategy == EVAL_STRATEGY_LAST_30 else f"Benchmark historico: Mundial {benchmark_year}" if eval_strategy == "final_worldcup_test" and benchmark_year else "Benchmark historico Mundial" if eval_strategy == "final_worldcup_test" else "Test etiquetado" if eval_strategy == "test_file" else "Holdout temporal desde train" if eval_strategy == "holdout_temporal" else "Sin evaluacion.",
         },
         {
-            "name": "Features seleccion",
-            "status": "ok" if feature_rows else "pending",
+            "name": "Features dinamicas",
+            "status": "ok" if train_rows else "pending",
             "count": feature_rows,
-            "detail": "Features numericas por seleccion listas para el modelo.",
+            "detail": "Elo/Poisson, historial, recent15, mercados y contexto temporal se calculan con cache por matriz.",
         },
         {
             "name": "Mercado 1X2 externo",
@@ -5885,7 +6078,7 @@ def etl_steps(
             "name": "Clasificatorios features",
             "status": "ok" if qualifier_rows else "info",
             "count": qualifier_rows,
-            "detail": "Clasificatorios 2026 usados solo como contexto temporal, nunca como labels por defecto.",
+            "detail": "Clasificatorios y partidos oficiales quedan en labels si estan en all_matches; este bloque aporta contexto externo cuando existe.",
         },
         {
             "name": "API-Football features",
@@ -5915,7 +6108,7 @@ def etl_steps(
             "name": "Anti-leakage",
             "status": "ok" if train_rows else "pending",
             "count": 0,
-            "detail": "Features historicas/recent15 se cortan antes de la fecha del partido; Mundiales historicos y 2026 no entran como labels.",
+            "detail": "Features historicas/recent15 se cortan antes de la fecha del partido; validacion y test son bloques temporales posteriores.",
         },
     ]
 
@@ -6025,6 +6218,7 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "feature_inventory": record.get("feature_inventory", {}),
         "feature_cache": record.get("feature_cache", {}),
         "derived_total_markets": record.get("derived_total_markets", {}),
+        "source_files": record.get("source_files", []),
         "kaggle_files": record.get("kaggle_files", []),
         "history_source": record.get("history_source", ""),
         "market_rows": int(record.get("market_rows", 0)),
@@ -6051,6 +6245,9 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "label_policy_notes": record.get("label_policy_notes", []),
         "final_test_year": record.get("final_test_year", ""),
         "split_policy": record.get("split_policy", ""),
+        "training_start_year": int(record.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
+        "max_label_date": record.get("max_label_date", ""),
+        "validation_rows": int(record.get("validation_rows", 0) or 0),
         "hidden_from_catalog": bool(record.get("hidden_from_catalog", False)),
         "markets": record.get("markets", {}),
         "market_models": record.get("market_models", {}),

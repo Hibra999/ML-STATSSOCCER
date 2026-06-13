@@ -153,17 +153,13 @@
     <section id="entrenamiento" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Entrenamiento y Modelo</h2>
-        <small id="training-source">All matches + Elo/Poisson + boosting seleccionado</small>
+        <small id="training-source">All matches internacional + Elo/Poisson + boosting seleccionado</small>
       </div>
       <div class="training-stack">
         <article class="visual-panel training-band">
           <header><h3>1. ETL y estado de datos</h3><small id="training-status">Sin revisar</small></header>
           <div class="actions-row">
-            <button id="training-refresh" type="button">Revisar dataset</button>
-            <button id="training-download" type="button">Descargar datos Kaggle + All matches</button>
-            <button id="training-prepare-etl" class="primary" type="button">Preparar ETL</button>
-            <button id="refresh-btn" type="button">Actualizar datos</button>
-            <button id="training-refresh-snapshots" type="button">Actualizar snapshots jugadores</button>
+            <button id="training-auto-prepare" class="primary" type="button">Preparar dataset internacional</button>
           </div>
           <div id="training-walkforward-notice" class="status-strip"></div>
           <div id="training-summary" class="dataset-summary"></div>

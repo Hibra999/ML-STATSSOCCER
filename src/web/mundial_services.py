@@ -35,8 +35,8 @@ from src.worldcup.score_models import (
 )
 from src.worldcup.data import CACHE_ROOT, fixture_results_status, group_letter, groups_from_tournament
 from src.worldcup.international_provider import (
+    INTERNATIONAL_ROOT,
     contextual_poisson_for_match,
-    download_international_results,
     international_results_status,
     load_international_matches,
 )
@@ -660,13 +660,6 @@ def player_features(refresh: bool = False) -> Dict[str, Any]:
 def training_download(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     payload = payload or {}
     status = download_kaggle_dataset(force=bool(payload.get("force", False)))
-    try:
-        status["international_recent"] = download_international_results(force=bool(payload.get("force", False)))
-    except Exception as exc:
-        status["international_recent"] = {
-            **international_results_status(),
-            "warning": f"{exc.__class__.__name__}: {exc}",
-        }
     return status
 
 
@@ -678,6 +671,46 @@ def training_prepare(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     )
     status["options"] = worldcup_training_options()
     return status
+
+
+def training_auto_prepare(payload: Dict[str, Any] | None = None, progress_callback=None) -> Dict[str, Any]:
+    payload = payload or {}
+    force = bool(payload.get("force", False))
+    refresh_history = bool(payload.get("refresh_history", False))
+    refresh_snapshots = bool(payload.get("refresh_snapshots", True))
+    snapshot_limit = int(_clamp_int(payload.get("snapshot_limit", payload.get("limit", 8)), 1, 48))
+
+    emit_job_progress(progress_callback, "status", 0, 4, "Revisando dataset internacional")
+    initial_status = training_status()
+
+    emit_job_progress(progress_callback, "download", 1, 4, "Descargando all_matches internacional")
+    download_status = training_download({"force": force})
+
+    emit_job_progress(progress_callback, "prepare_etl", 2, 4, "Preparando ETL internacional")
+    prepared_status = training_prepare({"force": True, "refresh_history": refresh_history})
+
+    snapshot_status: Dict[str, Any] = {}
+    if refresh_snapshots:
+        emit_job_progress(progress_callback, "snapshots", 3, 4, "Actualizando snapshots de jugadores")
+        snapshot_status = refresh_player_snapshots({
+            "refresh": bool(payload.get("refresh_events", True)),
+            "refresh_fixtures": bool(payload.get("refresh_fixtures", False)),
+            "limit": snapshot_limit,
+        })
+    else:
+        emit_job_progress(progress_callback, "snapshots", 3, 4, "Snapshots omitidos")
+
+    final_status = training_status()
+    final_status["auto_prepare"] = {
+        "initial": initial_status,
+        "download": download_status,
+        "prepared": prepared_status,
+        "snapshots": snapshot_status,
+    }
+    if snapshot_status:
+        final_status["snapshot_refresh"] = snapshot_status
+    emit_job_progress(progress_callback, "complete", 4, 4, "Dataset internacional listo")
+    return final_status
 
 
 def refresh_player_snapshots(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -757,7 +790,7 @@ def maintenance_clear(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         "removed": removed,
         "recreated": recreated,
         "cache_preserved": [
-            str(KAGGLE_ROOT),
+            str(INTERNATIONAL_ROOT),
             "storage/worldcup/cache/worldcup_*.json",
         ],
         "models": list_worldcup_models(),
@@ -2369,8 +2402,8 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
             ),
             "anti_leakage": [
                 "Historico filtrado antes del 2026-06-11.",
-                "Modelo ML entrenado/evaluado con partidos internacionales no Mundial y sin partidos 2026.",
-                "Los resultados 2026 confirmados solo fijan standings de simulacion live; no entrenan ni calibran el modelo.",
+                "Modelo ML entrenado con partidos internacionales desde 2014, incluyendo resultados 2026 ya jugados si estan en all_matches.",
+                "El test final queda reservado como los ultimos 30 partidos por fecha; la validacion temporal queda justo antes.",
             ],
         },
         "advancement": table_payload(result["advancement"], page=1, page_size=80),
@@ -2428,14 +2461,14 @@ def procedure() -> Dict[str, Any]:
             },
             {
                 "name": "Predicciones futuras",
-                "detail": "Combina Elo/Poisson con el modelo Kaggle si esta entrenado y reporta 1X2 junto con U/O 0.5, 1.5, 2.5 y 3.5 para los proximos N partidos.",
+                "detail": "Combina Elo/Poisson con el modelo internacional si esta entrenado y reporta 1X2 junto con U/O 0.5, 1.5, 2.5 y 3.5 para los proximos N partidos.",
             },
         ],
         "sources": [
             "openfootball/worldcup.json",
             "Football-Data WorldCup2026.xlsx para odds 1X2 historicas y clasificatorios",
             "storage/worldcup/market/manual_odds.csv opcional para odds actuales/O-U 2.5",
-            "Kaggle: harrachimustapha/fifa-world-cup-team-dataset",
+            "Kaggle: patateriedata/all-international-football-results",
             "storage/worldcup/cache/*.json",
             "Wikipedia squads opcional para jugadores",
         ],

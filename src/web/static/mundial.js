@@ -46,7 +46,7 @@ function bindEvents() {
   document.querySelectorAll("[data-section]").forEach((button) => {
     button.addEventListener("click", () => switchWorldcupView(button.dataset.section));
   });
-  document.getElementById("refresh-btn").addEventListener("click", () => loadAll(true));
+  document.getElementById("training-auto-prepare").addEventListener("click", autoPrepareTrainingDataset);
   document.getElementById("simulate-poisson-btn").addEventListener("click", runMatchMonteCarlo);
   document.getElementById("worldcup-new-model").addEventListener("click", startNewWorldcupModel);
   document.getElementById("model-load").addEventListener("click", loadSelectedModel);
@@ -57,10 +57,6 @@ function bindEvents() {
   document.getElementById("fixture-group-filter").addEventListener("change", renderFixtures);
   document.getElementById("fixture-search").addEventListener("input", renderFixtures);
   document.getElementById("players-refresh").addEventListener("click", () => loadPlayers(true));
-  document.getElementById("training-refresh").addEventListener("click", loadTrainingStatus);
-  document.getElementById("training-download").addEventListener("click", downloadTrainingDataset);
-  document.getElementById("training-prepare-etl").addEventListener("click", prepareTrainingEtl);
-  document.getElementById("training-refresh-snapshots").addEventListener("click", refreshPlayerSnapshots);
   document.getElementById("training-train").addEventListener("click", trainWorldCupModel);
   document.getElementById("training-retrain-base").addEventListener("click", () => trainWorldCupModel("result_only"));
   document.getElementById("upcoming-predict-btn").addEventListener("click", runUpcomingPredictions);
@@ -620,50 +616,12 @@ async function loadTrainingStatus() {
   }
 }
 
-async function downloadTrainingDataset() {
+async function autoPrepareTrainingDataset() {
   clearAlert();
-  document.getElementById("training-status").textContent = "Descargando Kaggle + All matches...";
+  document.getElementById("training-status").textContent = "Preparando dataset internacional...";
   try {
-    const result = await api("/api/mundial/training/download-kaggle", jsonOptions({ force: false }));
-    const refreshed = await api("/api/mundial/training/status");
-    state.training = {
-      ...refreshed,
-      international_recent: result.international_recent || refreshed.international_recent,
-      download_warnings: trainingStatusWarnings(result),
-    };
-    state.trainingOptions = refreshed.options || state.trainingOptions;
-    renderTrainingStatus(state.training);
-  } catch (error) {
-    showError(error.message);
-    await loadTrainingStatus();
-  }
-}
-
-async function prepareTrainingEtl() {
-  clearAlert();
-  document.getElementById("training-status").textContent = "Preparando ETL...";
-  try {
-    const result = await api("/api/mundial/training/prepare-etl", jsonOptions({ force: true }));
-    state.training = result;
-    renderTrainingStatus(result);
-  } catch (error) {
-    showError(error.message);
-    await loadTrainingStatus();
-  }
-}
-
-async function refreshPlayerSnapshots() {
-  clearAlert();
-  document.getElementById("training-status").textContent = "Actualizando snapshots de jugadores...";
-  try {
-    const result = await api("/api/mundial/training/player-snapshots", jsonOptions({ refresh: true, limit: 8 }));
-    const refreshed = await api("/api/mundial/training/status");
-    state.training = {
-      ...refreshed,
-      snapshot_refresh: result,
-    };
-    state.trainingOptions = refreshed.options || state.trainingOptions;
-    renderTrainingStatus(state.training);
+    const job = await api("/api/mundial/training/auto-prepare", jsonOptions({ force: false, refresh_snapshots: true, snapshot_limit: 8 }));
+    trackWorldcupJob(job, "training-prepare");
   } catch (error) {
     showError(error.message);
     await loadTrainingStatus();
@@ -768,6 +726,7 @@ function trainingMarketSections(model, payload) {
 
 function datasetSummaryHtml(payload) {
   const targetYear = targetWorldcupYear(payload);
+  const startYear = payload.training_start_year || 2014;
   const last30Eval = payload.eval_strategy === "last_30_international_test";
   const evalValue = last30Eval
     ? `${payload.test_rows || 30} partidos`
@@ -780,10 +739,11 @@ function datasetSummaryHtml(payload) {
   const internationalReady = Boolean(international.available);
   return [
     datasetCard("Objetivo", `Mundial ${targetYear}`, "torneo operativo"),
-    datasetCard("Labels", "Internacionales no Mundial", payload.prepared_label_source || "all_matches.csv"),
-    datasetCard("Archivos", (payload.files || []).length, "CSV/XLS detectados"),
+    datasetCard("Labels", `Internacionales desde ${startYear}`, payload.prepared_label_source || "all_matches.csv"),
+    datasetCard("Archivos", (payload.files || []).length, "CSV internacional detectado"),
     datasetCard("ETL", etlStatusShort(payload), payload.prepared_label_source || "preparar artifact"),
     datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
+    datasetCard("Validación", payload.validation_rows || 0, "bloque temporal previo al test"),
     datasetCard("Eval", evalValue, evalStrategyLabel(payload.eval_strategy, payload)),
     datasetCard(`Predicción ${targetYear}`, payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
@@ -876,7 +836,7 @@ function marketLabel(key) {
 }
 
 function evalStrategyLabel(strategy, payload) {
-  if (strategy === "last_30_international_test") return "ultimos 30 internacionales";
+  if (strategy === "last_30_international_test") return "validacion temporal + ultimos 30";
   if (strategy === "final_worldcup_test") {
     const year = String((payload && payload.final_test_year) || "").trim();
     return year ? `Mundial ${year}` : "Mundial historico";
@@ -2173,10 +2133,16 @@ async function handleWorldcupJobComplete(job) {
   renderWorldcupJobProgress(job.kind);
   if (job.status === "failed") {
     showError(job.error || "Proceso fallido");
-    if (job.kind === "training" && state.training) renderTrainingStatus(state.training);
+    if ((job.kind === "training" || job.kind === "training-prepare") && state.training) renderTrainingStatus(state.training);
     return;
   }
   const result = job.result || {};
+  if (job.kind === "training-prepare") {
+    state.training = result;
+    state.trainingOptions = result.options || state.trainingOptions;
+    renderTrainingStatus(result);
+    document.getElementById("simulation-summary").textContent = "Dataset internacional listo para entrenamiento.";
+  }
   if (job.kind === "training") {
     state.newModelMode = false;
     state.activeModelId = (result.model || {}).model_id || result.active_model_id || state.activeModelId;
@@ -2210,7 +2176,7 @@ async function handleWorldcupJobComplete(job) {
 }
 
 function renderWorldcupJobProgress(kind) {
-  const targetId = kind === "training"
+  const targetId = (kind === "training" || kind === "training-prepare")
     ? "worldcup-training-progress"
     : kind === "simulation"
       ? "worldcup-simulation-progress"
@@ -2307,7 +2273,9 @@ function setWorldcupJobBusy(kind, busy) {
     ? ["simulate-poisson-btn"]
     : kind === "upcoming-report"
       ? ["upcoming-predict-btn"]
-      : ["training-train", "training-retrain-base"];
+      : kind === "training-prepare"
+        ? ["training-auto-prepare"]
+        : ["training-train", "training-retrain-base"];
   ids.forEach((id) => {
     const button = document.getElementById(id);
     if (button) button.disabled = Boolean(busy);
