@@ -728,7 +728,10 @@ function datasetSummaryHtml(payload) {
   const targetYear = targetWorldcupYear(payload);
   const startYear = payload.training_start_year || 2014;
   const last30Eval = payload.eval_strategy === "last_30_international_test";
-  const evalValue = last30Eval
+  const temporalSplitEval = payload.eval_strategy === "temporal_80_10_10";
+  const evalValue = temporalSplitEval
+    ? `${payload.test_rows || 0} filas test`
+    : last30Eval
     ? `${payload.test_rows || 30} partidos`
     : payload.test_rows
     ? `${payload.test_rows} filas test`
@@ -743,7 +746,7 @@ function datasetSummaryHtml(payload) {
     datasetCard("Archivos", (payload.files || []).length, "CSV internacional detectado"),
     datasetCard("ETL", etlStatusShort(payload), payload.prepared_label_source || "preparar artifact"),
     datasetCard("Train etiquetado", payload.train_rows || 0, payload.training_mode || "sin modo"),
-    datasetCard("Validación", payload.validation_rows || 0, "bloque temporal previo al test"),
+    datasetCard("Validación", payload.validation_rows || 0, temporalSplitEval ? "10% temporal intermedio" : "bloque temporal previo al test"),
     datasetCard("Eval", evalValue, evalStrategyLabel(payload.eval_strategy, payload)),
     datasetCard(`Predicción ${targetYear}`, payload.prediction_rows || 0, "filas sin label usadas como features"),
     datasetCard("Features equipo", payload.team_feature_rows || 0, "equipos disponibles"),
@@ -836,6 +839,7 @@ function marketLabel(key) {
 }
 
 function evalStrategyLabel(strategy, payload) {
+  if (strategy === "temporal_80_10_10") return "split temporal 80/10/10";
   if (strategy === "last_30_international_test") return "validacion temporal + ultimos 30";
   if (strategy === "final_worldcup_test") {
     const year = String((payload && payload.final_test_year) || "").trim();

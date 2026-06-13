@@ -151,11 +151,16 @@ FUTURE_LABEL_EXCLUDED_YEAR = 2026
 TARGET_WORLDCUP_YEAR = FUTURE_LABEL_EXCLUDED_YEAR
 INTERNATIONAL_TRAINING_START_YEAR = 2014
 INTERNATIONAL_TRAINING_START_DATE = f"{INTERNATIONAL_TRAINING_START_YEAR}-01-01"
-PREPARED_SCHEMA_VERSION = "worldcup_2026_international_since_2014_v3"
+PREPARED_SCHEMA_VERSION = "worldcup_2026_international_since_2014_v4_split_80_10_10"
 FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v3_balanced"
 EVAL_STRATEGY_LAST_30 = "last_30_international_test"
 SPLIT_POLICY_VALIDATION_LAST_30 = "temporal_since_2014_validation_last_30_test"
-BENCHMARK_POLICY = EVAL_STRATEGY_LAST_30
+EVAL_STRATEGY_TEMPORAL_80_10_10 = "temporal_80_10_10"
+SPLIT_POLICY_TEMPORAL_80_10_10 = "temporal_since_2014_80_10_10"
+TRAIN_SPLIT_FRACTION = 0.80
+VALIDATION_SPLIT_FRACTION = 0.10
+TEST_SPLIT_FRACTION = 0.10
+BENCHMARK_POLICY = EVAL_STRATEGY_TEMPORAL_80_10_10
 WORLDCUP_XGBOOST_DEFAULTS = {
     "n_estimators": 450,
     "max_depth": 3,
@@ -785,7 +790,7 @@ def prepared_dataset_schema_valid(dataset: Dict[str, Any]) -> bool:
         return False
     if str(dataset.get("target_column") or "") != "Label + GoalsDistribution + OverUnder05/15/25/35":
         return False
-    if str(dataset.get("split_policy") or "") != SPLIT_POLICY_VALIDATION_LAST_30:
+    if str(dataset.get("split_policy") or "") != SPLIT_POLICY_TEMPORAL_80_10_10:
         return False
     if int(dataset.get("training_start_year", 0) or 0) != INTERNATIONAL_TRAINING_START_YEAR:
         return False
@@ -793,7 +798,7 @@ def prepared_dataset_schema_valid(dataset: Dict[str, Any]) -> bool:
     if not isinstance(validation_rows, pd.DataFrame) or validation_rows.empty:
         return False
     test_rows = dataset.get("test", pd.DataFrame())
-    if not isinstance(test_rows, pd.DataFrame) or int(test_rows.shape[0]) != 30:
+    if not isinstance(test_rows, pd.DataFrame) or test_rows.empty:
         return False
     for frame in (train_rows, validation_rows, test_rows):
         dates = pd.to_datetime(frame.get("Date", pd.Series(index=frame.index, dtype=object)), errors="coerce")
@@ -1794,7 +1799,7 @@ def build_prepared_dataset(
         f"Objetivo operativo: Mundial {TARGET_WORLDCUP_YEAR}.",
         "Labels obligatorios desde all_matches.csv; train.csv/test.csv y el Kaggle Mundial legacy se ignoran por completo.",
         f"Corpus entrenable: partidos internacionales desde {INTERNATIONAL_TRAINING_START_YEAR}, incluyendo FIFA World Cup y resultados 2026 ya jugados.",
-        "Anti-leakage: split temporal con test final en los ultimos 30 partidos y validacion inmediatamente anterior.",
+        "Anti-leakage: split temporal 80/10/10 por fecha: train primero, validacion intermedia y test final.",
     ]
     label_source = "all_matches.csv"
     raw_mode = "international_only"
@@ -1818,7 +1823,7 @@ def build_prepared_dataset(
     if labeled_rows.empty:
         raise WorldCupTrainingError(f"all_matches.csv no contiene partidos internacionales entrenables desde {INTERNATIONAL_TRAINING_START_YEAR}.")
     worldcup_rows_count = int(labeled_rows["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in labeled_rows.columns else 0
-    train_df, validation_df, test_df, split_warning = split_validation_last_30_international_test(labeled_rows)
+    train_df, validation_df, test_df, split_warning = split_temporal_80_10_10_international(labeled_rows)
     if split_warning:
         label_policy_notes.append(split_warning)
     over_under_ready = has_over_under_target(train_df)
@@ -1913,7 +1918,7 @@ def build_prepared_dataset(
         "benchmark_worldcup_year": "",
         "benchmark_policy": BENCHMARK_POLICY,
         "final_test_year": "",
-        "split_policy": SPLIT_POLICY_VALIDATION_LAST_30,
+        "split_policy": SPLIT_POLICY_TEMPORAL_80_10_10,
         "over_under_ready": over_under_ready,
         "goals_distribution_ready": goals_distribution_ready,
         "result_ready": bool(not train_df.empty and train_df["Label"].isin(TARGET_LABELS).any()),
@@ -1975,30 +1980,41 @@ def split_validation_last_30_international_test(
         rows: pd.DataFrame,
         validation_fraction: float = 0.10,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
+    return split_temporal_80_10_10_international(rows)
+
+
+def split_temporal_80_10_10_international(
+        rows: pd.DataFrame,
+        train_fraction: float = TRAIN_SPLIT_FRACTION,
+        validation_fraction: float = VALIDATION_SPLIT_FRACTION,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
     if rows.empty:
         raise WorldCupTrainingError("all_matches.csv no contiene partidos internacionales validos para train/validacion/test.")
     working = sort_match_rows(sanitize_match_rows(rows))
     date_values = pd.to_datetime(working.get("Date"), errors="coerce")
     valid = sort_match_rows(working[date_values.notna()].copy()).reset_index(drop=True)
-    if valid.shape[0] < 32:
+    if valid.shape[0] < 10:
         raise WorldCupTrainingError(
-            f"all_matches.csv debe contener al menos 32 partidos internacionales validos para train/validacion/test; encontro {valid.shape[0]}."
+            f"all_matches.csv debe contener al menos 10 partidos internacionales validos para split 80/10/10; encontro {valid.shape[0]}."
         )
-    pre_test_rows = int(valid.shape[0] - 30)
-    if pre_test_rows < 2:
-        raise WorldCupTrainingError(
-            f"all_matches.csv debe dejar al menos 2 partidos antes de los ultimos 30 para train/validacion; encontro {pre_test_rows}."
-        )
-    validation_size = max(1, int(math.ceil(pre_test_rows * float(validation_fraction))))
-    validation_size = min(validation_size, pre_test_rows - 1)
-    train_end = int(valid.shape[0] - 30 - validation_size)
-    validation_end = int(valid.shape[0] - 30)
+    total_rows = int(valid.shape[0])
+    train_size = max(1, int(math.floor(total_rows * float(train_fraction))))
+    validation_size = max(1, int(math.floor(total_rows * float(validation_fraction))))
+    if train_size + validation_size >= total_rows:
+        validation_size = 1
+        train_size = max(1, total_rows - 2)
+    test_size = total_rows - train_size - validation_size
+    if test_size < 1:
+        test_size = 1
+        train_size = max(1, total_rows - validation_size - test_size)
+    train_end = train_size
+    validation_end = train_size + validation_size
     train = valid.iloc[:train_end].copy().reset_index(drop=True)
     validation = valid.iloc[train_end:validation_end].copy().reset_index(drop=True)
-    test = valid.iloc[-30:].copy().reset_index(drop=True)
+    test = valid.iloc[validation_end:].copy().reset_index(drop=True)
     worldcup_rows = int(valid["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in valid.columns else 0
     warning = (
-        f"Split temporal desde {INTERNATIONAL_TRAINING_START_YEAR}: train={train.shape[0]}, validacion={validation.shape[0]}, test=30; {worldcup_rows} partidos FIFA World Cup incluidos."
+        f"Split temporal 80/10/10 desde {INTERNATIONAL_TRAINING_START_YEAR}: train={train.shape[0]}, validacion={validation.shape[0]}, test={test.shape[0]}; {worldcup_rows} partidos FIFA World Cup incluidos."
     )
     return train, validation, test, warning
 
@@ -4478,6 +4494,8 @@ def labeled_test_row_count(normalized: Dict[str, Any]) -> int:
 
 def evaluation_strategy(normalized: Dict[str, Any]) -> str:
     split_policy = str(normalized.get("split_policy") or "")
+    if split_policy in {EVAL_STRATEGY_TEMPORAL_80_10_10, SPLIT_POLICY_TEMPORAL_80_10_10}:
+        return EVAL_STRATEGY_TEMPORAL_80_10_10
     if split_policy in {EVAL_STRATEGY_LAST_30, SPLIT_POLICY_VALIDATION_LAST_30}:
         return EVAL_STRATEGY_LAST_30
     if labeled_test_row_count(normalized) > 0:
@@ -6531,7 +6549,7 @@ def etl_steps(
             "name": "Split evaluacion",
             "status": "ok" if eval_strategy != "unavailable" else "pending",
             "count": test_rows if test_rows else planned_holdout_rows(train_rows),
-            "detail": f"Validacion temporal previa ({validation_rows}) + ultimos 30 partidos internacionales como test" if eval_strategy == EVAL_STRATEGY_LAST_30 else f"Benchmark historico: Mundial {benchmark_year}" if eval_strategy == "final_worldcup_test" and benchmark_year else "Benchmark historico Mundial" if eval_strategy == "final_worldcup_test" else "Test etiquetado" if eval_strategy == "test_file" else "Holdout temporal desde train" if eval_strategy == "holdout_temporal" else "Sin evaluacion.",
+            "detail": f"Split temporal 80/10/10: train={train_rows}, validacion={validation_rows}, test={test_rows}" if eval_strategy == EVAL_STRATEGY_TEMPORAL_80_10_10 else f"Validacion temporal previa ({validation_rows}) + ultimos 30 partidos internacionales como test" if eval_strategy == EVAL_STRATEGY_LAST_30 else f"Benchmark historico: Mundial {benchmark_year}" if eval_strategy == "final_worldcup_test" and benchmark_year else "Benchmark historico Mundial" if eval_strategy == "final_worldcup_test" else "Test etiquetado" if eval_strategy == "test_file" else "Holdout temporal desde train" if eval_strategy == "holdout_temporal" else "Sin evaluacion.",
         },
         {
             "name": "Features dinamicas",
