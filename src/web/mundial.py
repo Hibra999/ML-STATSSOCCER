@@ -79,54 +79,6 @@ def create_mundial_app() -> FastAPI:
     def players(refresh: bool = False):
         return _wrap(services.players, refresh)
 
-    @app.post("/api/mundial/training/download-kaggle")
-    def training_download(payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.training_download, payload)
-
-    @app.post("/api/mundial/training/prepare-etl")
-    def training_prepare(payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.training_prepare, payload)
-
-    @app.post("/api/mundial/training/player-snapshots")
-    def training_player_snapshots(payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.refresh_player_snapshots, payload)
-
-    @app.post("/api/mundial/training/auto-prepare")
-    def training_auto_prepare(payload: Dict[str, Any] = Body(default={})):
-        return _submit("Preparando dataset internacional", services.training_auto_prepare, payload, with_progress=True, lock_key="mundial-training")
-
-    @app.get("/api/mundial/training/dataset")
-    def training_dataset():
-        return _wrap(services.training_dataset)
-
-    @app.post("/api/mundial/training/train")
-    def training_train(payload: Dict[str, Any] = Body(default={})):
-        return _submit("Entrenando modelo Mundial", services.training_train, payload, with_progress=True, lock_key="mundial-training")
-
-    @app.get("/api/mundial/training/status")
-    def training_status():
-        return _wrap(services.training_status)
-
-    @app.get("/api/mundial/training/options")
-    def training_options():
-        return _wrap(services.training_options)
-
-    @app.get("/api/mundial/models")
-    def models_catalog():
-        return _wrap(services.models_catalog)
-
-    @app.post("/api/mundial/models/train")
-    def models_train(payload: Dict[str, Any] = Body(default={})):
-        return _submit("Entrenando modelo Mundial", services.training_train, payload, with_progress=True, lock_key="mundial-training")
-
-    @app.post("/api/mundial/models/select")
-    def models_select(payload: Dict[str, Any] = Body(default={})):
-        return _wrap(services.select_model, payload)
-
-    @app.delete("/api/mundial/models/{model_id}")
-    def models_delete(model_id: str):
-        return _wrap(services.delete_model, model_id)
-
     @app.post("/api/mundial/maintenance/clear")
     def maintenance_clear(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.maintenance_clear, payload)

@@ -151,14 +151,14 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     progress = []
 
     result = services.predict_upcoming_report(
-        {"pipeline_mode": "poisson_sota", "limit": 1, "use_ml_model": True},
+        {"pipeline_mode": "poisson_sota", "limit": 1},
         progress_callback=progress.append,
     )
 
     assert prediction_order == services.SOTA_SCORE_MODEL_SEQUENCE
     assert fit_order == services.SOTA_SCORE_MODEL_SEQUENCE[1:]
     assert result["summary"]["sota_calculation_mode"] == "exact"
-    assert result["summary"]["use_ml_model"] is False
+    assert "use_ml_model" not in result["summary"]
     assert result["fixture_reports"][0]["models"][0]["model_key"] == "independent_poisson"
     assert "monte_carlo_consensus" not in result["fixture_reports"][0]
     assert result["fixture_reports"][0]["consensus"]["eligible_models"] == len(services.SOTA_SCORE_MODEL_SEQUENCE)

@@ -91,17 +91,11 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/lineups/auto-refresh" not in paths
     assert "/api/mundial/fixtures/{fixture_id}/player-stats" not in paths
     assert "/api/mundial/player-features" not in paths
-    assert "/api/mundial/training/download-kaggle" in paths
-    assert "/api/mundial/training/prepare-etl" in paths
-    assert "/api/mundial/training/auto-prepare" in paths
-    assert "/api/mundial/training/dataset" in paths
-    assert "/api/mundial/training/train" in paths
-    assert "/api/mundial/training/status" in paths
-    assert "/api/mundial/training/options" in paths
-    assert "/api/mundial/models" in paths
-    assert "/api/mundial/models/train" in paths
-    assert "/api/mundial/models/select" in paths
-    assert "/api/mundial/models/{model_id}" in paths
+    assert not any(path.startswith("/api/mundial/training") for path in paths)
+    assert "/api/mundial/models" not in paths
+    assert "/api/mundial/models/train" not in paths
+    assert "/api/mundial/models/select" not in paths
+    assert "/api/mundial/models/{model_id}" not in paths
     assert "/api/mundial/maintenance/clear" in paths
     assert "/api/mundial/predict-match" in paths
     assert "/api/mundial/predict-upcoming" in paths
@@ -237,7 +231,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Mundial 2026" in html_source
     assert "worldcup-view active" in html_source
     nav_source = html_source.split("<nav>", 1)[1].split("</nav>", 1)[0]
-    nav_order = ["Resumen", "Grupos", "Calendario", "Entrenamiento y Modelo", "Predicciones Futuras", "Datos"]
+    nav_order = ["Resumen", "Grupos", "Calendario", "Predicciones Futuras", "Datos"]
     assert [nav_source.index(label) for label in nav_order] == sorted(nav_source.index(label) for label in nav_order)
     assert "Simulación" not in nav_source
     assert "11 Iniciales" not in nav_source
@@ -245,18 +239,17 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "switchWorldcupView" in app_source
     assert "data-section=\"predicciones\"" in html_source
     assert "Calendario" in html_source
-    assert "Modelo existente" in html_source
     assert "Predicciones Futuras" in html_source
-    assert "Entrenamiento y Modelo" in html_source
-    assert "Algoritmo boosting" in html_source
-    assert "mundial-xgb-hibrido" in html_source
-    assert "ML híbrido" in html_source
-    assert "model-active-select" in html_source
-    assert "worldcup-new-model" in html_source
-    assert "model-load" in html_source
-    assert "worldcup-clear-cache" in html_source
-    assert "worldcup-model-id" in html_source
-    assert "upcoming-model-select" in html_source
+    assert "Entrenamiento y Modelo" not in html_source
+    assert "Algoritmo boosting" not in html_source
+    assert "mundial-xgb-hibrido" not in html_source
+    assert "ML híbrido" not in html_source
+    assert "model-active-select" not in html_source
+    assert "worldcup-new-model" not in html_source
+    assert "model-load" not in html_source
+    assert "worldcup-clear-cache" not in html_source
+    assert "worldcup-model-id" not in html_source
+    assert "upcoming-model-select" not in html_source
     assert "hero-hardware" in html_source
     assert "training-hardware" not in html_source
     assert "sim-history-weight" in html_source
@@ -266,31 +259,31 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "lineup-stage" not in html_source
     assert "lineup-autodetect" not in html_source
     assert "sim-use-player-features" not in html_source
-    assert "sim-use-ml-model" in html_source
-    assert "training-train" in html_source
-    assert "worldcup-training-progress" in html_source
+    assert "sim-use-ml-model" not in html_source
+    assert "training-train" not in html_source
+    assert "worldcup-training-progress" not in html_source
     assert "worldcup-simulation-progress" in html_source
-    assert "training-retrain-base" in html_source
+    assert "training-retrain-base" not in html_source
     assert "training-retrain-players" not in html_source
-    assert "training-walkforward-notice" in html_source
-    assert "worldcup-model-type" in html_source
-    assert "worldcup-tuning-enabled" in html_source
-    assert "worldcup-device" in html_source
-    assert "worldcup-n-jobs" in html_source
-    assert "training-auto-prepare" in html_source
+    assert "training-walkforward-notice" not in html_source
+    assert "worldcup-model-type" not in html_source
+    assert "worldcup-tuning-enabled" not in html_source
+    assert "worldcup-device" not in html_source
+    assert "worldcup-n-jobs" not in html_source
+    assert "training-auto-prepare" not in html_source
     assert "training-prepare-etl" not in html_source
     assert "training-download" not in html_source
     assert "training-refresh-snapshots" not in html_source
-    assert "training-tuning-lock-status" in html_source
-    assert "training-model-params" in html_source
-    assert "training-model-state" in html_source
-    assert "dataset-summary" in html_source
-    assert "training-etl-flow" in html_source
-    assert "training-confusion-matrix" in html_source
-    assert "training-tuning-flow" in html_source
-    assert "Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson" in html_source
+    assert "training-tuning-lock-status" not in html_source
+    assert "training-model-params" not in html_source
+    assert "training-model-state" not in html_source
+    assert "dataset-summary" not in html_source
+    assert "training-etl-flow" not in html_source
+    assert "training-confusion-matrix" not in html_source
+    assert "training-tuning-flow" not in html_source
+    assert "Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson" not in html_source
     assert "upcoming-predict-limit" in html_source
-    assert "upcoming-pipeline-mode" in html_source
+    assert "upcoming-pipeline-mode" not in html_source
     assert "upcoming-sota-calculation-mode" in html_source
     assert "Rápido / matriz exacta" in html_source
     assert "Monte Carlo" in html_source
@@ -316,38 +309,38 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "lineup-features-table" not in html_source
     assert "/api/mundial/simulate" in app_source
     assert "/api/mundial/player-features" not in app_source
-    assert "/api/mundial/models" in app_source
-    assert "/api/mundial/models/train" in app_source
-    assert "/api/mundial/training/auto-prepare" in app_source
+    assert "/api/mundial/models" not in app_source
+    assert "/api/mundial/models/train" not in app_source
+    assert "/api/mundial/training/auto-prepare" not in app_source
     assert "/api/mundial/training/prepare-etl" not in app_source
-    assert "/api/mundial/models/select" in app_source
-    assert "/api/mundial/maintenance/clear" in app_source
-    assert "trainingPayload" in app_source
-    assert "nextWorldcupModelId" in app_source
-    assert "ensureWorldcupModelId" in app_source
-    assert "No se pudo generar el nombre del nuevo modelo" in app_source
+    assert "/api/mundial/models/select" not in app_source
+    assert "/api/mundial/maintenance/clear" not in app_source
+    assert "trainingPayload" not in app_source
+    assert "nextWorldcupModelId" not in app_source
+    assert "ensureWorldcupModelId" not in app_source
+    assert "No se pudo generar el nombre del nuevo modelo" not in app_source
     assert "Ingresa un nombre para el nuevo modelo" not in app_source
-    assert "paramsTable" in app_source
-    assert "evalStrategyLabel" in app_source
+    assert "paramsTable" not in app_source
+    assert "evalStrategyLabel" not in app_source
     assert "benchmarkWorldcupYear" not in app_source
     assert "Benchmark histórico" not in app_source
     assert "benchmark historico" not in app_source
     assert "ultimo Mundial test" not in app_source
     assert "Test final bloqueado" not in app_source
     assert "model.warnings" not in app_source
-    assert "holdout temporal" in app_source
-    assert "renderConfusionMatrix" in app_source
-    assert "confusionSummaryHtml" in app_source
-    assert "FP/FN por clase" in app_source
-    assert "renderEtlFlow" in app_source
-    assert "renderTuningFlow" in app_source
-    assert "dual_markets" in app_source
-    assert "hibrido" in app_source
-    assert "market-panel" in app_source
-    assert "renderWalkForwardNotice" in app_source
+    assert "holdout temporal" not in app_source
+    assert "renderConfusionMatrix" not in app_source
+    assert "confusionSummaryHtml" not in app_source
+    assert "FP/FN por clase" not in app_source
+    assert "renderEtlFlow" not in app_source
+    assert "renderTuningFlow" not in app_source
+    assert "dual_markets" not in app_source
+    assert "hibrido" not in app_source
+    assert "market-panel" not in app_source
+    assert "renderWalkForwardNotice" not in app_source
     assert "renderHeroHardware" in app_source
     assert "hardwareChip(\"CUDA\"" in app_source
-    assert "preferredTrainingDevice" in app_source
+    assert "preferredTrainingDevice" not in app_source
     assert "reportTopModelsHtml" in app_source
     assert "reportConsensusScoreHtml" in app_source
     assert "sota_calculation_mode" in app_source
@@ -366,8 +359,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Numba" not in app_source
     assert "trackWorldcupJob" in app_source
     assert "/api/jobs/${jobId}" in app_source
-    assert "worldcup-training-progress" in html_source
-    assert "worldcup-training-progress" in app_source
+    assert "worldcup-training-progress" not in html_source
+    assert "worldcup-training-progress" not in app_source
     assert 'if (kind !== "simulation") return' not in app_source
     assert "runUpcomingPredictions" in app_source
     assert "/api/mundial/predict-upcoming" in app_source
@@ -381,43 +374,17 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "player-photo" in app_source
 
 
-def test_mundial_training_model_endpoint_returns_job_and_progress(monkeypatch):
+def test_mundial_training_and_model_endpoints_are_removed():
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
     from fastapi.testclient import TestClient
-    from src.web import mundial_services
     from src.web.mundial import create_mundial_app
 
-    def fake_training_train(payload, progress_callback=None):
-        if progress_callback:
-            progress_callback({
-                "stage": "tuning",
-                "current": 1,
-                "total": 2,
-                "current_trial": 1,
-                "total_trials": 2,
-                "percent": 50,
-                "message": "Fine-tuning 1X2",
-                "market": "1X2",
-                "best_value": 0.75,
-                "last_state": "COMPLETE",
-            })
-        return {"model": {"model_id": "fake-worldcup"}, "models": {"models": []}}
-
-    monkeypatch.setattr(mundial_services, "training_train", fake_training_train)
     client = TestClient(create_mundial_app())
 
-    response = client.post("/api/mundial/models/train", json={"model_type": "xgboost"})
-    payload = response.json()
-    assert response.status_code == 200
-    assert payload["ok"] is True
-    job_id = payload["data"]["job_id"]
-
-    job = wait_for_job(client, job_id)
-    assert job["status"] == "succeeded"
-    assert job["progress"]["stage"] == "tuning"
-    assert job["progress"]["best_value"] == 0.75
-    assert job["result"]["model"]["model_id"] == "fake-worldcup"
+    assert client.get("/api/mundial/training/status").status_code == 404
+    assert client.get("/api/mundial/models").status_code == 404
+    assert client.post("/api/mundial/models/train", json={}).status_code == 404
 
 
 def test_mundial_upcoming_report_endpoint_returns_job_and_progress(monkeypatch):
@@ -462,27 +429,16 @@ def test_mundial_upcoming_report_endpoint_returns_job_and_progress(monkeypatch):
     assert job["result"]["report_id"] == "fake-report"
 
 
-def test_mundial_training_job_failure_is_pollable(monkeypatch):
+def test_mundial_removed_model_select_endpoint_returns_404():
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
     from fastapi.testclient import TestClient
-    from src.web import mundial_services
     from src.web.mundial import create_mundial_app
 
-    def fake_training_train(payload, progress_callback=None):
-        raise RuntimeError("boom training")
-
-    monkeypatch.setattr(mundial_services, "training_train", fake_training_train)
     client = TestClient(create_mundial_app())
 
-    response = client.post("/api/mundial/models/train", json={"model_type": "xgboost"})
-    payload = response.json()
-    assert response.status_code == 200
-    assert payload["ok"] is True
-
-    job = wait_for_job(client, payload["data"]["job_id"])
-    assert job["status"] == "failed"
-    assert "RuntimeError: boom training" in job["error"]
+    assert client.post("/api/mundial/models/select", json={"model_id": "x"}).status_code == 404
+    assert client.delete("/api/mundial/models/x").status_code == 404
 
 
 def test_job_manager_captures_progress_and_failure():
@@ -1124,12 +1080,12 @@ def test_mundial_simulation_config_is_clamped():
     assert config["recency_weight"] == 1.0
     assert config["host_advantage"] == 0.0
     assert config["max_goals"] == 14
-    assert config["ml_weight"] == 1.0
+    assert "ml_weight" not in config
     assert "lineup_weight" not in config
     assert "player_feature_weight" not in config
     assert "use_lineups" not in config
     assert "use_player_features" not in config
-    assert config["use_ml_model"] is True
+    assert "use_ml_model" not in config
 
 
 def test_mundial_overview_features_all_matches_at_next_kickoff(monkeypatch):
@@ -1362,7 +1318,7 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
 def test_worldcup_predict_upcoming_returns_future_predictions(tmp_path, monkeypatch):
     from src.web import mundial_services
 
-    result = mundial_services.predict_upcoming({"limit": 3, "use_ml_model": False})
+    result = mundial_services.predict_upcoming({"limit": 3})
 
     assert result["summary"]["requested"] == 3
     assert result["summary"]["returned"] == 3
@@ -1426,7 +1382,6 @@ def test_mundial_overview_skips_started_match_on_same_day(monkeypatch):
 
 def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp_path, monkeypatch):
     from src.web import mundial_services
-    from src.worldcup import training
 
     cache_root = tmp_path / "cache"
     models_root = tmp_path / "models"
@@ -1450,40 +1405,19 @@ def test_mundial_maintenance_clear_resets_runtime_and_preserves_base_sources(tmp
     (walk_root / "matches.csv").write_text("fixture_id\n1\n", encoding="utf-8")
 
     monkeypatch.setattr(mundial_services, "CACHE_ROOT", cache_root)
-    monkeypatch.setattr(mundial_services, "WORLD_CUP_MODELS_ROOT", models_root)
-    monkeypatch.setattr(mundial_services, "KAGGLE_ROOT", kaggle_root)
     monkeypatch.setattr(mundial_services, "LINEUPS_ROOT", lineups_root)
     monkeypatch.setattr(mundial_services, "PLAYER_STATS_ROOT", stats_root)
     monkeypatch.setattr(mundial_services, "SOFASCORE_ROOT", sofascore_root)
     monkeypatch.setattr(mundial_services, "WALK_FORWARD_ROOT", walk_root)
-    monkeypatch.setattr(training, "CACHE_ROOT", cache_root)
-    monkeypatch.setattr(training, "KAGGLE_ROOT", kaggle_root)
-    monkeypatch.setattr(training, "WORLD_CUP_MODELS_ROOT", models_root)
-    monkeypatch.setattr(training, "HYBRID_MODEL_FILE", models_root / "hybrid.pkl")
-    monkeypatch.setattr(training, "HYBRID_MODEL_META_FILE", models_root / "hybrid.json")
-    monkeypatch.setattr(training, "WALK_FORWARD_ROOT", walk_root)
-    monkeypatch.setattr(training, "WALK_FORWARD_MATCHES_FILE", walk_root / "matches.csv")
-    monkeypatch.setattr(training, "WALK_FORWARD_PLAYERS_FILE", walk_root / "player_match_stats.csv")
-    monkeypatch.setattr(training, "WALK_FORWARD_TEAM_FEATURES_FILE", walk_root / "team_match_features.csv")
-    monkeypatch.setattr(training, "PREPARED_DATASET_FILE", cache_root / "worldcup_training_prepared.pkl")
-    monkeypatch.setattr(training, "PREPARED_DATASET_META_FILE", cache_root / "worldcup_training_prepared.json")
-    monkeypatch.setattr(training, "international_results_status", lambda: {
-        "available": True,
-        "exists": True,
-        "source_path": str(tmp_path / "international" / "all_matches.csv"),
-        "file_path": str(tmp_path / "international" / "all_matches.csv"),
-        "rows": 42,
-        "all_matches_rows": 42,
-    })
-
     result = mundial_services.maintenance_clear({"clear_cache": True})
 
     assert (cache_root / "worldcup_2026.json").exists()
     assert not (cache_root / "players_2026.csv").exists()
     assert not (cache_root / "worldcup_training_prepared.pkl").exists()
-    assert not (models_root / "dummy.json").exists()
-    assert result["training"]["available"] is True
-    assert result["models"]["models"] == []
+    assert (models_root / "dummy.json").exists()
+    assert (models_root / "dummy.pkl").exists()
+    assert "training" not in result
+    assert "models" not in result
 
 
 def test_worldcup_last_30_international_test_includes_worldcup_labels_temporally():
