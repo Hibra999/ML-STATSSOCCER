@@ -2,6 +2,18 @@
 
 ML-STATSSOCCER es una aplicacion local para analisis y prediccion de partidos de futbol con modelos de Machine Learning. La interfaz principal es una aplicacion web que se ejecuta solo en `localhost`.
 
+## Nota Para Agentes En Este VPS
+
+Este VPS tiene recursos limitados. No ejecutes pruebas, entrenamientos, builds pesados ni comandos de verificacion largos en este entorno, aunque existan instrucciones de testing en este README. Haz cambios de codigo con revision estatica ligera y deja que las pruebas se ejecuten en una maquina local con mejor hardware.
+
+Cuando termines cambios en este repositorio, commitea y sube todo a Git:
+
+```bash
+git add <archivos modificados>
+git commit -m "mensaje claro"
+git push origin main
+```
+
 ## Caracteristicas
 
 - Gestion de ligas historicas.
