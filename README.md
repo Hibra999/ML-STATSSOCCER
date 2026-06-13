@@ -6,6 +6,8 @@ ML-STATSSOCCER es una aplicacion local para analisis y prediccion de partidos de
 
 Este VPS tiene recursos limitados. No ejecutes pruebas, entrenamientos, builds pesados ni comandos de verificacion largos en este entorno, aunque existan instrucciones de testing en este README. Haz cambios de codigo con revision estatica ligera y deja que las pruebas se ejecuten en una maquina local con mejor hardware.
 
+Para Mundial, el flujo vigente usa solo el dataset internacional `all_matches.csv` desde 2014. El entrenamiento de boosting queda en perfil de features `balanced` por defecto: maximo 480 columnas, sin `train.csv/test.csv`, sin familia `kaggle_`, con `history` compacto y ventanas 3/5/10. Si un agente toca esta parte, debe conservar ese default salvo que el usuario pida explicitamente modo completo.
+
 Cuando termines cambios en este repositorio, commitea y sube todo a Git:
 
 ```bash

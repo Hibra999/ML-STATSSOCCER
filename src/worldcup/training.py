@@ -136,7 +136,12 @@ WORLD_CUP_MODEL_LABELS = {
     "lightgbm": "LightGBM",
     "xgboost": "XGBoost",
 }
-HISTORY_FEATURE_WINDOWS = (1, 2, 3, 5, 7, 10, 12)
+FEATURE_PROFILE_FULL = "full"
+FEATURE_PROFILE_BALANCED = "balanced"
+DEFAULT_FEATURE_PROFILE = FEATURE_PROFILE_BALANCED
+DEFAULT_MAX_FEATURES = 480
+FEATURE_PROFILES = {FEATURE_PROFILE_FULL, FEATURE_PROFILE_BALANCED}
+HISTORY_FEATURE_WINDOWS = (3, 5, 10)
 HISTORY_REFERENCE_DATE = "2026-06-11"
 WALK_FORWARD_ROOT = Path("storage") / "worldcup" / "walk_forward"
 WALK_FORWARD_MATCHES_FILE = WALK_FORWARD_ROOT / "matches.csv"
@@ -147,7 +152,7 @@ TARGET_WORLDCUP_YEAR = FUTURE_LABEL_EXCLUDED_YEAR
 INTERNATIONAL_TRAINING_START_YEAR = 2014
 INTERNATIONAL_TRAINING_START_DATE = f"{INTERNATIONAL_TRAINING_START_YEAR}-01-01"
 PREPARED_SCHEMA_VERSION = "worldcup_2026_international_since_2014_v3"
-FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v2"
+FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v3_balanced"
 EVAL_STRATEGY_LAST_30 = "last_30_international_test"
 SPLIT_POLICY_VALIDATION_LAST_30 = "temporal_since_2014_validation_last_30_test"
 BENCHMARK_POLICY = EVAL_STRATEGY_LAST_30
@@ -158,6 +163,100 @@ WORLDCUP_XGBOOST_DEFAULTS = {
     "learning_rate": 0.045,
     "lambda_regularization": 3.0,
     "alpha_regularization": 0.25,
+}
+BALANCED_RECENT15_COLUMNS = {
+    "recent15_matches",
+    "recent15_gf_avg",
+    "recent15_ga_avg",
+    "recent15_goal_diff_avg",
+    "recent15_weighted_gf_avg",
+    "recent15_weighted_ga_avg",
+    "recent15_weighted_goal_diff_avg",
+    "recent15_adjusted_gf_avg",
+    "recent15_adjusted_ga_avg",
+    "recent15_adjusted_goal_diff_avg",
+    "recent15_points_avg",
+    "recent15_weighted_points_avg",
+    "recent15_win_rate",
+    "recent15_draw_rate",
+    "recent15_loss_rate",
+    "recent15_official_matches",
+    "recent15_official_gf_avg",
+    "recent15_official_ga_avg",
+    "recent15_opponent_rating_avg",
+    "recent15_weighted_opponent_rating_avg",
+    "recent15_days_since_last_match",
+    "recent15_goal_total_avg",
+    "recent15_over25_rate",
+    "recent15_btts_rate",
+}
+BALANCED_RECENT15_SCOPED_COLUMNS = {
+    "recent15_matches",
+    "recent15_goal_diff_avg",
+    "recent15_weighted_goal_diff_avg",
+    "recent15_adjusted_goal_diff_avg",
+    "recent15_points_avg",
+    "recent15_weighted_points_avg",
+    "recent15_win_rate",
+    "recent15_opponent_rating_avg",
+    "recent15_days_since_last_match",
+}
+BALANCED_HISTORY_KEY_SUFFIXES = (
+    "_points_ppg",
+    "_goals_for_avg",
+    "_goals_against_avg",
+    "_goal_diff_avg",
+    "_win_rate",
+    "_draw_rate",
+    "_loss_rate",
+    "_non_loss_rate",
+    "_over25_rate",
+    "_under25_rate",
+    "_btts_rate",
+    "_clean_sheet_rate",
+    "_scoring_rate",
+    "_weighted_points",
+    "_high_scoring_rate",
+    "_low_scoring_rate",
+)
+BALANCED_HISTORY_SCOPED_SUFFIXES = (
+    "_points_ppg",
+    "_goal_diff_avg",
+    "_win_rate",
+    "_goals_for_avg",
+    "_goals_against_avg",
+)
+BALANCED_HISTORY_EXCLUDED_TOKENS = ("skew", "kurtosis")
+BALANCED_FEATURE_FAMILY_CAPS = {
+    "history": 140,
+    "api_football": 70,
+    "recent15": 55,
+    "h2h": 35,
+    "xi": 45,
+    "kaggle": 0,
+}
+BALANCED_CORE_FAMILIES = {
+    "rating",
+    "attack",
+    "defense",
+    "matches",
+    "home",
+    "away",
+    "host",
+    "poisson",
+    "prob",
+    "model",
+    "market",
+    "model_vs_market",
+    "market_vs_model",
+    "model_market",
+    "shrinkage",
+    "dc",
+    "total",
+    "goal",
+    "fixture",
+    "stage",
+    "venue",
 }
 SAMPLE_WEIGHT_POLICY = {
     "worldcup": 1.65,
@@ -342,6 +441,10 @@ def training_options() -> Dict[str, Any]:
         "targets": [
             {"key": "dual_markets", "label": "1X2 + U/O 0.5-3.5 ML"},
         ],
+        "feature_profiles": [
+            {"key": FEATURE_PROFILE_BALANCED, "label": "Balanceado", "max_features": DEFAULT_MAX_FEATURES},
+            {"key": FEATURE_PROFILE_FULL, "label": "Completo", "max_features": 0},
+        ],
         "hardware": detect_hardware(),
         "defaults": default_training_payload(),
     }
@@ -485,6 +588,8 @@ def default_training_payload() -> Dict[str, Any]:
         "model_type": "xgboost",
         "training_target": "result",
         "market_mode": "dual_markets",
+        "feature_profile": DEFAULT_FEATURE_PROFILE,
+        "max_features": DEFAULT_MAX_FEATURES,
         "device": "auto",
         "n_jobs": -1,
         "tuning_enabled": False,
@@ -495,6 +600,23 @@ def default_training_payload() -> Dict[str, Any]:
         "tune_params": "all",
         **worldcup_model_defaults("xgboost"),
     }
+
+
+def normalize_feature_profile(value: Any) -> str:
+    text = str(value or DEFAULT_FEATURE_PROFILE).strip().lower()
+    return text if text in FEATURE_PROFILES else DEFAULT_FEATURE_PROFILE
+
+
+def normalize_max_features(value: Any, feature_profile: str = DEFAULT_FEATURE_PROFILE) -> int:
+    if normalize_feature_profile(feature_profile) == FEATURE_PROFILE_FULL:
+        return 0
+    if value in {None, ""}:
+        return DEFAULT_MAX_FEATURES
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_FEATURES
+    return max(120, min(number, 1200))
 
 
 def worldcup_model_defaults(model_key: str) -> Dict[str, Any]:
@@ -707,6 +829,8 @@ def train_single_hybrid_model(
     train_config = training_config(payload)
     model_id = train_config["model_id"]
     label = market_label or market_label_for_progress(train_config["training_target"])
+    feature_profile = train_config["feature_profile"]
+    max_features = int(train_config["max_features"])
     single_total_steps = 7
     emit_training_progress(progress_callback, "loading", 1, single_total_steps, f"Cargando artifact/contexto {label}", market=label, model_id=model_id)
     shared_context = shared_context or {}
@@ -805,6 +929,7 @@ def train_single_hybrid_model(
             recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
             max_goals=int(payload.get("max_goals", 10) or 10),
+            feature_profile=feature_profile,
             target=effective_target,
             feature_cache=feature_cache,
             progress_callback=progress_callback,
@@ -835,6 +960,7 @@ def train_single_hybrid_model(
             recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
             max_goals=int(payload.get("max_goals", 10) or 10),
+            feature_profile=feature_profile,
             target=effective_target,
             feature_cache=feature_cache,
             progress_callback=progress_callback,
@@ -869,6 +995,7 @@ def train_single_hybrid_model(
             recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
             max_goals=int(payload.get("max_goals", 10) or 10),
+            feature_profile=feature_profile,
             target=effective_target,
             feature_cache=feature_cache,
             progress_callback=progress_callback,
@@ -900,6 +1027,7 @@ def train_single_hybrid_model(
                 recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
                 host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
                 max_goals=int(payload.get("max_goals", 10) or 10),
+                feature_profile=feature_profile,
                 target=effective_target,
                 feature_cache=feature_cache,
                 progress_callback=progress_callback,
@@ -930,6 +1058,7 @@ def train_single_hybrid_model(
             recency_weight=float(payload.get("recency_weight", 0.35) or 0.35),
             host_advantage=float(payload.get("host_advantage", 45.0) or 45.0),
             max_goals=int(payload.get("max_goals", 10) or 10),
+            feature_profile=feature_profile,
             target=effective_target,
             feature_cache=feature_cache,
             progress_callback=progress_callback,
@@ -940,6 +1069,32 @@ def train_single_hybrid_model(
             progress_every=eval_progress_every,
         )
         emit_training_progress(progress_callback, "features_eval", 6, single_total_steps, f"Features eval {label} listas", market=label, model_id=model_id, rows=int(x_eval.shape[0]), features=int(x_eval.shape[1]), progress_every=eval_progress_every, feature_cache=feature_cache.summary())
+
+    feature_selection = select_feature_columns_for_profile(
+        feature_columns=feature_columns,
+        x_train=x_train,
+        feature_profile=feature_profile,
+        max_features=max_features,
+    )
+    feature_columns = list(feature_selection["feature_columns"])
+    x_train = align_matrix_to_feature_columns(x_train, feature_columns)
+    x_eval = align_matrix_to_feature_columns(x_eval, feature_columns)
+    if isinstance(x_validation, pd.DataFrame) and not x_validation.empty:
+        x_validation = align_matrix_to_feature_columns(x_validation, feature_columns)
+    emit_training_progress(
+        progress_callback,
+        "features_select",
+        6,
+        single_total_steps,
+        f"Features optimizadas {label}",
+        market=label,
+        model_id=model_id,
+        features=int(len(feature_columns)),
+        original_features=int(feature_selection.get("original_feature_count", len(feature_columns))),
+        dropped_features=int(feature_selection.get("dropped_feature_count", 0)),
+        feature_profile=feature_profile,
+        max_features=max_features,
+    )
 
     if x_train.empty or pd.Series(y_train).dropna().empty:
         raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
@@ -1073,6 +1228,9 @@ def train_single_hybrid_model(
         "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
         "model_id": model_id,
         "model_name": train_config["model_name"],
+        "feature_profile": feature_profile,
+        "max_features": max_features,
+        "feature_selection": feature_selection,
         "hidden_from_catalog": bool(payload.get("hidden_from_catalog", False)),
         "model_params": train_config["params"],
         "tuning": tuned,
@@ -1081,7 +1239,7 @@ def train_single_hybrid_model(
         "hardware": hardware,
         "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *normalized.get("api_football_warnings", []), *fit_result.get("warnings", [])] if warning]),
         "top_features": top_feature_importances(clf, feature_columns),
-        "feature_inventory": feature_inventory_payload(feature_columns, x_train=x_fit_final, x_eval=x_eval),
+        "feature_inventory": feature_inventory_payload(feature_columns, x_train=x_fit_final, x_eval=x_eval, feature_selection=feature_selection),
         "feature_cache": feature_cache.summary(),
         "walk_forward_mode": walk_forward_mode,
         "walk_forward_summary": walk_forward_summary,
@@ -1119,6 +1277,9 @@ def train_single_hybrid_model(
         "requested_target": train_config["training_target"],
         "model_id": model_id,
         "model_type": train_config["model_type"],
+        "feature_profile": feature_profile,
+        "max_features": max_features,
+        "feature_selection": feature_selection,
         "hardware": hardware,
         "tuning": tuned,
         "tuning_trace": tuning_trace(tuned),
@@ -1293,6 +1454,9 @@ def train_dual_market_model(
         "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
         "model_id": bundle_id,
         "model_name": bundle_name,
+        "feature_profile": result_record.get("feature_profile", train_config.get("feature_profile", DEFAULT_FEATURE_PROFILE)),
+        "max_features": int(result_record.get("max_features", train_config.get("max_features", DEFAULT_MAX_FEATURES)) or 0),
+        "feature_selection": result_record.get("feature_selection", {}),
         "model_params": train_config["params"],
         "tuning": result_record.get("tuning", {}),
         "tuning_trace": bundle_tuning_trace(market_results),
@@ -1342,6 +1506,9 @@ def train_dual_market_model(
         "requested_target": "dual_markets",
         "model_id": bundle_id,
         "model_type": train_config["model_type"],
+        "feature_profile": bundle_record["feature_profile"],
+        "max_features": bundle_record["max_features"],
+        "feature_selection": bundle_record["feature_selection"],
         "hardware": bundle_record["hardware"],
         "tuning": bundle_record["tuning"],
         "tuning_trace": bundle_record["tuning_trace"],
@@ -2668,10 +2835,12 @@ def feature_matrix_cache_key(
         recency_weight: float,
         host_advantage: float,
         max_goals: int,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> Tuple[Any, ...]:
     api_football = api_football or {}
     return (
         FEATURE_STORE_SCHEMA_VERSION,
+        normalize_feature_profile(feature_profile),
         feature_rows_signature(rows),
         worldcup_model_fingerprint(base_model),
         dataframe_fingerprint(history_df),
@@ -2888,6 +3057,7 @@ def build_training_matrix(
         recency_weight: float = 0.35,
         host_advantage: float = 45.0,
         max_goals: int = 10,
+        feature_profile: str = FEATURE_PROFILE_FULL,
         feature_cache: Optional[WorldCupFeatureBuildCache] = None,
         progress_callback=None,
         progress_stage: str = "",
@@ -2918,6 +3088,7 @@ def build_training_matrix(
     if static_model is None and history_df is None:
         static_model = WorldCupModel.from_history(pd.DataFrame(), teams=working_teams)
     feature_cache = feature_cache or WorldCupFeatureBuildCache()
+    feature_profile = normalize_feature_profile(feature_profile)
     matrix_key = feature_matrix_cache_key(
         rows=working,
         base_model=static_model,
@@ -2935,6 +3106,7 @@ def build_training_matrix(
         recency_weight=recency_weight,
         host_advantage=host_advantage,
         max_goals=max_goals,
+        feature_profile=feature_profile,
     )
     cached_x = feature_cache.matrices.get(matrix_key)
     if cached_x is not None:
@@ -3074,7 +3246,7 @@ def build_training_matrix(
             "qualifier": cached_team_feature_lookup(feature_cache, row_qualifier_features),
             "api_football": cached_team_feature_lookup(feature_cache, row_api_football_features),
             "recent15": cached_team_feature_lookup(feature_cache, row_recent15_table),
-            "kaggle": cached_team_feature_lookup(
+            "kaggle": None if feature_profile == FEATURE_PROFILE_BALANCED else cached_team_feature_lookup(
                 feature_cache,
                 feature_cache.team_features_asof[team_features_key],
                 limit=24,
@@ -3103,6 +3275,7 @@ def build_training_matrix(
                 fixture_context=row,
                 dc_rho=dc_rho,
                 feature_lookups=row_feature_lookups,
+                feature_profile=feature_profile,
             )
         )
         now = time.monotonic()
@@ -3345,17 +3518,158 @@ def feature_float(value: Any, missing_default: float = 0.0) -> float:
         return float("nan")
 
 
+def balanced_history_column(column: Any) -> bool:
+    safe = normalize_column(column)
+    if not safe or any(token in safe for token in BALANCED_HISTORY_EXCLUDED_TOKENS):
+        return False
+    if safe in {
+        "matches_total",
+        "days_since_last_match",
+        "recent_match_volume_365d",
+        "recent_match_volume_730d",
+        "recent_match_volume_1095d",
+        "rest_days_avg",
+        "rest_days_std",
+        "rest_days_last",
+        "last_result_points",
+        "last_goal_diff",
+        "last_goals_for",
+        "last_goals_against",
+    }:
+        return True
+    if safe.startswith(("all_", "last_3_", "last_5_", "last_10_")):
+        return safe.endswith(BALANCED_HISTORY_KEY_SUFFIXES)
+    if safe.startswith(("all_trend_", "last_10_trend_", "last_5_trend_")):
+        return True
+    if safe in {
+        "trend_points_ppg_3_vs_10",
+        "trend_goal_diff_3_vs_10",
+        "trend_win_rate_3_vs_10",
+        "trend_clean_sheet_3_vs_10",
+        "trend_over25_3_vs_10",
+        "trend_btts_3_vs_10",
+        "trend_under25_3_vs_10",
+        "volatility_goal_diff_short_vs_long",
+        "volatility_points_short_vs_long",
+        "volatility_goals_for_short_vs_long",
+        "volatility_goals_against_short_vs_long",
+        "form_reversion_points",
+        "form_reversion_goal_diff",
+        "weighted_points_short_vs_long",
+        "scoring_trend_3_vs_10",
+    }:
+        return True
+    return False
+
+
+def balanced_ranked_columns(columns: Iterable[Any], cap: int) -> List[Any]:
+    preferred_tokens = (
+        "rating",
+        "rank",
+        "elo",
+        "points",
+        "goal",
+        "xg",
+        "win",
+        "draw",
+        "loss",
+        "over",
+        "under",
+        "btts",
+        "clean",
+        "days",
+        "injur",
+        "lineup",
+        "odd",
+        "prob",
+    )
+    excluded_tokens = ("id", "fixture", "timestamp", "season", "year", "name")
+    ranked = []
+    for index, column in enumerate(columns):
+        safe = normalize_column(column)
+        if not safe or any(token in safe for token in BALANCED_HISTORY_EXCLUDED_TOKENS):
+            continue
+        excluded_penalty = 1 if any(token in safe for token in excluded_tokens) else 0
+        preferred = 0 if any(token in safe for token in preferred_tokens) else 1
+        ranked.append((excluded_penalty, preferred, index, column))
+    return [item[-1] for item in sorted(ranked)[:cap]]
+
+
+def compact_lookup_columns(columns: Iterable[Any], prefix: str, feature_profile: str) -> List[Any]:
+    column_list = [] if columns is None else list(columns)
+    if normalize_feature_profile(feature_profile) != FEATURE_PROFILE_BALANCED:
+        return column_list
+    normalized_prefix = str(prefix or "").strip().lower()
+    if normalized_prefix == "kaggle":
+        return []
+    if normalized_prefix == "history":
+        return [column for column in column_list if balanced_history_column(column)]
+    if normalized_prefix == "recent15":
+        return [column for column in column_list if normalize_column(column) in BALANCED_RECENT15_COLUMNS]
+    if normalized_prefix == "api_football":
+        return balanced_ranked_columns(column_list, BALANCED_FEATURE_FAMILY_CAPS["api_football"])
+    if normalized_prefix == "xi":
+        return balanced_ranked_columns(column_list, BALANCED_FEATURE_FAMILY_CAPS["xi"])
+    if normalized_prefix == "qualifier":
+        return balanced_ranked_columns(column_list, 60)
+    if normalized_prefix == "h2h":
+        return balanced_ranked_columns(column_list, BALANCED_FEATURE_FAMILY_CAPS["h2h"])
+    return column_list
+
+
+def team_feature_scopes(prefix: str, column: Any, feature_profile: str) -> Tuple[str, ...]:
+    if normalize_feature_profile(feature_profile) != FEATURE_PROFILE_BALANCED:
+        return ("home", "away", "diff")
+    safe = normalize_column(column)
+    normalized_prefix = str(prefix or "").strip().lower()
+    if normalized_prefix == "recent15":
+        if safe in BALANCED_RECENT15_SCOPED_COLUMNS:
+            return ("home", "away", "diff")
+        return ("diff",)
+    if normalized_prefix == "history":
+        if safe in {"matches_total", "days_since_last_match", "recent_match_volume_365d"}:
+            return ("home", "away", "diff")
+        if safe.endswith(BALANCED_HISTORY_SCOPED_SUFFIXES):
+            return ("home", "away", "diff")
+        return ("diff",)
+    if normalized_prefix in {"api_football", "qualifier", "xi"}:
+        return ("diff",)
+    if normalized_prefix == "kaggle":
+        return ()
+    return ("home", "away", "diff")
+
+
+def write_team_scoped_features(
+        row: Dict[str, float],
+        prefix: str,
+        safe: str,
+        home_value: float,
+        away_value: float,
+        scopes: Tuple[str, ...],
+) -> None:
+    if not scopes:
+        return
+    key = f"{prefix}_{safe}" if prefix else safe
+    if "home" in scopes:
+        row[f"{key}_home"] = home_value
+    if "away" in scopes:
+        row[f"{key}_away"] = away_value
+    if "diff" in scopes:
+        row[f"{key}_diff"] = home_value - away_value
+
+
 def merge_qualifier_feature_lookup(
         row: Dict[str, float],
         lookup: Optional[Dict[str, Any]],
         home_key: str,
         away_key: str,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> None:
     row["qualifier_context_available"] = 0.0
     if not lookup:
         return
     rows = lookup.get("rows", {})
-    columns = lookup.get("columns", [])
+    columns = compact_lookup_columns(lookup.get("columns", []), "qualifier", feature_profile)
     home_features = rows.get(home_key)
     away_features = rows.get(away_key)
     if home_features is not None or away_features is not None:
@@ -3364,9 +3678,7 @@ def merge_qualifier_feature_lookup(
         home_value = feature_float(home_features.get(column), 0.0) if home_features is not None else 0.0
         away_value = feature_float(away_features.get(column), 0.0) if away_features is not None else 0.0
         safe = normalize_column(column)
-        row[f"{safe}_home"] = home_value
-        row[f"{safe}_away"] = away_value
-        row[f"{safe}_diff"] = home_value - away_value
+        write_team_scoped_features(row, "", safe, home_value, away_value, team_feature_scopes("qualifier", column, feature_profile))
 
 
 def merge_team_feature_lookup(
@@ -3375,20 +3687,19 @@ def merge_team_feature_lookup(
         home_key: str,
         away_key: str,
         prefix: str,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> None:
     if not lookup:
         return
     rows = lookup.get("rows", {})
-    columns = lookup.get("columns", [])
+    columns = compact_lookup_columns(lookup.get("columns", []), prefix, feature_profile)
     home_features = rows.get(home_key)
     away_features = rows.get(away_key)
     for column in columns:
         home_value = feature_float(home_features.get(column), 0.0) if home_features is not None else 0.0
         away_value = feature_float(away_features.get(column), 0.0) if away_features is not None else 0.0
         safe = normalize_column(column)
-        row[f"{prefix}_{safe}_home"] = home_value
-        row[f"{prefix}_{safe}_away"] = away_value
-        row[f"{prefix}_{safe}_diff"] = home_value - away_value
+        write_team_scoped_features(row, prefix, safe, home_value, away_value, team_feature_scopes(prefix, column, feature_profile))
 
 
 def merge_recent15_feature_lookup(
@@ -3396,11 +3707,12 @@ def merge_recent15_feature_lookup(
         lookup: Optional[Dict[str, Any]],
         home_key: str,
         away_key: str,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> None:
     if not lookup:
         return
     rows = lookup.get("rows", {})
-    columns = lookup.get("columns", [])
+    columns = compact_lookup_columns(lookup.get("columns", []), "recent15", feature_profile)
     home_features = rows.get(home_key)
     away_features = rows.get(away_key)
     for column in columns:
@@ -3408,9 +3720,7 @@ def merge_recent15_feature_lookup(
         away_value = feature_float(away_features.get(column), 0.0) if away_features is not None else 0.0
         safe = normalize_column(column)
         key = safe if safe.startswith("recent15_") else f"recent15_{safe}"
-        row[f"{key}_home"] = home_value
-        row[f"{key}_away"] = away_value
-        row[f"{key}_diff"] = home_value - away_value
+        write_team_scoped_features(row, "", key, home_value, away_value, team_feature_scopes("recent15", column, feature_profile))
 
 
 def recent15_context_available_from_lookup(
@@ -3433,13 +3743,14 @@ def merge_matchup_feature_lookup(
         lookup: Optional[Dict[str, Any]],
         home_key: str,
         away_key: str,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> None:
     if not lookup:
         return
     record = lookup.get("rows", {}).get((home_key, away_key))
     if not record:
         return
-    for column in lookup.get("columns", []):
+    for column in compact_lookup_columns(lookup.get("columns", []), "h2h", feature_profile):
         value = record.get(column)
         if isinstance(value, (int, float, np.integer, np.floating)) and not pd.isna(value):
             row[f"h2h_{normalize_column(column)}"] = float(value)
@@ -3452,11 +3763,12 @@ def merge_fixture_feature_lookup(
         away_key: str,
         fixture_id: Optional[Any],
         prefix: str,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> None:
     if not lookup or fixture_id in {"", None}:
         return
     rows = lookup.get("rows", {})
-    columns = lookup.get("columns", [])
+    columns = compact_lookup_columns(lookup.get("columns", []), prefix, feature_profile)
     fixture_key = str(fixture_id)
     if fixture_key not in lookup.get("fixtures", set()):
         return
@@ -3466,9 +3778,7 @@ def merge_fixture_feature_lookup(
         home_value = feature_float(home_features.get(column), 0.0) if home_features is not None else 0.0
         away_value = feature_float(away_features.get(column), 0.0) if away_features is not None else 0.0
         safe = normalize_column(column)
-        row[f"{prefix}_{safe}_home"] = home_value
-        row[f"{prefix}_{safe}_away"] = away_value
-        row[f"{prefix}_{safe}_diff"] = home_value - away_value
+        write_team_scoped_features(row, prefix, safe, home_value, away_value, team_feature_scopes(prefix, column, feature_profile))
 
 
 def match_feature_row(
@@ -3490,7 +3800,9 @@ def match_feature_row(
         market_lookup: Optional[Dict[Tuple[str, str], pd.DataFrame]] = None,
         feature_lookups: Optional[Dict[str, Any]] = None,
         dc_rho: float = 0.0,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> Dict[str, float]:
+    feature_profile = normalize_feature_profile(feature_profile)
     home_key = normalize_team_key(home)
     away_key = normalize_team_key(away)
     recent15_lookup = feature_lookups.get("recent15") if feature_lookups else None
@@ -3557,29 +3869,30 @@ def match_feature_row(
         model_totals=total_line_probabilities_from_probs(poisson),
     ))
     if feature_lookups is not None:
-        merge_qualifier_feature_lookup(row, feature_lookups.get("qualifier"), home_key, away_key)
-        merge_team_feature_lookup(row, feature_lookups.get("api_football"), home_key, away_key, prefix="api_football")
-        merge_recent15_feature_lookup(row, feature_lookups.get("recent15"), home_key, away_key)
+        merge_qualifier_feature_lookup(row, feature_lookups.get("qualifier"), home_key, away_key, feature_profile=feature_profile)
+        merge_team_feature_lookup(row, feature_lookups.get("api_football"), home_key, away_key, prefix="api_football", feature_profile=feature_profile)
+        merge_recent15_feature_lookup(row, feature_lookups.get("recent15"), home_key, away_key, feature_profile=feature_profile)
     else:
-        merge_qualifier_feature_block(row, qualifier_features if qualifier_features is not None else pd.DataFrame(), home, away)
-        merge_team_feature_block(row, api_football_features if api_football_features is not None else pd.DataFrame(), home, away, prefix="api_football")
-        merge_recent15_feature_block(row, recent15_features if recent15_features is not None else pd.DataFrame(), home, away)
+        merge_qualifier_feature_block(row, qualifier_features if qualifier_features is not None else pd.DataFrame(), home, away, feature_profile=feature_profile)
+        merge_team_feature_block(row, api_football_features if api_football_features is not None else pd.DataFrame(), home, away, prefix="api_football", feature_profile=feature_profile)
+        merge_recent15_feature_block(row, recent15_features if recent15_features is not None else pd.DataFrame(), home, away, feature_profile=feature_profile)
     row.update(fixture_context_features(fixture_context or {}, home=home, away=away, fixture_id=fixture_id, match_date=match_date, match_year=match_year))
     if feature_lookups is not None:
-        merge_team_feature_lookup(row, feature_lookups.get("kaggle"), home_key, away_key, prefix="kaggle")
-        merge_team_feature_lookup(row, feature_lookups.get("history"), home_key, away_key, prefix="history")
-        merge_matchup_feature_lookup(row, feature_lookups.get("matchup"), home_key, away_key)
-        merge_fixture_feature_lookup(row, feature_lookups.get("fixture"), home_key, away_key, fixture_id=fixture_id, prefix="xi")
+        merge_team_feature_lookup(row, feature_lookups.get("kaggle"), home_key, away_key, prefix="kaggle", feature_profile=feature_profile)
+        merge_team_feature_lookup(row, feature_lookups.get("history"), home_key, away_key, prefix="history", feature_profile=feature_profile)
+        merge_matchup_feature_lookup(row, feature_lookups.get("matchup"), home_key, away_key, feature_profile=feature_profile)
+        merge_fixture_feature_lookup(row, feature_lookups.get("fixture"), home_key, away_key, fixture_id=fixture_id, prefix="xi", feature_profile=feature_profile)
     else:
-        merge_team_feature_block(row, team_features, home, away, prefix="kaggle", limit=24)
+        merge_team_feature_block(row, team_features, home, away, prefix="kaggle", limit=24, feature_profile=feature_profile)
         merge_team_feature_block(
             row,
             history_team_features if history_team_features is not None else pd.DataFrame(),
             home,
             away,
             prefix="history",
+            feature_profile=feature_profile,
         )
-        merge_matchup_feature_block(row, matchup_features if matchup_features is not None else pd.DataFrame(), home, away)
+        merge_matchup_feature_block(row, matchup_features if matchup_features is not None else pd.DataFrame(), home, away, feature_profile=feature_profile)
         merge_fixture_feature_block(
             row,
             fixture_feature_rows if fixture_feature_rows is not None else pd.DataFrame(),
@@ -3587,6 +3900,7 @@ def match_feature_row(
             away,
             fixture_id=fixture_id,
             prefix="xi",
+            feature_profile=feature_profile,
         )
     return row
 
@@ -3675,6 +3989,7 @@ def merge_qualifier_feature_block(
         features: pd.DataFrame,
         home: str,
         away: str,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> None:
     row["qualifier_context_available"] = 0.0
     if features.empty or "Team" not in features.columns:
@@ -3684,13 +3999,12 @@ def merge_qualifier_feature_block(
     if not home_features.empty or not away_features.empty:
         row["qualifier_context_available"] = 1.0
     numeric_cols = [column for column in features.columns if column != "Team" and pd.api.types.is_numeric_dtype(features[column])]
+    numeric_cols = compact_lookup_columns(numeric_cols, "qualifier", feature_profile)
     for column in numeric_cols:
         home_value = float(home_features[column].iloc[0]) if not home_features.empty else 0.0
         away_value = float(away_features[column].iloc[0]) if not away_features.empty else 0.0
         safe = normalize_column(column)
-        row[f"{safe}_home"] = home_value
-        row[f"{safe}_away"] = away_value
-        row[f"{safe}_diff"] = home_value - away_value
+        write_team_scoped_features(row, "", safe, home_value, away_value, team_feature_scopes("qualifier", column, feature_profile))
 
 
 def fixture_context_features(
@@ -3766,6 +4080,7 @@ def merge_team_feature_block(
         away: str,
         prefix: str,
         limit: Optional[int] = None,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> None:
     if features.empty or "Team" not in features.columns:
         return
@@ -3774,29 +4089,33 @@ def merge_team_feature_block(
     numeric_cols = [column for column in features.columns if column != "Team" and pd.api.types.is_numeric_dtype(features[column])]
     if limit is not None:
         numeric_cols = numeric_cols[:limit]
+    numeric_cols = compact_lookup_columns(numeric_cols, prefix, feature_profile)
     for column in numeric_cols:
         home_value = float(home_features[column].iloc[0]) if not home_features.empty else 0.0
         away_value = float(away_features[column].iloc[0]) if not away_features.empty else 0.0
         safe = normalize_column(column)
-        row[f"{prefix}_{safe}_home"] = home_value
-        row[f"{prefix}_{safe}_away"] = away_value
-        row[f"{prefix}_{safe}_diff"] = home_value - away_value
+        write_team_scoped_features(row, prefix, safe, home_value, away_value, team_feature_scopes(prefix, column, feature_profile))
 
 
-def merge_recent15_feature_block(row: Dict[str, float], features: pd.DataFrame, home: str, away: str) -> None:
+def merge_recent15_feature_block(
+        row: Dict[str, float],
+        features: pd.DataFrame,
+        home: str,
+        away: str,
+        feature_profile: str = FEATURE_PROFILE_FULL,
+) -> None:
     if features.empty or "Team" not in features.columns:
         return
     home_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(home)]
     away_features = features[features["Team"].map(normalize_team_key) == normalize_team_key(away)]
     numeric_cols = [column for column in features.columns if column != "Team" and pd.api.types.is_numeric_dtype(features[column])]
+    numeric_cols = compact_lookup_columns(numeric_cols, "recent15", feature_profile)
     for column in numeric_cols:
         home_value = float(home_features[column].iloc[0]) if not home_features.empty else 0.0
         away_value = float(away_features[column].iloc[0]) if not away_features.empty else 0.0
         safe = normalize_column(column)
         key = safe if safe.startswith("recent15_") else f"recent15_{safe}"
-        row[f"{key}_home"] = home_value
-        row[f"{key}_away"] = away_value
-        row[f"{key}_diff"] = home_value - away_value
+        write_team_scoped_features(row, "", key, home_value, away_value, team_feature_scopes("recent15", column, feature_profile))
 
 
 def merge_matchup_feature_block(
@@ -3804,6 +4123,7 @@ def merge_matchup_feature_block(
         matchup_features: pd.DataFrame,
         home: str,
         away: str,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> None:
     if matchup_features.empty or not {"HomeKey", "AwayKey"}.issubset(matchup_features.columns):
         return
@@ -3814,8 +4134,11 @@ def merge_matchup_feature_block(
     if match.empty:
         return
     record = match.iloc[0].to_dict()
+    allowed_columns = set(compact_lookup_columns(record.keys(), "h2h", feature_profile))
     for column, value in record.items():
         if column in {"HomeKey", "AwayKey"}:
+            continue
+        if column not in allowed_columns:
             continue
         if isinstance(value, (int, float, np.integer, np.floating)) and not pd.isna(value):
             row[f"h2h_{normalize_column(column)}"] = float(value)
@@ -3828,6 +4151,7 @@ def merge_fixture_feature_block(
         away: str,
         fixture_id: Optional[Any],
         prefix: str,
+        feature_profile: str = FEATURE_PROFILE_FULL,
 ) -> None:
     if fixture_feature_rows.empty or "fixture_id" not in fixture_feature_rows.columns:
         return
@@ -3840,13 +4164,12 @@ def merge_fixture_feature_block(
     home_features = scoped[scoped["Equipo"].map(normalize_team_key) == normalize_team_key(home)]
     away_features = scoped[scoped["Equipo"].map(normalize_team_key) == normalize_team_key(away)]
     numeric_cols = [column for column in scoped.columns if column not in {"fixture_id", "Equipo", "Rival"} and pd.api.types.is_numeric_dtype(scoped[column])]
+    numeric_cols = compact_lookup_columns(numeric_cols, prefix, feature_profile)
     for column in numeric_cols:
         home_value = float(home_features[column].iloc[0]) if not home_features.empty else 0.0
         away_value = float(away_features[column].iloc[0]) if not away_features.empty else 0.0
         safe = normalize_column(column)
-        row[f"{prefix}_{safe}_home"] = home_value
-        row[f"{prefix}_{safe}_away"] = away_value
-        row[f"{prefix}_{safe}_diff"] = home_value - away_value
+        write_team_scoped_features(row, prefix, safe, home_value, away_value, team_feature_scopes(prefix, column, feature_profile))
 
 
 def build_history_feature_table(history_df: pd.DataFrame, reference_date: str = HISTORY_REFERENCE_DATE) -> pd.DataFrame:
@@ -4196,12 +4519,15 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     market_mode = normalize_market_mode(raw_market_mode, target)
     default_target = "dual_markets" if market_mode == "dual_markets" else target
     model_id = normalize_worldcup_model_id(payload.get("model_id") or default_model_id(model_key, default_target))
+    feature_profile = normalize_feature_profile(payload.get("feature_profile", DEFAULT_FEATURE_PROFILE))
     return {
         "model_id": model_id,
         "model_name": str(payload.get("model_name") or model_id).strip() or model_id,
         "model_type": model_key,
         "training_target": target,
         "market_mode": market_mode,
+        "feature_profile": feature_profile,
+        "max_features": normalize_max_features(payload.get("max_features", DEFAULT_MAX_FEATURES), feature_profile),
         "params": params,
         "seed": int(float(payload.get("seed", 2026) or 2026)),
         "n_jobs": n_jobs,
@@ -5045,6 +5371,139 @@ def metric_score(y_true, y_pred, metric: str) -> float:
     return float(f1_score(y_true, y_pred, average="macro", zero_division=0.0))
 
 
+def feature_profile_family_cap(family: str, max_features: int) -> int:
+    if family in BALANCED_FEATURE_FAMILY_CAPS:
+        cap = BALANCED_FEATURE_FAMILY_CAPS[family]
+        return max(0, min(cap, max_features))
+    return max_features
+
+
+def feature_selection_priority(column: str) -> int:
+    family = feature_family(column)
+    if column in BASE_FEATURE_COLUMNS:
+        return 0
+    if family in BALANCED_CORE_FAMILIES:
+        return 1
+    if family in {"recent15", "history"}:
+        return 2
+    if family in {"api_football", "h2h", "xi"}:
+        return 3
+    if family == "kaggle":
+        return 99
+    return 4
+
+
+def select_feature_columns_for_profile(
+        feature_columns: List[str],
+        x_train: pd.DataFrame,
+        feature_profile: str,
+        max_features: int,
+) -> Dict[str, Any]:
+    original_columns = list(dict.fromkeys(feature_columns or list(x_train.columns)))
+    profile = normalize_feature_profile(feature_profile)
+    limit = normalize_max_features(max_features, profile)
+    original_count = len(original_columns)
+    if profile == FEATURE_PROFILE_FULL or limit <= 0 or original_count <= limit:
+        return {
+            "feature_profile": profile,
+            "max_features": limit,
+            "original_feature_count": original_count,
+            "selected_feature_count": original_count,
+            "dropped_feature_count": 0,
+            "feature_columns": original_columns,
+            "dropped_features": [],
+            "dropped_families": [],
+        }
+    candidates = []
+    for index, column in enumerate(original_columns):
+        family = feature_family(column)
+        series = (
+            pd.to_numeric(x_train[column], errors="coerce").fillna(0.0)
+            if column in x_train.columns
+            else pd.Series(dtype=float)
+        )
+        non_zero_rate = float((series != 0.0).mean()) if not series.empty else 0.0
+        variance = float(series.var(ddof=0)) if not series.empty else 0.0
+        keepable = family != "kaggle" and (column in BASE_FEATURE_COLUMNS or non_zero_rate > 0.0 or variance > 0.0)
+        candidates.append({
+            "column": column,
+            "family": family,
+            "index": index,
+            "priority": feature_selection_priority(column),
+            "non_zero_rate": non_zero_rate,
+            "variance": variance,
+            "keepable": keepable,
+        })
+
+    selected: List[str] = []
+    selected_set = set()
+    family_counts: Dict[str, int] = {}
+
+    def add_candidate(candidate: Dict[str, Any], enforce_cap: bool = True) -> bool:
+        column = str(candidate["column"])
+        if column in selected_set:
+            return False
+        family = str(candidate["family"])
+        cap = feature_profile_family_cap(family, limit)
+        if enforce_cap and family_counts.get(family, 0) >= cap:
+            return False
+        selected.append(column)
+        selected_set.add(column)
+        family_counts[family] = family_counts.get(family, 0) + 1
+        return True
+
+    for candidate in sorted((item for item in candidates if item["column"] in BASE_FEATURE_COLUMNS), key=lambda item: item["index"]):
+        if len(selected) >= limit:
+            break
+        add_candidate(candidate, enforce_cap=False)
+
+    ranked = sorted(
+        [candidate for candidate in candidates if candidate["keepable"] and candidate["column"] not in selected_set],
+        key=lambda item: (
+            item["priority"],
+            -item["non_zero_rate"],
+            -item["variance"],
+            item["index"],
+        ),
+    )
+    for candidate in ranked:
+        if len(selected) >= limit:
+            break
+        add_candidate(candidate, enforce_cap=True)
+    if len(selected) < limit:
+        for candidate in ranked:
+            if len(selected) >= limit:
+                break
+            add_candidate(candidate, enforce_cap=False)
+
+    dropped = [column for column in original_columns if column not in selected_set]
+    dropped_family_counts: Dict[str, int] = {}
+    for column in dropped:
+        family = feature_family(column)
+        dropped_family_counts[family] = dropped_family_counts.get(family, 0) + 1
+    return {
+        "feature_profile": profile,
+        "max_features": limit,
+        "original_feature_count": original_count,
+        "selected_feature_count": len(selected),
+        "dropped_feature_count": len(dropped),
+        "feature_columns": selected,
+        "dropped_features": dropped[:120],
+        "dropped_families": [
+            {"family": family, "count": count}
+            for family, count in sorted(dropped_family_counts.items())
+        ],
+    }
+
+
+def align_matrix_to_feature_columns(x: pd.DataFrame, feature_columns: List[str]) -> pd.DataFrame:
+    working = x.copy()
+    for column in feature_columns:
+        if column not in working.columns:
+            working[column] = 0.0
+    return working[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
+
+
 def top_feature_importances(clf, feature_columns: List[str], limit: int = 12) -> List[Dict[str, Any]]:
     values = None
     if hasattr(clf, "feature_importances_"):
@@ -5067,6 +5526,7 @@ def feature_inventory_payload(
         feature_columns: List[str],
         x_train: Optional[pd.DataFrame] = None,
         x_eval: Optional[pd.DataFrame] = None,
+        feature_selection: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     rows = []
     families: Dict[str, int] = {}
@@ -5084,8 +5544,16 @@ def feature_inventory_payload(
             "eval_null_rate": round(float(eval_series.isna().mean()) if not eval_series.empty else 0.0, 4),
             "train_variance": round(float(train_series.fillna(0.0).var(ddof=0)) if not train_series.empty else 0.0, 8),
         })
+    feature_selection = feature_selection or {}
     return {
         "feature_count": len(feature_columns),
+        "feature_profile": feature_selection.get("feature_profile", FEATURE_PROFILE_FULL),
+        "max_features": int(feature_selection.get("max_features", 0) or 0),
+        "original_feature_count": int(feature_selection.get("original_feature_count", len(feature_columns)) or len(feature_columns)),
+        "selected_feature_count": int(feature_selection.get("selected_feature_count", len(feature_columns)) or len(feature_columns)),
+        "dropped_feature_count": int(feature_selection.get("dropped_feature_count", 0) or 0),
+        "dropped_features": feature_selection.get("dropped_features", []),
+        "dropped_families": feature_selection.get("dropped_families", []),
         "families": [{"family": key, "count": value} for key, value in sorted(families.items())],
         "features": rows,
     }
@@ -5317,6 +5785,7 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
             match_year=2026,
             fixture_context={"FixtureId": fixture_id, "Year": 2026},
             dc_rho=float(record.get("dc_rho", 0.0) or 0.0),
+            feature_profile=normalize_feature_profile(record.get("feature_profile", FEATURE_PROFILE_FULL)),
         )
     ])
     feature_columns = record.get("feature_columns", BASE_FEATURE_COLUMNS)
@@ -5556,6 +6025,8 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "warnings": record.get("warnings", []),
         "hardware": record.get("hardware", result.get("hardware", {})),
         "feature_count": len(record.get("feature_columns", result.get("features", [])) or []),
+        "feature_profile": record.get("feature_profile", result.get("feature_profile", "")),
+        "max_features": int(record.get("max_features", result.get("max_features", 0)) or 0),
         "target_worldcup_year": record.get("target_worldcup_year", result.get("target_worldcup_year", "")),
         "benchmark_worldcup_year": record.get("benchmark_worldcup_year", result.get("benchmark_worldcup_year", result.get("final_test_year", ""))),
         "benchmark_policy": record.get("benchmark_policy", result.get("benchmark_policy", "")),
@@ -6209,6 +6680,9 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "model_type": record.get("model_type", ""),
         "model_label": record.get("model_label", ""),
         "model_params": record.get("model_params", {}),
+        "feature_profile": record.get("feature_profile", FEATURE_PROFILE_FULL),
+        "max_features": int(record.get("max_features", 0) or 0),
+        "feature_selection": record.get("feature_selection", {}),
         "tuning": record.get("tuning", {}),
         "tuning_trace": record.get("tuning_trace", {}),
         "etl_steps": record.get("etl_steps", []),
@@ -6292,6 +6766,9 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "calibration": {},
         "model_type": "",
         "model_label": "",
+        "feature_profile": DEFAULT_FEATURE_PROFILE,
+        "max_features": DEFAULT_MAX_FEATURES,
+        "feature_selection": {},
         "effective_target": "",
         "requested_target": "",
         "eval_strategy": "",

@@ -1099,7 +1099,14 @@ function featureImportanceTable(features) {
 function featureInventoryHtml(inventory) {
   const features = (inventory && inventory.features) || [];
   if (!features.length) return "";
+  const profile = inventory.feature_profile || "";
+  const selected = inventory.selected_feature_count || inventory.feature_count || features.length;
+  const original = inventory.original_feature_count || selected;
+  const dropped = inventory.dropped_feature_count || Math.max(original - selected, 0);
   const families = (inventory.families || []).map((item) => `
+    <span>${escapeHtml(item.family || "")}<b>${escapeHtml(item.count ?? 0)}</b></span>
+  `).join("");
+  const droppedFamilies = (inventory.dropped_families || []).map((item) => `
     <span>${escapeHtml(item.family || "")}<b>${escapeHtml(item.count ?? 0)}</b></span>
   `).join("");
   const rows = features.map((item) => `
@@ -1110,8 +1117,10 @@ function featureInventoryHtml(inventory) {
   `).join("");
   return `
     <section class="market-panel feature-inventory-panel">
-      <header><strong>Inventario completo</strong><small>${escapeHtml(inventory.feature_count || features.length)} features</small></header>
+      <header><strong>Inventario features</strong><small>${escapeHtml(selected)} / ${escapeHtml(original)} features · ${escapeHtml(profile || "full")}</small></header>
+      ${dropped ? `<p class="muted">Descartadas ${escapeHtml(dropped)} columnas antes del boosting.</p>` : ""}
       <div class="feature-family-list">${families}</div>
+      ${droppedFamilies ? `<div class="feature-family-list feature-family-list-muted">${droppedFamilies}</div>` : ""}
       <div class="feature-inventory-list">${rows}</div>
     </section>
   `;
@@ -2315,6 +2324,7 @@ function marketBadgeText(source, fallback) {
 }
 
 function trainingPayload(walkForwardMode = "none") {
+  const defaults = ((state.trainingOptions || {}).defaults || {});
   const payload = {
     ...simulationPayload(),
     model_id: document.getElementById("worldcup-model-id").value || "",
@@ -2322,6 +2332,8 @@ function trainingPayload(walkForwardMode = "none") {
     model_type: document.getElementById("worldcup-model-type").value || "xgboost",
     market_mode: "dual_markets",
     training_target: "result",
+    feature_profile: defaults.feature_profile || "balanced",
+    max_features: Number(defaults.max_features || 480),
     walk_forward_mode: walkForwardMode,
     device: document.getElementById("worldcup-device").value || "auto",
     n_jobs: Number(document.getElementById("worldcup-n-jobs").value || -1),
