@@ -56,6 +56,18 @@ SCORE_MODEL_OPTIONS = [
         "heavy": False,
     },
     {
+        "key": "negative_binomial_mle",
+        "label": "Binomial negativa MLE",
+        "description": "Marginales binomial negativa para goles sobredispersos con dispersion estimada por maxima verosimilitud.",
+        "heavy": False,
+    },
+    {
+        "key": "conway_maxwell_poisson",
+        "label": "Conway-Maxwell Poisson",
+        "description": "Marginales CMP para ajustar sub/sobredispersion respecto a Poisson.",
+        "heavy": False,
+    },
+    {
         "key": "bayesian_hierarchical_poisson",
         "label": "Bayes jerarquico Poisson",
         "description": "Ataque/defensa/localia con priors jerarquicos en PyMC.",
@@ -304,6 +316,10 @@ def fit_score_model_state(
         )
     elif key == "zero_inflated_generalized_poisson":
         state = ScoreModelState(key, label, True, _estimate_zigp_params(rows), fingerprint=fingerprint)
+    elif key == "negative_binomial_mle":
+        state = ScoreModelState(key, label, True, _estimate_negative_binomial_params(rows), fingerprint=fingerprint)
+    elif key == "conway_maxwell_poisson":
+        state = ScoreModelState(key, label, True, _estimate_conway_maxwell_poisson_params(rows), fingerprint=fingerprint)
     elif key == "skellam_margin":
         state = ScoreModelState(key, label, True, _estimate_skellam_params(rows), fingerprint=fingerprint)
     elif key == "copula_weibull_count":
@@ -339,6 +355,10 @@ def score_grid_from_lambdas(state: ScoreModelState | Dict[str, Any], lambda1: fl
         return diagonal_inflate_grid(grid, float(params.get("diagonal_boost", 1.0)))
     if key == "zero_inflated_generalized_poisson":
         return zero_inflated_generalized_poisson_grid(lambda1, lambda2, params, max_goals=max_goals)
+    if key == "negative_binomial_mle":
+        return negative_binomial_score_grid(lambda1, lambda2, params, max_goals=max_goals)
+    if key == "conway_maxwell_poisson":
+        return conway_maxwell_poisson_grid(lambda1, lambda2, params, max_goals=max_goals)
     if key == "skellam_margin":
         return skellam_reweighted_grid(lambda1, lambda2, float(params.get("margin_scale", 1.0)), max_goals=max_goals)
     if key == "copula_weibull_count":
@@ -451,6 +471,46 @@ def generalized_poisson_pmf_vector(rate: float, alpha: float, zero_inflation: fl
             gp = rate * (term ** (goals - 1)) * math.exp(-term) / math.factorial(goals)
         probs[goals] = (1.0 - zero_inflation) * gp
     probs[0] += zero_inflation
+    return _normalize_vector(probs)
+
+
+def negative_binomial_score_grid(lambda1: float, lambda2: float, params: Dict[str, Any], max_goals: int = 10) -> np.ndarray:
+    home = negative_binomial_pmf_vector(lambda1, float(params.get("size_home", params.get("size", 12.0))), max_goals=max_goals)
+    away = negative_binomial_pmf_vector(lambda2, float(params.get("size_away", params.get("size", 12.0))), max_goals=max_goals)
+    return _normalize_grid(np.outer(home, away))
+
+
+def negative_binomial_pmf_vector(rate: float, size: float, max_goals: int = 10) -> np.ndarray:
+    rate = _clamp_rate(rate)
+    size = float(np.clip(size, 0.25, 120.0))
+    probs = np.zeros(int(max_goals) + 1, dtype=float)
+    log_p = math.log(size / (size + rate))
+    log_q = math.log(rate / (size + rate))
+    for goals in range(int(max_goals) + 1):
+        probs[goals] = math.exp(
+            math.lgamma(goals + size)
+            - math.lgamma(size)
+            - math.lgamma(goals + 1)
+            + size * log_p
+            + goals * log_q
+        )
+    probs[-1] += max(0.0, 1.0 - float(probs.sum()))
+    return _normalize_vector(probs)
+
+
+def conway_maxwell_poisson_grid(lambda1: float, lambda2: float, params: Dict[str, Any], max_goals: int = 10) -> np.ndarray:
+    home = conway_maxwell_poisson_pmf_vector(lambda1, float(params.get("nu_home", params.get("nu", 1.0))), max_goals=max_goals)
+    away = conway_maxwell_poisson_pmf_vector(lambda2, float(params.get("nu_away", params.get("nu", 1.0))), max_goals=max_goals)
+    return _normalize_grid(np.outer(home, away))
+
+
+def conway_maxwell_poisson_pmf_vector(rate: float, nu: float, max_goals: int = 10) -> np.ndarray:
+    rate = _clamp_rate(rate)
+    nu = float(np.clip(nu, 0.25, 3.5))
+    goals = np.arange(int(max_goals) + 1, dtype=float)
+    log_probs = goals * math.log(rate) - nu * np.asarray([math.lgamma(int(goal) + 1) for goal in goals], dtype=float)
+    log_probs -= float(log_probs.max())
+    probs = np.exp(log_probs)
     return _normalize_vector(probs)
 
 
@@ -794,6 +854,97 @@ def _estimate_zigp_params(rows: List[Dict[str, Any]]) -> Dict[str, float]:
         "zero_home": float(np.clip(zero_home * 0.2, 0.0, 0.25)),
         "zero_away": float(np.clip(zero_away * 0.2, 0.0, 0.25)),
     }
+
+
+def _estimate_negative_binomial_params(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    try:
+        from scipy import optimize
+
+        def objective(values: np.ndarray) -> float:
+            params = {
+                "size_home": float(math.exp(np.clip(values[0], math.log(0.35), math.log(90.0)))),
+                "size_away": float(math.exp(np.clip(values[1], math.log(0.35), math.log(90.0)))),
+            }
+            total = 0.0
+            for row in rows:
+                grid = negative_binomial_score_grid(row["lambda1"], row["lambda2"], params, max_goals=10)
+                total -= _grid_log_probability(grid, row)
+            return total
+
+        result = optimize.minimize(
+            objective,
+            np.asarray([math.log(12.0), math.log(12.0)]),
+            bounds=[(math.log(0.35), math.log(90.0)), (math.log(0.35), math.log(90.0))],
+            method="L-BFGS-B",
+        )
+        if result.success:
+            return {
+                "size_home": float(math.exp(result.x[0])),
+                "size_away": float(math.exp(result.x[1])),
+            }
+    except Exception:
+        pass
+    return {
+        "size_home": _negative_binomial_size_fallback(rows, "g1", "lambda1"),
+        "size_away": _negative_binomial_size_fallback(rows, "g2", "lambda2"),
+    }
+
+
+def _negative_binomial_size_fallback(rows: List[Dict[str, Any]], goal_key: str, lambda_key: str) -> float:
+    goals = np.asarray([float(row[goal_key]) for row in rows], dtype=float)
+    rates = np.asarray([float(row[lambda_key]) for row in rows], dtype=float)
+    if goals.size <= 1:
+        return 24.0
+    residual = goals - rates
+    variance = float(np.var(residual) + np.mean(rates))
+    mean_rate = float(np.mean(rates))
+    extra_variance = max(variance - mean_rate, 1e-6)
+    size = (mean_rate * mean_rate) / extra_variance
+    return float(np.clip(size, 0.5, 80.0))
+
+
+def _estimate_conway_maxwell_poisson_params(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    try:
+        from scipy import optimize
+
+        def objective(values: np.ndarray) -> float:
+            params = {
+                "nu_home": float(np.clip(values[0], 0.3, 3.0)),
+                "nu_away": float(np.clip(values[1], 0.3, 3.0)),
+            }
+            total = 0.0
+            for row in rows:
+                grid = conway_maxwell_poisson_grid(row["lambda1"], row["lambda2"], params, max_goals=10)
+                total -= _grid_log_probability(grid, row)
+            return total
+
+        result = optimize.minimize(
+            objective,
+            np.asarray([1.0, 1.0]),
+            bounds=[(0.3, 3.0), (0.3, 3.0)],
+            method="L-BFGS-B",
+        )
+        if result.success:
+            return {
+                "nu_home": float(result.x[0]),
+                "nu_away": float(result.x[1]),
+            }
+    except Exception:
+        pass
+    return {
+        "nu_home": _conway_maxwell_nu_fallback(rows, "g1", "lambda1"),
+        "nu_away": _conway_maxwell_nu_fallback(rows, "g2", "lambda2"),
+    }
+
+
+def _conway_maxwell_nu_fallback(rows: List[Dict[str, Any]], goal_key: str, lambda_key: str) -> float:
+    goals = np.asarray([float(row[goal_key]) for row in rows], dtype=float)
+    rates = np.asarray([float(row[lambda_key]) for row in rows], dtype=float)
+    if goals.size <= 1:
+        return 1.0
+    mean_rate = max(float(np.mean(rates)), 1e-6)
+    dispersion = float(np.var(goals - rates) + mean_rate) / mean_rate
+    return float(np.clip(1.0 / max(dispersion, 1e-6), 0.35, 2.5))
 
 
 def _estimate_skellam_params(rows: List[Dict[str, Any]]) -> Dict[str, float]:

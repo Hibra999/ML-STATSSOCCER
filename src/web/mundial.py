@@ -95,6 +95,18 @@ def create_mundial_app() -> FastAPI:
     def predict_upcoming_report(payload: Dict[str, Any] = Body(default={})):
         return _submit("Generando reporte de predicciones Mundial", services.predict_upcoming_report, payload, with_progress=True, lock_key="mundial-report")
 
+    @app.get("/api/mundial/reports/{report_id}/download")
+    def download_report(report_id: str, kind: str = "predictions", format: str = "html"):
+        try:
+            download = services.resolve_report_download(report_id, kind, format)
+            return FileResponse(
+                download["path"],
+                media_type=download["media_type"],
+                filename=download["filename"],
+            )
+        except Exception as exc:
+            return _error(exc)
+
     @app.post("/api/mundial/monte-carlo-matches")
     def monte_carlo_matches(payload: Dict[str, Any] = Body(default={})):
         return _wrap(services.predict_upcoming_monte_carlo, payload)

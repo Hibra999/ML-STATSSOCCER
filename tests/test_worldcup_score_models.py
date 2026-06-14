@@ -15,6 +15,8 @@ def test_score_model_grids_are_normalized_and_non_negative():
         ScoreModelState("bivariate_poisson_mle", "Bivariado", True, {"corr_share": 0.12}),
         ScoreModelState("diagonal_inflated_bivariate_poisson", "Diagonal", True, {"corr_share": 0.08, "diagonal_boost": 1.8}),
         ScoreModelState("zero_inflated_generalized_poisson", "ZIGP", True, {"alpha_home": 0.08, "alpha_away": 0.05, "zero_home": 0.06, "zero_away": 0.04}),
+        ScoreModelState("negative_binomial_mle", "NB", True, {"size_home": 8.0, "size_away": 10.0}),
+        ScoreModelState("conway_maxwell_poisson", "CMP", True, {"nu_home": 0.85, "nu_away": 1.15}),
         ScoreModelState("skellam_margin", "Skellam", True, {"margin_scale": 1.15}),
         ScoreModelState("copula_weibull_count", "Copula", True, {"beta": 1.12, "theta": 0.6}),
     ]

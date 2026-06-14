@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import math
+import csv
 import hashlib
+import html as html_lib
+import io
 import json
+import math
 import os
 import re
 import shutil
@@ -79,6 +82,8 @@ SOTA_SCORE_MODEL_SEQUENCE = [
     "bivariate_poisson_mle",
     "diagonal_inflated_bivariate_poisson",
     "zero_inflated_generalized_poisson",
+    "negative_binomial_mle",
+    "conway_maxwell_poisson",
     "skellam_margin",
     "copula_weibull_count",
 ]
@@ -91,6 +96,8 @@ SOTA_MIN_PERFORMANCE_SAMPLES = 30
 REPORT_TOTAL_GOAL_LINES = (0.5, 1.5, 2.5, 3.5)
 REPORT_SCORE_MATRIX_GOALS = 6
 REPORT_MAX_ITERATIONS = 100_000
+REPORT_DOWNLOAD_KINDS = {"predictions", "backtest"}
+REPORT_DOWNLOAD_FORMATS = {"html", "csv"}
 DEFAULT_CONFIG = {
     "iterations": 5000,
     "seed": 2026,
@@ -976,6 +983,7 @@ def alternatives_benchmark_report(
     fixture_reports = rank_fixture_report_models(fixture_reports, ranked_model_keys)
     for fixture_report, fixture in zip(fixture_reports, fixture_records):
         fixture_report["baseline_poisson"] = poisson_baseline_report_for_fixture(base_model, fixture, config)
+        fixture_report["ensemble"] = backtest_weighted_ensemble_report(fixture_report, backtest_by_key)
         strip_consensus_fields_from_alternative_report(fixture_report)
         fixture_report["warnings"] = fixture_report_warnings(fixture_report)
     ranked_models = benchmark_models_with_backtests(backtests)
@@ -1519,6 +1527,114 @@ def rank_fixture_report_models(fixture_reports: List[Dict[str, Any]], ranked_mod
     return output
 
 
+def backtest_weighted_ensemble_report(fixture_report: Dict[str, Any], backtest_by_key: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    candidates: List[Dict[str, Any]] = []
+    raw_weights: List[float] = []
+    for model in fixture_report.get("models", []) or []:
+        key = str(model.get("model_key") or "")
+        backtest = backtest_by_key.get(key, {})
+        if not model.get("available") or model.get("fallback") or not backtest.get("available"):
+            continue
+        distribution = model.get("score_distribution") or {}
+        matrix = distribution.get("score_matrix")
+        if not matrix:
+            continue
+        grid = normalize_score_grid_array(np.asarray(matrix, dtype=float) / 100.0)
+        weight = backtest_model_weight(backtest)
+        if weight <= 0.0:
+            continue
+        candidates.append({
+            "model": model,
+            "backtest": backtest,
+            "grid": grid,
+            "weight": weight,
+        })
+        raw_weights.append(weight)
+    if not candidates:
+        return {
+            "available": False,
+            "model_key": "backtest_weighted_ensemble",
+            "model_label": "Ensemble ponderado",
+            "reason": "Sin modelos disponibles con backtest valido para ponderar.",
+            "weights": [],
+        }
+    total_weight = max(float(sum(raw_weights)), 1e-12)
+    normalized_weights = [weight / total_weight for weight in raw_weights]
+    rows = min(item["grid"].shape[0] for item in candidates)
+    cols = min(item["grid"].shape[1] for item in candidates)
+    stacked = np.stack([item["grid"][:rows, :cols] for item in candidates], axis=0)
+    weight_array = np.asarray(normalized_weights, dtype=float).reshape((-1, 1, 1))
+    ensemble_grid = normalize_score_grid_array(np.sum(stacked * weight_array, axis=0))
+    lambda_home_values: List[float] = []
+    lambda_away_values: List[float] = []
+    for item in candidates:
+        distribution = (item["model"].get("score_distribution") or {})
+        lambdas = distribution.get("lambdas") or item["model"].get("expected_goals") or {}
+        lambda_home_values.append(float_or_zero(lambdas.get("home")))
+        lambda_away_values.append(float_or_zero(lambdas.get("away")))
+    lambda_home = float(np.average(lambda_home_values, weights=normalized_weights)) if lambda_home_values else 0.0
+    lambda_away = float(np.average(lambda_away_values, weights=normalized_weights)) if lambda_away_values else 0.0
+    distribution = score_distribution_payload(ensemble_grid, lambda_home=lambda_home, lambda_away=lambda_away)
+    probabilities = distribution.get("probabilities") or {}
+    outcome = outcome_decision(probabilities)
+    totals = total_decisions(probabilities)
+    fixture = fixture_report.get("fixture", {})
+    top_scores = distribution.get("top_scores", [])
+    top_score = str((top_scores[0] or {}).get("score") or "") if top_scores else ""
+    weights = []
+    for item, weight in zip(candidates, normalized_weights):
+        backtest = item["backtest"]
+        weights.append({
+            "model_key": item["model"].get("model_key", ""),
+            "model_label": item["model"].get("model_label", ""),
+            "weight": round(float(weight), 6),
+            "rank": backtest.get("rank", ""),
+            "log_loss": backtest.get("log_loss", ""),
+            "brier": backtest.get("brier", ""),
+            "pick_accuracy": backtest.get("pick_accuracy", ""),
+            "score_accuracy": backtest.get("score_accuracy", ""),
+        })
+    return {
+        "available": True,
+        "model_key": "backtest_weighted_ensemble",
+        "model_label": "Ensemble ponderado por backtest",
+        "source": "Matriz ponderada por desempeno walk-forward 2026",
+        "model_count": len(candidates),
+        "decision": {
+            "outcome": outcome,
+            "label": outcome_label(outcome),
+            "team": outcome_team(outcome, fixture),
+        },
+        "totals": totals,
+        "probabilities": probabilities,
+        "expected_goals": {
+            "home": round(lambda_home, 3),
+            "away": round(lambda_away, 3),
+            "rounded_home": round_half_up_int(lambda_home),
+            "rounded_away": round_half_up_int(lambda_away),
+        },
+        "top_score": top_score,
+        "modal_score": top_score,
+        "score_distribution": distribution,
+        "top_scores": top_scores,
+        "heatmap": distribution.get("heatmap", {}),
+        "weights": weights,
+    }
+
+
+def backtest_model_weight(backtest: Dict[str, Any]) -> float:
+    if not backtest.get("available"):
+        return 0.0
+    log_loss = max(float_or_zero(backtest.get("log_loss")), 0.05)
+    brier = max(float_or_zero(backtest.get("brier")), 0.05)
+    pick_accuracy = float_or_zero(backtest.get("pick_accuracy"))
+    score_accuracy = float_or_zero(backtest.get("score_accuracy"))
+    vs_poisson = backtest.get("vs_poisson") or {}
+    metric_wins = float_or_zero(vs_poisson.get("metric_wins")) / max(float_or_zero(vs_poisson.get("metric_total")), 1.0)
+    raw = (1.0 / log_loss) * (1.0 / math.sqrt(brier)) * (0.5 + pick_accuracy) * (0.5 + score_accuracy) * (1.0 + metric_wins)
+    return float(max(raw, 0.0))
+
+
 def benchmark_models_with_backtests(backtests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     catalog_by_key = {str(item.get("key") or ""): item for item in benchmark_score_model_catalog()}
     output = []
@@ -1801,6 +1917,40 @@ def alternatives_benchmark_table_rows(
     rows: List[Dict[str, Any]] = []
     for report in fixture_reports:
         fixture = report.get("fixture", {})
+        ensemble = report.get("ensemble") or {}
+        if ensemble.get("available"):
+            decision = ensemble.get("decision") or {}
+            probs = ensemble.get("probabilities") or {}
+            expected = ensemble.get("expected_goals") or {}
+            top_scores = ", ".join(
+                f"{score.get('score', '')} {format_metric(score.get('probability', ''))}%"
+                for score in (ensemble.get("top_scores") or [])[:3]
+            )
+            pick_key = str(decision.get("outcome") or "")
+            rows.append({
+                "No.": fixture.get("id", ""),
+                "Fecha": fixture.get("date", ""),
+                "Grupo": fixture.get("group", ""),
+                "Partido": fixture.get("label", ""),
+                "Rank": "Ensemble",
+                "Modelo": ensemble.get("model_label", ""),
+                "Disponible": "Si",
+                "Pick": f"{decision.get('label', '')} {decision.get('team', '')}".strip(),
+                "Marcador": ensemble.get("top_score", ""),
+                "Top scores": top_scores,
+                "Probabilidad": probs.get(pick_key, ""),
+                "1 %": probs.get("home", ""),
+                "X %": probs.get("draw", ""),
+                "2 %": probs.get("away", ""),
+                "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
+                "Log-loss": "",
+                "Brier": "",
+                "Pick accuracy": "",
+                "Score exacto": "",
+                "Confiabilidad": "",
+                "Backtest vs Poisson": f"{ensemble.get('model_count', 0)} modelos ponderados",
+                "Warnings": "",
+            })
         for model in report.get("models", []):
             decision = model.get("decision") or {}
             probs = model.get("probabilities") or {}
@@ -3449,9 +3599,375 @@ def persist_upcoming_report(report: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": created_at,
         **safe_report,
     }
+    output["downloads"] = report_download_links(report_id, output)
+    ensure_report_download_files(output)
     report_path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (REPORTS_ROOT / "latest.json").write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return output
+
+
+def report_download_links(report_id: str, report: Dict[str, Any]) -> Dict[str, str]:
+    base = f"/api/mundial/reports/{report_id}/download"
+    has_backtest = report_has_backtest(report)
+    return {
+        "predictions_html": f"{base}?kind=predictions&format=html",
+        "predictions_csv": f"{base}?kind=predictions&format=csv",
+        "backtest_html": f"{base}?kind=backtest&format=html" if has_backtest else "",
+        "backtest_csv": f"{base}?kind=backtest&format=csv" if has_backtest else "",
+    }
+
+
+def resolve_report_download(report_id: Any, kind: Any, format_value: Any) -> Dict[str, Any]:
+    requested_kind = validate_report_download_kind(kind)
+    requested_format = validate_report_download_format(format_value)
+    report = load_persisted_report(report_id)
+    resolved_report_id = validate_report_id(report.get("report_id"))
+    if requested_kind == "backtest" and not report_has_backtest(report):
+        raise ValueError("Descarga de backtesting no disponible para este reporte.")
+    ensure_report_download_files(report)
+    path = report_download_file_path(resolved_report_id, requested_kind, requested_format)
+    if not path.exists() or not path.is_file():
+        raise ValueError("Archivo de reporte no disponible.")
+    return {
+        "path": path,
+        "filename": path.name,
+        "media_type": "text/html; charset=utf-8" if requested_format == "html" else "text/csv; charset=utf-8",
+    }
+
+
+def ensure_report_download_files(report: Dict[str, Any]) -> Dict[str, str]:
+    report_id = validate_report_id(report.get("report_id"))
+    REPORTS_ROOT.mkdir(parents=True, exist_ok=True)
+    outputs: Dict[str, str] = {}
+    for kind in ("predictions", "backtest"):
+        if kind == "backtest" and not report_has_backtest(report):
+            continue
+        for format_value in ("html", "csv"):
+            path = report_download_file_path(report_id, kind, format_value)
+            if format_value == "html":
+                content = report_download_html(report, kind)
+            else:
+                content = report_download_csv(report, kind)
+            path.write_text(content, encoding="utf-8")
+            outputs[f"{kind}_{format_value}"] = str(path)
+    return outputs
+
+
+def load_persisted_report(report_id: Any) -> Dict[str, Any]:
+    path = report_json_path(report_id)
+    if not path.exists() or not path.is_file():
+        raise ValueError("Reporte no encontrado.")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Reporte invalido.")
+    resolved_report_id = validate_report_id(payload.get("report_id"))
+    payload["downloads"] = report_download_links(resolved_report_id, payload)
+    return payload
+
+
+def report_json_path(report_id: Any) -> Path:
+    value = str(report_id or "").strip()
+    if value in {"latest", "latest.json"}:
+        return REPORTS_ROOT / "latest.json"
+    safe_id = validate_report_id(value)
+    return REPORTS_ROOT / f"{safe_id}.json"
+
+
+def validate_report_id(report_id: Any) -> str:
+    value = str(report_id or "").strip()
+    if not re.fullmatch(r"report_\d{8}_\d{6}_[0-9a-f]{10}", value):
+        raise ValueError("report_id invalido.")
+    return value
+
+
+def validate_report_download_kind(kind: Any) -> str:
+    value = str(kind or "").strip().lower()
+    if value not in REPORT_DOWNLOAD_KINDS:
+        raise ValueError("kind invalido; usa predictions o backtest.")
+    return value
+
+
+def validate_report_download_format(format_value: Any) -> str:
+    value = str(format_value or "").strip().lower()
+    if value not in REPORT_DOWNLOAD_FORMATS:
+        raise ValueError("format invalido; usa html o csv.")
+    return value
+
+
+def report_download_file_path(report_id: str, kind: str, format_value: str) -> Path:
+    safe_report_id = validate_report_id(report_id)
+    safe_kind = validate_report_download_kind(kind)
+    safe_format = validate_report_download_format(format_value)
+    return REPORTS_ROOT / f"{safe_report_id}_{safe_kind}.{safe_format}"
+
+
+def report_has_backtest(report: Dict[str, Any]) -> bool:
+    if report.get("model_backtests"):
+        return True
+    summary = ((report.get("backtest") or {}).get("summary") or {})
+    return bool(summary.get("available") or summary.get("evaluated_matches"))
+
+
+def report_download_csv(report: Dict[str, Any], kind: str) -> str:
+    if kind == "backtest":
+        return backtest_csv_text(report)
+    table = report.get("table") or {}
+    return table_csv_text(table)
+
+
+def report_download_html(report: Dict[str, Any], kind: str) -> str:
+    summary = report.get("summary") or {}
+    title = "Predicciones Mundial 2026" if kind == "predictions" else "Backtesting Mundial 2026"
+    subtitle = "Generado " + str(report.get("created_at") or "")
+    body = predictions_report_html_body(report) if kind == "predictions" else backtest_report_html_body(report)
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape_report_html(title)}</title>
+  <style>{standalone_report_css()}</style>
+</head>
+<body>
+  <main>
+    <header class="report-title">
+      <div>
+        <p>{escape_report_html(summary.get("pipeline_label") or summary.get("pipeline_mode") or "Reporte")}</p>
+        <h1>{escape_report_html(title)}</h1>
+        <small>{escape_report_html(subtitle)} · {escape_report_html(report.get("report_id") or "")}</small>
+      </div>
+      <strong>Mundial 2026</strong>
+    </header>
+    {body}
+  </main>
+</body>
+</html>
+"""
+
+
+def predictions_report_html_body(report: Dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    fixtures = report.get("fixture_reports") or []
+    cards = "\n".join(prediction_fixture_report_card_html(item) for item in fixtures)
+    table = table_html_fragment(report.get("table") or {})
+    return f"""
+    <section class="summary-grid">
+      {summary_card_html("Partidos", f"{summary.get('returned', 0)}/{summary.get('requested', 0)}")}
+      {summary_card_html("Grupo", summary.get("group", ""))}
+      {summary_card_html("Modelos", len(summary.get("score_models") or []))}
+      {summary_card_html("Poisson ultimos", summary.get("poisson_recent_matches", ""))}
+    </section>
+    <section class="fixture-grid">{cards or '<p>Sin predicciones disponibles.</p>'}</section>
+    <section class="table-section">
+      <h2>Tabla de predicciones</h2>
+      {table}
+    </section>
+"""
+
+
+def prediction_fixture_report_card_html(report: Dict[str, Any]) -> str:
+    fixture = report.get("fixture") or {}
+    primary = report.get("ensemble") or {}
+    if not primary.get("available"):
+        monte_carlo = report.get("monte_carlo_consensus") or {}
+        distribution = monte_carlo if monte_carlo.get("available") else report.get("consensus_score_distribution") or {}
+        consensus = report.get("consensus") or {}
+        primary = {
+            "available": True,
+            "model_label": "Consenso",
+            "decision": {
+                "label": consensus.get("outcome_label", ""),
+                "team": outcome_team(consensus.get("outcome"), fixture),
+            },
+            "probabilities": distribution.get("probabilities") or {},
+            "top_scores": distribution.get("top_scores") or [],
+        }
+    decision = primary.get("decision") or {}
+    probabilities = primary.get("probabilities") or {}
+    top_scores = primary.get("top_scores") or []
+    return f"""
+      <article class="fixture-card">
+        <header><span>{escape_report_html(fixture.get("date", ""))}</span><strong>{escape_report_html(fixture.get("group", ""))}</strong></header>
+        <h2>{escape_report_html(fixture.get("label", ""))}</h2>
+        <div class="pick"><span>{escape_report_html(primary.get("model_label", ""))}</span><strong>{escape_report_html(decision.get("label", ""))} · {escape_report_html(decision.get("team", ""))}</strong></div>
+        {outcome_bars_html(probabilities)}
+        {total_25_html(probabilities)}
+        <div class="top-scores">{''.join(f'<span>{escape_report_html(score.get("score", ""))} <b>{escape_report_html(format_metric(score.get("probability", "")))}%</b></span>' for score in top_scores[:3])}</div>
+      </article>
+"""
+
+
+def backtest_report_html_body(report: Dict[str, Any]) -> str:
+    summary = ((report.get("backtest") or {}).get("summary") or (report.get("summary") or {}).get("backtest") or {})
+    models = report.get("model_backtests") or []
+    model_cards = "\n".join(backtest_model_report_card_html(item) for item in models)
+    return f"""
+    <section class="summary-grid">
+      {summary_card_html("Evaluados", summary.get("evaluated_matches", 0))}
+      {summary_card_html("Historicos base", summary.get("train_matches", 0))}
+      {summary_card_html("Fuente", summary.get("source", ""))}
+      {summary_card_html("Periodo", f"{summary.get('holdout_start', '')} a {summary.get('holdout_end', '')}")}
+    </section>
+    <section class="fixture-grid">{model_cards or '<p>Sin backtesting disponible.</p>'}</section>
+    <section class="table-section">
+      <h2>Detalle backtest</h2>
+      {table_html_fragment(backtest_metrics_table(report))}
+    </section>
+"""
+
+
+def backtest_model_report_card_html(model: Dict[str, Any]) -> str:
+    vs = model.get("vs_poisson") or {}
+    return f"""
+      <article class="fixture-card">
+        <header><span>#{escape_report_html(model.get("rank", ""))}</span><strong>{escape_report_html(model.get("model_label", ""))}</strong></header>
+        <div class="metric-bars">
+          {metric_bar_html("Log-loss", format_metric(model.get("log_loss", "")), inverse_metric_percent(model.get("log_loss"), 1.6))}
+          {metric_bar_html("Pick %", f"{format_metric(float_or_zero(model.get('pick_accuracy')) * 100)}%", float_or_zero(model.get("pick_accuracy")) * 100)}
+          {metric_bar_html("Marcador %", f"{format_metric(float_or_zero(model.get('score_accuracy')) * 100)}%", float_or_zero(model.get("score_accuracy")) * 100)}
+          {metric_bar_html("Brier", format_metric(model.get("brier", "")), inverse_metric_percent(model.get("brier"), 0.75))}
+          {metric_bar_html("Vs Poisson", f"{escape_report_html(vs.get('metric_wins', 0))}/4", float_or_zero(vs.get("metric_wins")) * 25)}
+        </div>
+        <p>{escape_report_html(vs.get("summary", ""))}</p>
+      </article>
+"""
+
+
+def backtest_csv_text(report: Dict[str, Any]) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    metrics = backtest_metrics_table(report)
+    writer.writerow(["Resumen modelos"])
+    writer.writerow(metrics.get("columns", []))
+    for row in metrics.get("rows", []):
+        writer.writerow([row.get(column, "") for column in metrics.get("columns", [])])
+    writer.writerow([])
+    writer.writerow(["Detalle partidos"])
+    match_columns = ["Rank", "Modelo", "Fecha", "Partido", "Resultado", "Pick", "Pick real", "Acierto", "Marcador modal", "Prob. real", "Prob. marcador"]
+    writer.writerow(match_columns)
+    for model in report.get("model_backtests") or []:
+        for row in model.get("matches") or []:
+            writer.writerow([
+                model.get("rank", ""),
+                model.get("model_label", ""),
+                row.get("date", ""),
+                row.get("match", ""),
+                row.get("actual_score", ""),
+                row.get("pick", ""),
+                row.get("actual_pick", ""),
+                "Si" if row.get("pick_hit") else "No",
+                row.get("modal_score", ""),
+                row.get("actual_probability", ""),
+                row.get("score_probability", ""),
+            ])
+    return output.getvalue()
+
+
+def backtest_metrics_table(report: Dict[str, Any]) -> Dict[str, Any]:
+    columns = ["Rank", "Modelo", "Disponible", "Evaluados", "Log-loss", "Brier", "Pick %", "Marcador %", "U/O %", "Score-log", "Vs Poisson", "Warnings"]
+    rows = []
+    for item in report.get("model_backtests") or []:
+        vs = item.get("vs_poisson") or {}
+        rows.append({
+            "Rank": item.get("rank", ""),
+            "Modelo": item.get("model_label", item.get("model_key", "")),
+            "Disponible": "Si" if item.get("available") else "No",
+            "Evaluados": item.get("evaluated_matches", ""),
+            "Log-loss": item.get("log_loss", ""),
+            "Brier": item.get("brier", ""),
+            "Pick %": round(float_or_zero(item.get("pick_accuracy")) * 100.0, 3),
+            "Marcador %": round(float_or_zero(item.get("score_accuracy")) * 100.0, 3),
+            "U/O %": round(float_or_zero(item.get("over_under_accuracy")) * 100.0, 3),
+            "Score-log": item.get("score_log_loss", ""),
+            "Vs Poisson": vs.get("summary", ""),
+            "Warnings": " | ".join(item.get("warnings", [])),
+        })
+    return {"columns": columns, "rows": rows, "total": len(rows)}
+
+
+def table_csv_text(table: Dict[str, Any]) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    columns = list(table.get("columns") or [])
+    writer.writerow(columns)
+    for row in table.get("rows") or []:
+        writer.writerow([row.get(column, "") for column in columns])
+    return output.getvalue()
+
+
+def table_html_fragment(table: Dict[str, Any]) -> str:
+    columns = list(table.get("columns") or [])
+    if not columns:
+        return "<p>Sin filas.</p>"
+    head = "".join(f"<th>{escape_report_html(column)}</th>" for column in columns)
+    rows = "".join(
+        "<tr>" + "".join(f"<td>{escape_report_html(row.get(column, ''))}</td>" for column in columns) + "</tr>"
+        for row in table.get("rows") or []
+    )
+    return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table></div>'
+
+
+def summary_card_html(label: Any, value: Any) -> str:
+    return f'<article><span>{escape_report_html(label)}</span><strong>{escape_report_html(value)}</strong></article>'
+
+
+def outcome_bars_html(probabilities: Dict[str, Any]) -> str:
+    items = (("1", probabilities.get("home", 0)), ("X", probabilities.get("draw", 0)), ("2", probabilities.get("away", 0)))
+    return '<div class="metric-bars">' + "".join(metric_bar_html(label, f"{format_metric(value)}%", float_or_zero(value)) for label, value in items) + "</div>"
+
+
+def total_25_html(probabilities: Dict[str, Any]) -> str:
+    over = float_or_zero(probabilities.get("over25"))
+    under = float_or_zero(probabilities.get("under25"))
+    pick = "Over" if over >= under else "Under"
+    value = max(over, under)
+    return f'<div class="pick secondary"><span>U/O 2.5</span><strong>{escape_report_html(pick)} · {escape_report_html(format_metric(value))}%</strong></div>'
+
+
+def metric_bar_html(label: Any, value: Any, percent: Any) -> str:
+    return (
+        f'<div class="metric-bar"><span>{escape_report_html(label)}</span>'
+        f'<i><b style="width:{escape_report_html(clamp_report_percent(percent))}%"></b></i>'
+        f'<strong>{escape_report_html(value)}</strong></div>'
+    )
+
+
+def inverse_metric_percent(value: Any, ceiling: float) -> float:
+    number = float_or_zero(value)
+    if number <= 0.0:
+        return 0.0
+    return float(np.clip((1.0 - min(number / max(float(ceiling), 1e-9), 1.0)) * 100.0, 0.0, 100.0))
+
+
+def clamp_report_percent(value: Any) -> str:
+    return format_metric(float(np.clip(float_or_zero(value), 0.0, 100.0)))
+
+
+def escape_report_html(value: Any) -> str:
+    return html_lib.escape(str(value if value is not None else ""), quote=True)
+
+
+def standalone_report_css() -> str:
+    return """
+body{margin:0;background:#f5f7f8;color:#16202a;font-family:Inter,Arial,sans-serif;font-size:14px}
+main{width:min(1120px,100%);margin:0 auto;padding:24px}
+.report-title{display:flex;justify-content:space-between;gap:16px;align-items:end;margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid #d9e2e8}
+.report-title p,.report-title small,article span{color:#65717d}.report-title h1{margin:3px 0;font-size:30px;line-height:1.15}
+.report-title strong{color:#0f7a5f}.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}
+.summary-grid article,.fixture-card{border:1px solid #d9e2e8;border-radius:8px;background:#fff}
+.summary-grid article{padding:12px}.summary-grid strong{display:block;margin-top:4px;color:#0f7a5f;font-size:18px}
+.fixture-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.fixture-card{display:grid;gap:10px;padding:14px;break-inside:avoid}
+.fixture-card header{display:flex;justify-content:space-between;gap:10px;color:#65717d;font-size:12px}.fixture-card h2{margin:0;font-size:18px}
+.pick{display:grid;gap:3px;padding:10px;border:1px solid #c8e5dc;border-radius:8px;background:#eaf6f2}.pick strong{color:#0f7a5f;font-size:20px}
+.pick.secondary{background:#f8fafb;border-color:#d9e2e8}.top-scores{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.top-scores span{padding:8px;border-radius:8px;background:#f8fafb;text-align:center}.top-scores b{color:#16202a}
+.metric-bars{display:grid;gap:7px}.metric-bar{display:grid;grid-template-columns:84px minmax(0,1fr) 72px;gap:8px;align-items:center}
+.metric-bar i{height:9px;border-radius:999px;background:#edf2f4;overflow:hidden}.metric-bar b{display:block;height:100%;border-radius:inherit;background:#0f7a5f}
+.metric-bar strong{text-align:right}.table-section{margin-top:18px}.table-wrap{max-width:100%;overflow:auto;border:1px solid #d9e2e8;border-radius:8px;background:#fff}
+table{width:100%;min-width:760px;border-collapse:collapse}th,td{padding:8px 9px;border-bottom:1px solid #d9e2e8;text-align:left;vertical-align:top;font-size:12px}
+th{background:#f0f4f6;color:#40505d}@media print{body{background:#fff}main{padding:0}.fixture-grid{grid-template-columns:1fr}.table-wrap{overflow:visible}table{min-width:0}}
+@media(max-width:760px){main{padding:14px}.report-title,.summary-grid,.fixture-grid{grid-template-columns:1fr;display:grid}.metric-bar{grid-template-columns:64px minmax(0,1fr) 58px}}
+"""
 
 
 def score_model_display_label(key: Any) -> str:

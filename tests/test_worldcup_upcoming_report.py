@@ -52,12 +52,14 @@ def test_sota_and_alternative_sequences_are_statistical_score_models():
     assert disabled.isdisjoint(services.SOTA_SCORE_MODEL_SEQUENCE)
     assert disabled <= catalog_keys
     assert "xg_poisson_local" not in services.SOTA_SCORE_MODEL_SEQUENCE
-    assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 7
+    assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 9
     assert services.ALTERNATIVE_SCORE_MODEL_SEQUENCE == [
         "dixon_coles_mle",
         "bivariate_poisson_mle",
         "diagonal_inflated_bivariate_poisson",
         "zero_inflated_generalized_poisson",
+        "negative_binomial_mle",
+        "conway_maxwell_poisson",
         "skellam_margin",
         "copula_weibull_count",
     ]
@@ -80,6 +82,8 @@ def test_alternatives_benchmark_aliases_and_statistical_registry():
         "bivariate_poisson_mle",
         "diagonal_inflated_bivariate_poisson",
         "zero_inflated_generalized_poisson",
+        "negative_binomial_mle",
+        "conway_maxwell_poisson",
         "skellam_margin",
         "copula_weibull_count",
     ]
@@ -294,7 +298,16 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert all(item["actual_label"] in {"Over", "Under"} for item in first_backtest_row["over_under"])
     assert result["best_model"]["model_key"] == result["model_backtests"][0]["model_key"]
     assert result["best_model"]["model_key"] in services.BENCHMARK_SCORE_MODEL_SEQUENCE
-    assert result["table"]["total"] == len(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
+    assert result["fixture_reports"][0]["ensemble"]["available"] is True
+    assert result["table"]["total"] == len(services.BENCHMARK_SCORE_MODEL_SEQUENCE) + 1
+    assert result["downloads"]["predictions_html"].endswith("kind=predictions&format=html")
+    assert result["downloads"]["predictions_csv"].endswith("kind=predictions&format=csv")
+    assert result["downloads"]["backtest_html"].endswith("kind=backtest&format=html")
+    assert result["downloads"]["backtest_csv"].endswith("kind=backtest&format=csv")
+    assert (tmp_path / f"{result['report_id']}_predictions.html").exists()
+    assert (tmp_path / f"{result['report_id']}_predictions.csv").exists()
+    assert (tmp_path / f"{result['report_id']}_backtest.html").exists()
+    assert (tmp_path / f"{result['report_id']}_backtest.csv").exists()
     assert (tmp_path / "latest.json").exists()
     assert progress[-1]["stage"] == "complete"
 
