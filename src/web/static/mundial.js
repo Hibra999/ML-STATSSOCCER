@@ -531,20 +531,25 @@ function renderAlternativesBenchmarkReport(report) {
   const fixtures = report.fixture_reports || [];
   const backtests = report.model_backtests || [];
   const best = report.best_model || summary.best_model || {};
-  const rankedModels = report.ranked_models || report.alternatives || [];
   const warnings = summary.warnings || [];
   const tuning = summary.benchmark_tuning || {};
   const backtestAutoN = summary.backtest_auto_n ?? (summary.backtest || {}).evaluated_matches ?? 0;
   const resultSource = summary.backtest_source || summary.result_source || ((summary.results_refresh || {}).source) || "CSV local";
+  const range = summary.backtest_range || (summary.backtest || {}).backtest_range || {};
+  const firstMatch = range.first_match || {};
+  const lastMatch = range.last_match || {};
   document.getElementById("upcoming-summary").textContent =
     `${summary.pipeline_label || "Benchmark alternativas"} - ${fixtures.length}/${summary.requested || 0} próximos - ${backtests.length} modelos - ${backtestAutoN} finalizados detectados - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()} - ${summary.report_id || report.report_id || ""}`;
   document.getElementById("upcoming-predictions").innerHTML = "";
   document.getElementById("upcoming-report").innerHTML = `
     <div class="report-summary-grid">
       ${reportSummaryCard("Modelo #1", best.available ? (best.model_label || best.model_key || "-") : "-")}
-      ${reportSummaryCard("Finalizados detectados", `${backtestAutoN} partidos`)}
+      ${reportSummaryCard("Evaluados", `${backtestAutoN} partidos`)}
       ${reportSummaryCard("Partidos próximos", `${fixtures.length}/${summary.requested || 0}`)}
-      ${reportSummaryCard("Criterio", "Menor log-loss")}
+      ${reportSummaryCard("Criterio", "Score de resultados")}
+      ${reportSummaryCard("Primer evaluado", firstMatch.match || `${firstMatch.home || "-"} vs ${firstMatch.away || "-"}`)}
+      ${reportSummaryCard("Último evaluado", lastMatch.match || `${lastMatch.home || "-"} vs ${lastMatch.away || "-"}`)}
+      ${reportSummaryCard("Generado", formatReportDateTime(summary.generated_at || range.generated_at || report.created_at))}
       ${reportSummaryCard("Fuente resultados", resultSource)}
       ${tuning.enabled ? reportSummaryCard("Optuna N", tuning.available ? `${tuning.best_poisson_recent_matches} ultimos` : "No disponible") : ""}
     </div>
@@ -562,13 +567,16 @@ function alternativesBenchmarkHtml(report) {
   const backtests = report.model_backtests || [];
   const best = report.best_model || summary.best_model || {};
   const backtestAutoN = summary.backtest_auto_n ?? (summary.backtest || {}).evaluated_matches ?? 0;
+  const range = summary.backtest_range || (summary.backtest || {}).backtest_range || {};
+  const firstMatch = range.first_match || {};
+  const lastMatch = range.last_match || {};
   const tuning = summary.benchmark_tuning || {};
   const tuningLabel = tuning.enabled && tuning.available ? ` · Optuna N=${tuning.best_poisson_recent_matches}` : "";
   return `<section class="client-report-shell">
     <header>
       <div>
-        <h3>Ranking de confiabilidad 2026</h3>
-        <small>${escapeHtml(backtestAutoN)} partidos finalizados detectados · walk-forward sin leakage · marcador exacto desempata primero${escapeHtml(tuningLabel)}</small>
+        <h3>Score de resultados 2026</h3>
+        <small>${escapeHtml(backtestAutoN)} evaluados · ${escapeHtml(firstMatch.home || "-")} vs ${escapeHtml(firstMatch.away || "-")} a ${escapeHtml(lastMatch.home || "-")} vs ${escapeHtml(lastMatch.away || "-")} · generado ${escapeHtml(formatReportDateTime(range.generated_at || summary.generated_at))}${escapeHtml(tuningLabel)}</small>
       </div>
       <span>${escapeHtml(rankedModels.length || backtests.length)} modelo${(rankedModels.length || backtests.length) === 1 ? "" : "s"}</span>
     </header>
@@ -580,7 +588,7 @@ function alternativesBenchmarkHtml(report) {
     <section class="report-panel">
       <header><strong>Predicciones futuras</strong><small>${escapeHtml(fixtures.length)} fixture${fixtures.length === 1 ? "" : "s"}</small></header>
       <div class="client-report-grid alternatives-fixture-grid">
-        ${fixtures.map((fixtureReport) => alternativeFixtureCardHtml(fixtureReport, backtests)).join("") || loadingHtml("Sin fixtures futuros")}
+        ${fixtures.map((fixtureReport) => alternativeFixtureCardHtml(fixtureReport)).join("") || loadingHtml("Sin fixtures futuros")}
       </div>
     </section>
     <section class="report-panel">
@@ -603,19 +611,16 @@ function bestAlternativeHtml(best) {
   return `<section class="report-panel best-alternative-panel">
     <header><strong>Modelo #1</strong><small>${escapeHtml(item.selection_policy || item.ranking_reason || "")}</small></header>
     <div class="client-main-pick">
-      <span>Score confiabilidad ${escapeHtml(formatNumber(item.reliability_score ?? 0))}</span>
+      <span>Score de resultados ${escapeHtml(formatNumber(item.score_resultados ?? item.reliability_score ?? 0))}</span>
       <strong>${escapeHtml(item.model_label || item.model_key || "")}</strong>
       <small>${escapeHtml(item.evaluated_matches || 0)} finalizados detectados: ${escapeHtml(item.holdout_start || "")} a ${escapeHtml(item.holdout_end || "")}</small>
     </div>
     <div class="technical-meta-row">
-      <span>Log-loss ${escapeHtml(formatNumber(item.log_loss ?? "-"))}</span>
-      <span>RPS ${escapeHtml(formatNumber(item.rps ?? "-"))}</span>
-      <span>ECE ${escapeHtml(formatNumber(item.expected_calibration_error ?? "-"))}</span>
-      <span>Score-log ${escapeHtml(formatNumber(item.score_log_loss ?? "-"))}</span>
-      <span>Brier ${escapeHtml(formatNumber(item.brier ?? "-"))}</span>
       <span>Pick ${escapeHtml(formatNumber(Number(item.pick_accuracy || 0) * 100))}%</span>
+      <span>Marcador #1 ${escapeHtml(formatNumber(Number(item.score_accuracy || 0) * 100))}%</span>
       <span>Top-3 marcador ${escapeHtml(formatNumber(Number(item.top3_score_accuracy || 0) * 100))}%</span>
-      <span>U/O2.5 LL ${escapeHtml(formatNumber(item.ou25_log_loss ?? "-"))}</span>
+      <span>U/O ${escapeHtml(formatNumber(Number(item.over_under_accuracy || 0) * 100))}%</span>
+      <span>Calibración ${escapeHtml(formatNumber(Math.max(0, 100 - Number(item.expected_calibration_error || 0) * 100)))}%</span>
     </div>
   </section>`;
 }
@@ -662,11 +667,11 @@ function benchmarkTuningHtml(tuning) {
   if (!item.enabled) return "";
   const warnings = item.warnings || [];
   return `<section class="report-panel">
-    <header><strong>Optuna N ultimos</strong><small>${escapeHtml(item.sampler || "tpe")} · ${escapeHtml(item.objective || "mean_log_loss")}</small></header>
+    <header><strong>Optuna N ultimos</strong><small>${escapeHtml(item.sampler || "tpe")} · ${escapeHtml(item.objective || "mean_score_resultados")}</small></header>
     <div class="technical-meta-row">
       <span>N ${escapeHtml(item.available ? item.best_poisson_recent_matches : "-")}</span>
       <span>Trials ${escapeHtml(item.n_trials || 0)}</span>
-      <span>Log-loss ${escapeHtml(item.best_value !== null && item.best_value !== undefined ? formatNumber(item.best_value) : "-")}</span>
+      <span>Score ${escapeHtml(item.best_value !== null && item.best_value !== undefined ? formatNumber(item.best_value) : "-")}</span>
       <span>${escapeHtml(item.scope === "all_active_models" ? "Todos los modelos activos" : item.scope || "")}</span>
       <span>${escapeHtml(item.available ? "Aplicado" : "No disponible")}</span>
     </div>
@@ -674,12 +679,10 @@ function benchmarkTuningHtml(tuning) {
   </section>`;
 }
 
-function alternativeFixtureCardHtml(report, backtests) {
+function alternativeFixtureCardHtml(report) {
   const fixture = report.fixture || {};
-  const models = report.models || [];
   const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
   const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
-  const backtestMap = modelBacktestByKey(backtests);
   const leader = report.primary_model || {};
   return `<article class="client-fixture-card alternative-fixture-card">
     <header>
@@ -692,65 +695,29 @@ function alternativeFixtureCardHtml(report, backtests) {
       <b>vs</b>
       <div>${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
-    ${topRankedFixturePickHtml(leader, backtestMap.get(leader.model_key) || leader.backtest || {}, fixture)}
-    <details class="models-drawer">
-      <summary>Todos los modelos (${escapeHtml(models.length)})</summary>
-      <div class="alternative-model-list">
-        ${models.map((model) => alternativeModelRowHtml(model, backtestMap.get(model.model_key) || {}, fixture)).join("")}
-      </div>
-    </details>
-    ${contextualPoissonHtml(report.contextual_poisson || {}, fixture)}
+    ${topRankedFixturePickHtml(leader, fixture)}
   </article>`;
 }
 
-function topRankedFixturePickHtml(model, backtest, fixture) {
+function topRankedFixturePickHtml(model, fixture) {
   const item = model || {};
   if (!item.model_key) return "";
-  const decision = item.decision || {};
   const probs = item.probabilities || {};
-  const expected = item.expected_goals || {};
   const topScores = item.top_scores || [];
-  const confidence = probs[decision.outcome] ?? "";
-  const rankLabel = backtest.rank || item.rank ? `#${backtest.rank || item.rank}` : "#1";
-  const detail = item.available === false
-    ? escapeHtml(item.reason || "Modelo #1 no disponible para este fixture")
-    : "Prediccion solo del modelo #1 del backtesting";
+  const decision = item.decision || {};
+  if (item.available === false) {
+    return `<section class="report-panel top-ranked-pick">
+      <header><strong>Distribuciones</strong><small>${escapeHtml(item.reason || "Modelo no disponible para este fixture")}</small></header>
+    </section>`;
+  }
   return `<section class="report-panel top-ranked-pick">
-    <header><strong>${escapeHtml(rankLabel)} ${escapeHtml(item.model_label || item.model_key || "")}</strong><small>${detail}</small></header>
-    <div class="client-main-pick">
-      <span>Pick principal</span>
-      <strong>${escapeHtml(decision.label || "-")} · ${escapeHtml(decision.team || "")}${confidence !== "" ? ` · ${escapeHtml(formatNumber(confidence))}%` : ""}</strong>
-      <small>Marcador #1 ${escapeHtml(item.top_score || "-")}${item.top_score_probability !== undefined ? ` · ${escapeHtml(formatNumber(item.top_score_probability))}%` : ""} · λ ${escapeHtml(expected.home ?? "-")}/${escapeHtml(expected.away ?? "-")}${backtest.reliability_score !== undefined ? ` · confiabilidad ${escapeHtml(formatNumber(backtest.reliability_score ?? 0))}` : ""}</small>
-    </div>
+    <header><strong>Distribución 1/X/2</strong><small>U/O 0.5-3.5 y marcadores probables</small></header>
     ${modelOutcomeProbabilitiesHtml(probs, decision.outcome, fixture)}
     ${modelOverUnderProbabilitiesHtml(probs, item.totals || {})}
     <div class="top-scores compact">
-      ${topScores.slice(0, 3).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
+      ${topScores.slice(0, 5).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
     </div>
   </section>`;
-}
-
-function alternativeModelRowHtml(model, backtest, fixture) {
-  const item = model || {};
-  const decision = item.decision || {};
-  const probs = item.probabilities || {};
-  const expected = item.expected_goals || {};
-  const warnings = item.warnings || [];
-  const topScores = item.top_scores || [];
-  const confidence = probs[decision.outcome] ?? "";
-  return `<div class="alternative-model-row ${escapeAttr(item.available ? "" : "fallback")}">
-    <strong>#${escapeHtml(backtest.rank || "-")} ${escapeHtml(item.model_label || item.model_key || "")}</strong>
-    <b>${escapeHtml(formatNumber(backtest.reliability_score ?? 0))}</b>
-    <span>${escapeHtml(decision.label || "-")} ${escapeHtml(decision.team || "")}${confidence !== "" ? ` · ${escapeHtml(formatNumber(confidence))}%` : ""}</span>
-    <span>${escapeHtml(item.top_score || "-")} · λ ${escapeHtml(expected.home ?? "-")}/${escapeHtml(expected.away ?? "-")}</span>
-    <small>LL ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))} · RPS ${escapeHtml(formatNumber(backtest.rps ?? "-"))} · Marcador #1 ${escapeHtml(formatNumber(Number(backtest.score_accuracy || 0) * 100))}% · Top-3 ${escapeHtml(formatNumber(Number(backtest.top3_score_accuracy || 0) * 100))}% · ECE ${escapeHtml(formatNumber(backtest.expected_calibration_error ?? "-"))}${warnings.length ? ` · ${escapeHtml(warnings[0])}` : ""}</small>
-    ${modelOutcomeProbabilitiesHtml(probs, decision.outcome, fixture)}
-    ${modelOverUnderProbabilitiesHtml(probs, item.totals || {})}
-    <div class="top-scores compact">
-      ${topScores.slice(0, 3).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
-    </div>
-    ${featureContextDetailsHtml(item.feature_context)}
-  </div>`;
 }
 
 function modelOutcomeProbabilitiesHtml(probabilities, activeOutcome, fixture) {
@@ -790,28 +757,11 @@ function formatProbability(value) {
   return formatNumber(number);
 }
 
-function featureContextDetailsHtml(context) {
-  const item = context || {};
-  const counts = item.usage_counts || {};
-  const sample = item.sample || {};
-  const families = item.available_families || [];
-  if (!families.length && !Object.keys(sample).length) return "";
-  return `<details class="feature-context-drawer">
-    <summary>Feature audit · ${escapeHtml(families.length)} familias</summary>
-    <div class="technical-meta-row compact">
-      ${Object.entries(counts).filter(([, value]) => Number(value || 0) > 0).map(([key, value]) => `<span>${escapeHtml(key)} ${escapeHtml(value)}</span>`).join("")}
-    </div>
-    <div class="technical-meta-row compact">
-      ${Object.entries(sample).slice(0, 8).map(([key, value]) => `<span>${escapeHtml(key)}=${escapeHtml(formatNumber(value))}</span>`).join("")}
-    </div>
-  </details>`;
-}
-
 function backtestTableHtml(backtests, summary) {
   const rows = backtests || [];
   return `<details class="report-panel alternatives-backtest-panel">
     <summary>
-      <strong>Ranking de confiabilidad</strong>
+      <strong>Métricas completas</strong>
       <small>${escapeHtml((summary || {}).evaluated_matches || 0)} evaluados 2026 · ${escapeHtml((summary || {}).train_matches || 0)} históricos base · ${escapeHtml((summary || {}).source || "")}</small>
     </summary>
     <div class="benchmark-bar-list">
@@ -822,15 +772,16 @@ function backtestTableHtml(backtests, summary) {
 
 function benchmarkMetricCardHtml(item) {
   const vs = item.vs_poisson || {};
-  const reliability = Number(item.reliability_score || 0);
-  const badgeClass = reliability >= 75 ? "high" : reliability >= 45 ? "medium" : "low";
+  const score = Number(item.score_resultados ?? item.reliability_score ?? 0);
+  const badgeClass = score >= 75 ? "high" : score >= 45 ? "medium" : "low";
   return `<article class="benchmark-metric-card">
     <header>
       <span>#${escapeHtml(item.rank || "-")}</span>
       <strong>${escapeHtml(item.model_label || item.model_key || "")}</strong>
-      <b class="reliability-badge ${escapeAttr(badgeClass)}">${escapeHtml(formatNumber(reliability))}</b>
+      <b class="reliability-badge ${escapeAttr(badgeClass)}">${escapeHtml(formatNumber(score))}</b>
     </header>
     <div class="metric-bar-grid">
+      ${compactMetricBarHtml("Score resultados", formatNumber(score), score)}
       ${compactMetricBarHtml("Log-loss", formatNumber(item.log_loss ?? "-"), inverseMetricPercent(item.log_loss, 1.6))}
       ${compactMetricBarHtml("RPS", formatNumber(item.rps ?? "-"), inverseMetricPercent(item.rps, 0.75))}
       ${compactMetricBarHtml("ECE", formatNumber(item.expected_calibration_error ?? "-"), inverseMetricPercent(item.expected_calibration_error, 0.35))}
@@ -859,21 +810,84 @@ function inverseMetricPercent(value, ceiling) {
   return Math.max(0, Math.min(100, Math.round((1 - Math.min(number / ceiling, 1)) * 100)));
 }
 
-function modelBacktestByKey(backtests) {
-  return new Map((backtests || []).map((item) => [item.model_key, item]));
-}
-
 function backtestPredictionReviewHtml(backtests) {
   const leader = (backtests || []).find((item) => item && item.available) || (backtests || [])[0] || {};
   const rows = leader.matches || leader.sample || [];
   if (!rows.length) return "";
-  return `<details class="report-panel backtest-review-panel">
-    <summary>
+  return `<section class="report-panel backtest-review-panel">
+    <header>
       <strong>Backtest: predicción vs resultado</strong>
-      <small>${escapeHtml(leader.model_label || leader.model_key || "Modelo #1")} · Marcador #1, 1X2 y over/under</small>
-    </summary>
-    ${backtestMatchTableHtml(leader)}
-  </details>`;
+      <small>${escapeHtml(leader.model_label || leader.model_key || "Modelo #1")} · ${escapeHtml(rows.length)} partidos evaluados</small>
+    </header>
+    <div class="backtest-match-card-grid">
+      ${rows.map((row) => backtestMatchCardHtml(row)).join("")}
+    </div>
+    <details class="backtest-full-table-drawer">
+      <summary>Tabla completa</summary>
+      ${backtestMatchTableHtml(leader)}
+    </details>
+  </section>`;
+}
+
+function backtestMatchCardHtml(row) {
+  const item = row || {};
+  const teams = backtestMatchTeams(item);
+  const homeAsset = item.home_asset || assetFor(teams.home || "");
+  const awayAsset = item.away_asset || assetFor(teams.away || "");
+  return `<article class="backtest-match-card">
+    <header>
+      <span>${escapeHtml(item.date || "")}</span>
+      <strong>${escapeHtml(item.fixture_id ? `#${item.fixture_id}` : "")}</strong>
+    </header>
+    <div class="backtest-match-teams">
+      <div>${flagHtml(homeAsset)}<strong>${escapeHtml(teams.home || "")}</strong></div>
+      <b>${escapeHtml(item.actual_score || "-")}</b>
+      <div>${flagHtml(awayAsset)}<strong>${escapeHtml(teams.away || "")}</strong></div>
+    </div>
+    <div class="backtest-card-metrics">
+      <section>
+        <span>Pick 1X2</span>
+        ${backtestOutcomeCellHtml(item)}
+      </section>
+      <section>
+        <span>Marcador #1</span>
+        ${backtestScoreCellHtml(item)}
+      </section>
+      <section>
+        <span>Top-3 / Top-5</span>
+        <div class="backtest-top-status">
+          <b class="${escapeAttr(item.top3_score_hit ? "hit" : "miss")}">Top-3 ${escapeHtml(item.top3_score_hit ? "Si" : "No")}</b>
+          <b class="${escapeAttr(item.top5_score_hit ? "hit" : "miss")}">Top-5 ${escapeHtml(item.top5_score_hit ? "Si" : "No")}</b>
+        </div>
+      </section>
+    </div>
+    ${backtestTopScoresHtml(item)}
+    ${backtestOverUnderSummaryHtml(item.over_under || [])}
+  </article>`;
+}
+
+function backtestMatchTeams(row) {
+  const item = row || {};
+  if (item.home || item.away) return { home: item.home || "", away: item.away || "" };
+  const parts = String(item.match || "").split(" vs ");
+  return { home: parts[0] || "", away: parts[1] || "" };
+}
+
+function backtestTopScoresHtml(row) {
+  const scores = (row.top_scores || []).length
+    ? row.top_scores
+    : [{ rank: 1, score: row.most_probable_score || row.modal_score || "-", probability: row.most_probable_score_probability, hit: row.most_probable_score_hit || row.score_hit }];
+  return `<div class="backtest-top-scores" aria-label="Top marcadores">
+    ${scores.slice(0, 5).map((score) => `<span class="${escapeAttr(score.hit ? "hit" : "")}"><b>#${escapeHtml(score.rank || "")} ${escapeHtml(score.score || "-")}</b><small>${escapeHtml(formatNumber(score.probability ?? "-"))}%</small></span>`).join("")}
+  </div>`;
+}
+
+function backtestOverUnderSummaryHtml(rows) {
+  const items = ["0.5", "1.5", "2.5", "3.5"].map((line) => (rows || []).find((item) => String(item.line) === line)).filter(Boolean);
+  if (!items.length) return "";
+  return `<div class="backtest-ou-summary">
+    ${items.map((item) => `<span class="${escapeAttr(item.hit ? "hit" : "miss")}"><b>U/O ${escapeHtml(item.line || "")}</b><small>${escapeHtml(item.prediction_label || "-")} · real ${escapeHtml(item.actual_label || "-")}</small></span>`).join("")}
+  </div>`;
 }
 
 function backtestMatchTableHtml(backtest) {
@@ -923,13 +937,13 @@ function alternativeBenchmarkCardHtml(item) {
   const backtest = item.backtest || {};
   const vs = backtest.vs_poisson || {};
   const warnings = backtest.warnings || [];
-  const reliability = Number(backtest.reliability_score || 0);
-  const badgeClass = reliability >= 75 ? "high" : reliability >= 45 ? "medium" : "low";
+  const score = Number(backtest.score_resultados ?? backtest.reliability_score ?? 0);
+  const badgeClass = score >= 75 ? "high" : score >= 45 ? "medium" : "low";
   return `<details class="alternative-model-card">
     <summary>
       <span>#${escapeHtml(backtest.rank || item.rank || "")}</span>
       <strong>${escapeHtml(item.model_name || item.key || "")}</strong>
-      <b class="reliability-badge ${escapeAttr(badgeClass)}">${escapeHtml(formatNumber(reliability))}</b>
+      <b class="reliability-badge ${escapeAttr(badgeClass)}">${escapeHtml(formatNumber(score))}</b>
     </summary>
     <div class="client-main-pick">
       <span>Modelo</span>
@@ -939,6 +953,7 @@ function alternativeBenchmarkCardHtml(item) {
     <section class="client-bets-panel">
       <header><strong>Backtest automático ${escapeHtml(backtest.evaluated_matches || 0)}</strong><small>${escapeHtml(vs.beats_poisson ? "Mejora vs Poisson" : "Métricas")}</small></header>
       <div class="technical-meta-row">
+        <span>Score resultados ${escapeHtml(formatNumber(score))}</span>
         <span>Log-loss ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))}</span>
         <span>RPS ${escapeHtml(formatNumber(backtest.rps ?? "-"))}</span>
         <span>ECE ${escapeHtml(formatNumber(backtest.expected_calibration_error ?? "-"))}</span>
@@ -1429,8 +1444,7 @@ function renderUpcomingPredictions(result) {
   document.getElementById("upcoming-predictions").innerHTML = (result.predictions || []).map((prediction) => {
     const fixture = prediction.fixture || {};
     const probs = prediction.probabilities || {};
-    const sources = prediction.market_sources || {};
-    const contextual = prediction.contextual_poisson || {};
+    const topScores = prediction.top_scores || [];
     const homeAsset = assetFor(fixture.home || "");
     const awayAsset = assetFor(fixture.away || "");
     const outcomes = [
@@ -1452,10 +1466,6 @@ function renderUpcomingPredictions(result) {
         <span>vs</span>
         <div class="upcoming-team away">${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
       </div>
-      <div class="prediction-pick">
-        <span>Favorito</span>
-        <strong>${escapeHtml(favorite.label)} · ${escapeHtml(favorite.team)}</strong>
-      </div>
       <div class="outcome-list">
         ${outcomes.map((item) => `
           <div class="outcome-row ${escapeAttr(item.key === favorite.key ? "active" : "")}">
@@ -1472,31 +1482,12 @@ function renderUpcomingPredictions(result) {
             <b>U ${escapeHtml(line.under ?? "-")}%</b>
           </div>`).join("")}
       </div>
-      ${contextualPoissonHtml(contextual, fixture)}
-      <div class="source-strip">
-        <span>${marketBadgeText(sources.result, "1X2: Poisson")}</span>
-        ${goalMarketLines.map((line) => `<span>${marketBadgeText(sources[line.key], `${line.label}: Poisson`)}</span>`).join("")}
+      <div class="top-scores">
+        ${topScores.slice(0, 5).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
       </div>
-      ${marketReadoutHtml(prediction.market_readout || {})}
-      <small>${escapeHtml((prediction.notes || []).join(" - "))}</small>
     </article>`;
   }).join("") || loadingHtml("Sin fixtures futuros");
   renderTable("upcoming-predictions-table", result.table);
-}
-
-function marketReadoutHtml(readout) {
-  const lines = (readout && readout.lines) || [];
-  if (lines.length) {
-    const ranked = [...lines].sort((a, b) => Math.abs(Number(b.raw_edge || 0)) - Math.abs(Number(a.raw_edge || 0))).slice(0, 4);
-    return `<div class="market-readout">
-      ${ranked.map((line) => `
-        <span>${escapeHtml(line.market || "")} ${escapeHtml(line.label || "")}: modelo ${escapeHtml(line.model_probability ?? "-")}% · mercado ${escapeHtml(line.market_probability ?? "-")}% · edge ${escapeHtml(line.raw_edge ?? "-")}pp</span>
-      `).join("")}
-    </div>`;
-  }
-  const missing = (readout && readout.missing_sources) || [];
-  if (!missing.length) return "";
-  return `<div class="market-readout muted">${missing.map((item) => `<span>Fuente faltante: ${escapeHtml(item)}</span>`).join("")}</div>`;
 }
 
 function contextualPoissonHtml(contextual, fixture) {
@@ -1632,9 +1623,6 @@ function renderMatchMonteCarlo(result) {
 function monteCarloMatchCardHtml(prediction) {
   const fixture = prediction.fixture || {};
   const probs = prediction.probabilities || {};
-  const expected = prediction.expected_goals || {};
-  const simulated = prediction.simulated_goals || {};
-  const scoreModel = prediction.score_model || {};
   const topScores = prediction.top_scores || [];
   const homeAsset = assetFor(fixture.home || "");
   const awayAsset = assetFor(fixture.away || "");
@@ -1657,10 +1645,6 @@ function monteCarloMatchCardHtml(prediction) {
       <span>vs</span>
       <div class="upcoming-team away">${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
-    <div class="prediction-pick">
-      <span>Monte Carlo · ${escapeHtml(formatInteger(prediction.iterations || 0))} simulaciones</span>
-      <strong>${escapeHtml(favorite.label)} · ${escapeHtml(favorite.team)}</strong>
-    </div>
     <div class="outcome-list">
       ${outcomes.map((item) => `
         <div class="outcome-row ${escapeAttr(item.key === favorite.key ? "active" : "")}">
@@ -1680,13 +1664,6 @@ function monteCarloMatchCardHtml(prediction) {
     <div class="top-scores">
       ${topScores.map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(score.probability)}%</b></span>`).join("")}
     </div>
-    <div class="source-strip">
-      <span>λ ${escapeHtml(expected.home ?? "-")} / ${escapeHtml(expected.away ?? "-")}</span>
-      <span>Media sim ${escapeHtml(simulated.home ?? "-")} / ${escapeHtml(simulated.away ?? "-")}</span>
-      <span>N=${escapeHtml(formatInteger(prediction.iterations || 0))}</span>
-      <span>${escapeHtml(scoreModel.label || prediction.source || "Poisson")}</span>
-    </div>
-    ${contextualPoissonHtml(prediction.contextual_poisson || {}, fixture)}
   </article>`;
 }
 
@@ -1949,6 +1926,19 @@ function formatNumber(value) {
   return number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+function formatReportDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("es-MX", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function formatSignedNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return value;
@@ -1960,12 +1950,6 @@ function formatInteger(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return value;
   return Math.round(number).toLocaleString("es-MX");
-}
-
-function marketBadgeText(source, fallback) {
-  if (!source || !source.source) return escapeHtml(fallback);
-  const model = source.model_name ? ` - ${source.model_name}` : "";
-  return `${escapeHtml(source.label || "")}: ${escapeHtml(source.source)}${escapeHtml(model)}`;
 }
 
 function simulationPayload(overrides = {}) {

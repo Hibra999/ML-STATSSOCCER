@@ -2048,6 +2048,117 @@ h3 { font-size: 16px; }
 .backtest-match-table table {
   min-width: 1180px;
 }
+.backtest-review-panel {
+  display: grid;
+  gap: 14px;
+}
+.backtest-match-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+.backtest-match-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.backtest-match-card header,
+.backtest-match-teams,
+.backtest-card-metrics {
+  min-width: 0;
+}
+.backtest-match-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.backtest-match-teams {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+.backtest-match-teams div {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+.backtest-match-teams div:last-child {
+  justify-content: flex-end;
+  text-align: right;
+}
+.backtest-match-teams strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.backtest-match-teams > b {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: #fff;
+  font-size: 15px;
+}
+.backtest-card-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.backtest-card-metrics section {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.backtest-card-metrics section > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+.backtest-top-status,
+.backtest-top-scores,
+.backtest-ou-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.backtest-top-status b,
+.backtest-top-scores span,
+.backtest-ou-summary span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #f7eded;
+  color: #9a3b3b;
+  font-size: 11px;
+  font-weight: 800;
+}
+.backtest-top-status b.hit,
+.backtest-top-scores span.hit,
+.backtest-ou-summary span.hit {
+  background: #eef7f2;
+  color: var(--green);
+}
+.backtest-top-scores small,
+.backtest-ou-summary small {
+  color: inherit;
+  font-weight: 700;
+  opacity: 0.8;
+}
+.backtest-full-table-drawer {
+  display: grid;
+  gap: 10px;
+}
 .alternatives-backtest-table th,
 .alternatives-backtest-table td {
   padding: 8px;
@@ -2308,23 +2419,6 @@ h3 { font-size: 16px; }
 .stat-totals .total-row small {
   color: var(--muted);
   line-height: 1.35;
-}
-.source-strip {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-}
-.source-strip span {
-  min-width: 0;
-  padding: 7px 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #fff;
-  color: var(--muted);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .market-readout {
   display: grid;
@@ -2830,8 +2924,7 @@ th {
   .player-token small {
     max-width: 96px;
   }
-  .totals-list,
-  .source-strip {
+  .totals-list {
     grid-template-columns: 1fr;
   }
 }

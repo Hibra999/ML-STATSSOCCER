@@ -299,9 +299,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "upcoming-team" in app_source
     assert "flagHtml(homeAsset)" in app_source
     assert "flagHtml(awayAsset)" in app_source
-    assert "market_sources" in app_source
-    assert "marketBadgeText" in app_source
-    assert "source-strip" in app_source
+    assert "market_sources" not in app_source
+    assert "marketBadgeText" not in app_source
+    assert "source-strip" not in app_source
     assert "prediction-pick" in app_source
     assert "outcome-row" in app_source
     assert "totals-list" in app_source
@@ -375,6 +375,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Horario pendiente" in app_source
     assert "Backtest: predicción vs resultado" in app_source
     assert "backtestPredictionReviewHtml" in app_source
+    assert "backtestMatchCardHtml" in app_source
     assert "U/O 2.5" in app_source
     assert "finalizados detectados" in app_source
     assert "upcoming-benchmark-tuning-enabled" in html_source

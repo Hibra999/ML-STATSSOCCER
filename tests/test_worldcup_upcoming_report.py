@@ -115,6 +115,7 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
             "brier": 0.22,
             "pick_accuracy": 0.4,
             "top3_score_accuracy": 0.3,
+            "over_under_accuracy": 0.6,
             "ou25_log_loss": 0.7,
             "score_accuracy": 0.1,
             "score_log_loss": 3.0,
@@ -130,6 +131,7 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
             "brier": 0.30,
             "pick_accuracy": 0.3,
             "top3_score_accuracy": 0.2,
+            "over_under_accuracy": 0.5,
             "ou25_log_loss": 0.8,
             "score_accuracy": 0.2,
             "score_log_loss": 4.0,
@@ -145,17 +147,19 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
             "brier": 0.40,
             "pick_accuracy": 0.2,
             "top3_score_accuracy": 0.1,
+            "over_under_accuracy": 0.4,
             "ou25_log_loss": 1.0,
             "score_accuracy": 0.0,
             "score_log_loss": 5.0,
         },
     ], {"holdout_start": "2022-12-09", "holdout_end": "2022-12-18"})
 
-    assert [item["model_key"] for item in ranked] == ["c", "b", "a"]
+    assert [item["model_key"] for item in ranked] == ["a", "b", "c"]
     assert [item["rank"] for item in ranked] == [1, 2, 3]
+    assert ranked[0]["score_resultados"] > ranked[1]["score_resultados"] > ranked[2]["score_resultados"]
     assert ranked[0]["reliability_score"] > ranked[1]["reliability_score"] > ranked[2]["reliability_score"]
-    assert all(item["ranking_metric"] == "log_loss" for item in ranked)
-    assert "RPS" in ranked[0]["ranking_reason"]
+    assert all(item["ranking_metric"] == "score_resultados" for item in ranked)
+    assert "log-loss" in ranked[0]["ranking_reason"]
     assert all(item["holdout_start"] == "2022-12-09" for item in ranked)
 
 
@@ -284,6 +288,10 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert result["summary"]["backtest_auto_n"] == 3
     assert result["summary"]["backtest_scope"] == "worldcup_2026_confirmed_auto"
     assert result["summary"]["backtest_source"] == "test-results"
+    assert result["summary"]["generated_at"]
+    assert result["summary"]["backtest_range"]["evaluated_matches"] == 3
+    assert result["summary"]["backtest_range"]["first_match"]["home"] == "Argentina"
+    assert result["summary"]["backtest_range"]["last_match"]["away"] == "Brazil"
     assert refresh_calls == [True]
     assert result["summary"]["results_refresh"]["refresh_attempted"] is True
     assert result["summary"]["results_refresh"]["fotmob_final_rows"] == 3
@@ -309,7 +317,12 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert all("top3_score_accuracy" in item for item in result["model_backtests"])
     assert all("feature_usage_counts" in item for item in result["model_backtests"])
     assert all("ou25_log_loss" in item for item in result["model_backtests"])
+    assert all("score_resultados" in item for item in result["model_backtests"])
     first_backtest_row = result["model_backtests"][0]["matches"][0]
+    assert first_backtest_row["home"] == "Argentina"
+    assert first_backtest_row["away"] == "France"
+    assert first_backtest_row["home_asset"]["name"] == "Argentina"
+    assert first_backtest_row["away_asset"]["name"] == "France"
     assert first_backtest_row["pick"] in {"1", "X", "2"}
     assert first_backtest_row["actual_pick"] in {"1", "X", "2"}
     assert isinstance(first_backtest_row["pick_hit"], bool)
@@ -317,6 +330,7 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert "most_probable_score_probability" in first_backtest_row
     assert isinstance(first_backtest_row["most_probable_score_hit"], bool)
     assert isinstance(first_backtest_row["top3_score_hit"], bool)
+    assert len(first_backtest_row["top_scores"]) == 5
     assert "rps" in first_backtest_row
     assert [item["line"] for item in first_backtest_row["over_under"]] == ["0.5", "1.5", "2.5", "3.5"]
     assert all(item["prediction_label"] in {"Over", "Under"} for item in first_backtest_row["over_under"])
@@ -376,7 +390,7 @@ def test_benchmark_optuna_tunes_poisson_recent_matches(monkeypatch):
             for number, recent_n in enumerate([5, 12, 30][:n_trials]):
                 trial = FakeTrial(number, recent_n)
                 trial.value = objective(trial)
-                if self.best_value is None or trial.value < self.best_value:
+                if self.best_value is None or trial.value > self.best_value:
                     self.best_value = trial.value
                     self.best_trial = trial
                 for callback in callbacks:
@@ -393,7 +407,7 @@ def test_benchmark_optuna_tunes_poisson_recent_matches(monkeypatch):
 
         @staticmethod
         def create_study(direction, sampler):
-            assert direction == "minimize"
+            assert direction == "maximize"
             return FakeStudy()
 
     history = pd.DataFrame([
@@ -405,7 +419,7 @@ def test_benchmark_optuna_tunes_poisson_recent_matches(monkeypatch):
 
     def fake_evaluate(**kwargs):
         recent_n = int(kwargs["config"]["poisson_recent_matches"])
-        return {"available": True, "log_loss": abs(recent_n - 12) + 0.25}
+        return {"available": True, "score_resultados": 100 - abs(recent_n - 12), "log_loss": abs(recent_n - 12) + 0.25}
 
     monkeypatch.setitem(sys.modules, "optuna", FakeOptuna)
     monkeypatch.setattr(services, "confirmed_worldcup_2026_backtest_rows", lambda tournament: confirmed)
@@ -431,7 +445,8 @@ def test_benchmark_optuna_tunes_poisson_recent_matches(monkeypatch):
     assert summary["scope"] == "all_active_models"
     assert summary["model_sequence"] == ["independent_poisson", "dixon_coles_mle"]
     assert summary["best_poisson_recent_matches"] == 12
-    assert summary["best_value"] == 0.25
+    assert summary["objective"] == "mean_score_resultados"
+    assert summary["best_value"] == 100
     assert [trial["poisson_recent_matches"] for trial in summary["trials"]] == [5, 12, 30]
     assert all(trial["available_models"] == 2 for trial in summary["trials"])
 
@@ -513,6 +528,15 @@ def test_alternatives_benchmark_report_applies_tuned_recent_matches(tmp_path, mo
                 "available": True,
                 "scope": "worldcup_2026_confirmed_auto",
                 "source": "test-results",
+                "generated_at": "2026-06-14T12:00:00+00:00",
+                "backtest_range": {
+                    "evaluated_matches": 1,
+                    "first_match": {"home": "A", "away": "B"},
+                    "last_match": {"home": "A", "away": "B"},
+                    "first_date": "2026-06-11",
+                    "last_date": "2026-06-11",
+                    "generated_at": "2026-06-14T12:00:00+00:00",
+                },
                 "confirmed_matches": 1,
                 "confirmed_matches_detail": [],
                 "evaluated_matches": 1,
@@ -525,6 +549,8 @@ def test_alternatives_benchmark_report_applies_tuned_recent_matches(tmp_path, mo
                 "available": True,
                 "rank": 1,
                 "reliability_score": 100,
+                "score_resultados": 100,
+                "ranking_metric": "score_resultados",
                 "evaluated_matches": 1,
                 "log_loss": 0.25,
                 "brier": 0.1,
@@ -552,10 +578,10 @@ def test_alternatives_benchmark_report_applies_tuned_recent_matches(tmp_path, mo
         "enabled": True,
         "available": True,
         "best_poisson_recent_matches": 7,
-        "best_value": 0.2,
+        "best_value": 88.2,
         "n_trials": 3,
         "sampler": "tpe",
-        "objective": "mean_log_loss",
+        "objective": "mean_score_resultados",
         "trials": [],
         "warnings": [],
     })
@@ -719,6 +745,28 @@ def test_worldcup_results_refresh_ignores_future_fixture_dates(tmp_path, monkeyp
     assert refresh["fotmob_final_rows"] == 1
     assert pd.read_csv(results_path)["date"].tolist() == ["2026-06-13"]
     assert confirmed["Date"].tolist() == ["2026-06-13"]
+
+
+def test_confirmed_backtest_rows_wait_until_real_kickoff_time(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 11, 0, tzinfo=timezone.utc))
+    pd.DataFrame([
+        {"date": "2026-06-14", "home": "England", "away": "Argentina", "home_goals": 0, "away_goals": 2, "status": "final", "source": "manual", "updated_at": "2026-06-14T11:00:00+00:00"},
+    ], columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+    tournament = {
+        "matches": [
+            {"num": 1, "date": "2026-06-14", "time": "12:00 UTC+0", "team1": "England", "team2": "Argentina", "group": "Group A"},
+        ],
+    }
+
+    assert services.confirmed_worldcup_2026_backtest_rows(tournament).empty
+
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 12, 1, tzinfo=timezone.utc))
+    confirmed = services.confirmed_worldcup_2026_backtest_rows(tournament)
+    assert confirmed.shape[0] == 1
+    assert confirmed.iloc[0]["Team 1"] == "England"
 
 
 def test_worldcup_results_refresh_skips_non_final_current_date(tmp_path, monkeypatch):
