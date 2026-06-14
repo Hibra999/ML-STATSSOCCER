@@ -1795,9 +1795,15 @@ h3 { font-size: 16px; }
   display: grid;
   gap: 8px;
 }
+.top-ranked-pick {
+  background: #eef7f2;
+}
+.top-ranked-pick .client-main-pick {
+  margin: 0;
+}
 .alternative-model-row {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) 86px minmax(120px, 0.85fr) minmax(110px, 0.75fr);
+  grid-template-columns: minmax(150px, 1fr) 62px minmax(120px, 0.85fr) minmax(110px, 0.75fr);
   gap: 8px;
   align-items: center;
   min-width: 0;
@@ -1827,7 +1833,7 @@ h3 { font-size: 16px; }
 }
 .alternatives-backtest-table table {
   width: 100%;
-  min-width: 760px;
+  min-width: 980px;
   border-collapse: collapse;
 }
 .alternatives-backtest-table th,

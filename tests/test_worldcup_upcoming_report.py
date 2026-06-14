@@ -24,6 +24,7 @@ def test_sota_and_alternative_sequences_are_statistical_score_models():
         "skellam_margin",
         "copula_weibull_count",
     ]
+    assert services.BENCHMARK_SCORE_MODEL_SEQUENCE == services.SOTA_SCORE_MODEL_SEQUENCE
     assert "independent_poisson" not in services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
 
 
@@ -51,6 +52,55 @@ def test_alternatives_benchmark_aliases_and_statistical_registry():
     registry_text = json.dumps(alternatives).lower()
     assert not any(term in registry_text for term in forbidden)
     assert all(item["model_name"] and item["description"] for item in alternatives)
+
+
+def test_alternatives_benchmark_default_backtest_and_ranking_policy():
+    from src.web import mundial_services as services
+
+    config = services.report_pipeline_config({}, services.ALTERNATIVES_BENCHMARK_PIPELINE_MODE)
+    assert config["backtest_last_n"] == 7
+
+    ranked = services.rank_backtest_models([
+        {
+            "model_key": "a",
+            "model_label": "A",
+            "available": True,
+            "evaluated_matches": 7,
+            "log_loss": 1.0,
+            "brier": 0.22,
+            "pick_accuracy": 0.4,
+            "score_accuracy": 0.1,
+            "score_log_loss": 3.0,
+        },
+        {
+            "model_key": "b",
+            "model_label": "B",
+            "available": True,
+            "evaluated_matches": 7,
+            "log_loss": 1.0,
+            "brier": 0.30,
+            "pick_accuracy": 0.3,
+            "score_accuracy": 0.2,
+            "score_log_loss": 4.0,
+        },
+        {
+            "model_key": "c",
+            "model_label": "C",
+            "available": True,
+            "evaluated_matches": 7,
+            "log_loss": 0.9,
+            "brier": 0.40,
+            "pick_accuracy": 0.2,
+            "score_accuracy": 0.0,
+            "score_log_loss": 5.0,
+        },
+    ], {"holdout_start": "2022-12-09", "holdout_end": "2022-12-18"})
+
+    assert [item["model_key"] for item in ranked] == ["c", "b", "a"]
+    assert [item["rank"] for item in ranked] == [1, 2, 3]
+    assert ranked[0]["reliability_score"] > ranked[1]["reliability_score"] > ranked[2]["reliability_score"]
+    assert all(item["ranking_metric"] == "log_loss" for item in ranked)
+    assert all(item["holdout_start"] == "2022-12-09" for item in ranked)
 
 
 def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_consensus(tmp_path, monkeypatch):
@@ -116,20 +166,23 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert result["summary"]["pipeline_mode"] == "alternatives_benchmark"
     assert result["summary"]["pipeline_label"] == "Benchmark alternativas"
     assert result["summary"]["evidence_policy"] == "local_backtest_vs_poisson"
-    assert result["summary"]["score_models"] == services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
+    assert result["summary"]["score_models"] == [item["model_key"] for item in result["model_backtests"]]
+    assert set(result["summary"]["score_models"]) == set(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
     assert result["summary"]["baseline_model"]["key"] == "independent_poisson"
     assert result["summary"]["backtest"]["evaluated_matches"] == 5
     assert len(result["fixture_reports"]) == 1
     fixture_report = result["fixture_reports"][0]
-    assert [model["model_key"] for model in fixture_report["models"]] == services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
+    assert [model["model_key"] for model in fixture_report["models"]] == result["summary"]["score_models"]
     assert fixture_report["baseline_poisson"]["model_key"] == "independent_poisson"
     assert "consensus" not in fixture_report
     assert "consensus_score_distribution" not in fixture_report
     assert "consensus_eligible" not in fixture_report["baseline_poisson"]
     assert all("consensus_eligible" not in model and "signature" not in model for model in fixture_report["models"])
-    assert len(result["model_backtests"]) == len(services.ALTERNATIVE_SCORE_MODEL_SEQUENCE)
-    assert result["best_model"]["model_key"] in services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
-    assert result["table"]["total"] == len(services.ALTERNATIVE_SCORE_MODEL_SEQUENCE)
+    assert len(result["model_backtests"]) == len(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
+    assert [item["rank"] for item in result["model_backtests"]] == list(range(1, len(services.BENCHMARK_SCORE_MODEL_SEQUENCE) + 1))
+    assert result["best_model"]["model_key"] == result["model_backtests"][0]["model_key"]
+    assert result["best_model"]["model_key"] in services.BENCHMARK_SCORE_MODEL_SEQUENCE
+    assert result["table"]["total"] == len(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
     assert (tmp_path / "latest.json").exists()
     assert progress[-1]["stage"] == "complete"
 

@@ -83,6 +83,7 @@ SOTA_SCORE_MODEL_SEQUENCE = [
     "copula_weibull_count",
 ]
 ALTERNATIVE_SCORE_MODEL_SEQUENCE = list(ALTERNATIVE_SCORE_MODEL_KEYS)
+BENCHMARK_SCORE_MODEL_SEQUENCE = list(dict.fromkeys([*SOTA_SCORE_MODEL_SEQUENCE, *ALTERNATIVE_SCORE_MODEL_KEYS]))
 SOTA_EXPERIMENTAL_MODEL_PENALTIES = {
     "copula_weibull_count": 0.65,
 }
@@ -921,7 +922,7 @@ def alternatives_benchmark_report(
     group_filter = str(payload.get("group") or "").strip()
     fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter).head(limit).copy()
     fixture_records = [fixture for _, fixture in fixture_df.iterrows()]
-    model_sequence = list(ALTERNATIVE_SCORE_MODEL_SEQUENCE)
+    model_sequence = list(BENCHMARK_SCORE_MODEL_SEQUENCE)
     fixture_reports = upcoming_sota_fixture_reports(
         tournament=tournament,
         base_model=base_model,
@@ -933,10 +934,6 @@ def alternatives_benchmark_report(
         history_df=history_df,
         progress_callback=progress_callback,
     )
-    for fixture_report, fixture in zip(fixture_reports, fixture_records):
-        fixture_report["baseline_poisson"] = poisson_baseline_report_for_fixture(base_model, fixture, config)
-        strip_consensus_fields_from_alternative_report(fixture_report)
-        fixture_report["warnings"] = fixture_report_warnings(fixture_report)
 
     backtest = alternatives_backtest_report(
         history_df=history_df,
@@ -950,6 +947,13 @@ def alternatives_benchmark_report(
     backtests = backtest.get("models", [])
     best_model = best_alternative_from_backtests(backtests)
     backtest_by_key = {str(item.get("model_key") or ""): item for item in backtests}
+    ranked_model_keys = [str(item.get("model_key") or "") for item in backtests if str(item.get("model_key") or "")]
+    fixture_reports = rank_fixture_report_models(fixture_reports, ranked_model_keys)
+    for fixture_report, fixture in zip(fixture_reports, fixture_records):
+        fixture_report["baseline_poisson"] = poisson_baseline_report_for_fixture(base_model, fixture, config)
+        strip_consensus_fields_from_alternative_report(fixture_report)
+        fixture_report["warnings"] = fixture_report_warnings(fixture_report)
+    ranked_models = benchmark_models_with_backtests(backtests)
     alternatives = alternatives_with_backtests(sota_alternatives_catalog(), backtest_by_key)
     table_rows = alternatives_benchmark_table_rows(fixture_reports, backtest_by_key)
     table = table_payload(pd.DataFrame(table_rows), page=1, page_size=max(len(table_rows), 1))
@@ -980,11 +984,11 @@ def alternatives_benchmark_report(
         "sota_calculation_mode": "not_applicable",
         "sota_calculation_label": "Modelos estadisticos individuales",
         "monte_carlo_iterations": 0,
-        "score_models": model_sequence,
+        "score_models": ranked_model_keys or model_sequence,
         "baseline_model": {
             "key": DEFAULT_SCORE_MODEL,
             "label": score_model_display_label(DEFAULT_SCORE_MODEL),
-            "role": "comparison_only",
+            "role": "ranked_reference",
         },
         "hardware": hardware,
         "warnings": warnings,
@@ -996,6 +1000,7 @@ def alternatives_benchmark_report(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "alternatives": alternatives,
+        "ranked_models": ranked_models,
         "baseline_context": sota_baseline_context(),
         "baseline": summary["baseline_model"],
         "fixture_reports": fixture_reports,
@@ -1071,7 +1076,7 @@ def alternatives_backtest_report(
     working = history_df.copy()
     working["_date"] = pd.to_datetime(working["Date"], errors="coerce")
     working = working[working["_date"].notna()].sort_values("_date", kind="stable").reset_index(drop=True)
-    requested = int(_clamp_int(config.get("backtest_last_n", 20), 5, 100))
+    requested = int(_clamp_int(config.get("backtest_last_n", 7), 5, 100))
     eval_count = min(requested, max(len(working) - 5, 0))
     if eval_count <= 0:
         return {
@@ -1146,8 +1151,95 @@ def alternatives_backtest_report(
         "holdout_start": str(holdout_df.iloc[0].get("Date", "")) if not holdout_df.empty else "",
         "holdout_end": str(holdout_df.iloc[-1].get("Date", "")) if not holdout_df.empty else "",
         "baseline": baseline_metrics,
+        "anti_leakage": "Cada modelo se ajusta con partidos anteriores al bloque holdout de ultimos N partidos.",
     }
+    models = rank_backtest_models(models, summary)
     return {"summary": summary, "models": models, "warnings": []}
+
+
+def rank_backtest_models(models: List[Dict[str, Any]], summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+    indexed = list(enumerate(models or []))
+    ranked_pairs = sorted(
+        indexed,
+        key=lambda pair: (
+            0 if pair[1].get("available") else 1,
+            float_or_zero(pair[1].get("log_loss")) if pair[1].get("available") else float("inf"),
+            -float_or_zero(pair[1].get("score_accuracy")),
+            float_or_zero(pair[1].get("brier")) if pair[1].get("available") else float("inf"),
+            -float_or_zero(pair[1].get("pick_accuracy")),
+            float_or_zero(pair[1].get("score_log_loss")) if pair[1].get("available") else float("inf"),
+            pair[0],
+        ),
+    )
+    total = max(len(ranked_pairs), 1)
+    ranked: List[Dict[str, Any]] = []
+    for rank, (_, item) in enumerate(ranked_pairs, start=1):
+        payload = dict(item)
+        payload["rank"] = rank
+        payload["reliability_score"] = round(100.0 * (total - rank + 1) / total, 2) if payload.get("available") else 0.0
+        payload["ranking_metric"] = "log_loss"
+        payload["ranking_reason"] = (
+            "Ordenado por menor log-loss; desempates: mayor acierto de marcador exacto, "
+            "menor Brier, mayor acierto 1X2 y menor score-log-loss."
+        )
+        payload["holdout_start"] = summary.get("holdout_start", "")
+        payload["holdout_end"] = summary.get("holdout_end", "")
+        ranked.append(payload)
+    return ranked
+
+
+def rank_fixture_report_models(fixture_reports: List[Dict[str, Any]], ranked_model_keys: List[str]) -> List[Dict[str, Any]]:
+    rank_by_key = {str(key): index for index, key in enumerate(ranked_model_keys)}
+    output = []
+    for report in fixture_reports:
+        payload = dict(report)
+        payload["models"] = sorted(
+            list(payload.get("models", [])),
+            key=lambda model: rank_by_key.get(str(model.get("model_key") or ""), len(rank_by_key)),
+        )
+        output.append(payload)
+    return output
+
+
+def benchmark_models_with_backtests(backtests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    catalog_by_key = {str(item.get("key") or ""): item for item in benchmark_score_model_catalog()}
+    output = []
+    for backtest in backtests or []:
+        key = str(backtest.get("model_key") or "")
+        catalog = dict(catalog_by_key.get(key, {"key": key, "model_name": backtest.get("model_label", key)}))
+        output.append({
+            **catalog,
+            "rank": backtest.get("rank", catalog.get("rank", "")),
+            "backtest": backtest,
+        })
+    return output
+
+
+def benchmark_score_model_catalog() -> List[Dict[str, Any]]:
+    alternatives = {str(item.get("key") or ""): item for item in sota_alternatives_catalog()}
+    catalog: List[Dict[str, Any]] = []
+    for index, key in enumerate(BENCHMARK_SCORE_MODEL_SEQUENCE, start=1):
+        if key == DEFAULT_SCORE_MODEL:
+            catalog.append({
+                "rank": index,
+                "key": DEFAULT_SCORE_MODEL,
+                "model_name": score_model_display_label(DEFAULT_SCORE_MODEL),
+                "family": "baseline_poisson",
+                "description": "Poisson independiente usado tambien como modelo rankeado de referencia.",
+            })
+            continue
+        item = dict(alternatives.get(key, {}))
+        if not item:
+            item = {
+                "rank": index,
+                "key": key,
+                "model_name": score_model_display_label(key),
+                "family": "score_model",
+                "description": "",
+            }
+        item["rank"] = index
+        catalog.append(item)
+    return catalog
 
 
 def alternatives_backtest_teams(tournament: Dict[str, Any], train_df: pd.DataFrame, holdout_df: pd.DataFrame) -> List[str]:
@@ -1280,23 +1372,15 @@ def backtest_delta_summary(log_loss_delta: float, brier_delta: float, pick_delta
 
 
 def best_alternative_from_backtests(backtests: List[Dict[str, Any]]) -> Dict[str, Any]:
-    candidates = [item for item in backtests if item.get("available") and int(item.get("evaluated_matches") or 0) > 0]
+    candidates = [
+        item for item in backtests
+        if item.get("available") and int(item.get("evaluated_matches") or 0) > 0
+    ]
     if not candidates:
-        return {"available": False, "reason": "Sin modelos alternativos evaluables en backtest."}
-    ranked = sorted(
-        candidates,
-        key=lambda item: (
-            -int((item.get("vs_poisson") or {}).get("metric_wins") or 0),
-            float_or_zero((item.get("vs_poisson") or {}).get("log_loss_delta")),
-            float_or_zero((item.get("vs_poisson") or {}).get("brier_delta")),
-            -float_or_zero((item.get("vs_poisson") or {}).get("pick_accuracy_delta")),
-            -float_or_zero((item.get("vs_poisson") or {}).get("score_accuracy_delta")),
-        ),
-    )
-    winner = dict(ranked[0])
-    winner["rank"] = 1
+        return {"available": False, "reason": "Sin modelos evaluables en backtest."}
+    winner = dict(sorted(candidates, key=lambda item: int(item.get("rank") or 9999))[0])
     winner["available"] = True
-    winner["selection_policy"] = "Mayor numero de metricas ganadas contra Poisson; desempate por log-loss y Brier."
+    winner["selection_policy"] = "Menor log-loss; desempates por marcador exacto, Brier, pick 1X2 y score-log-loss."
     return winner
 
 
@@ -1333,6 +1417,7 @@ def alternatives_benchmark_table_rows(
                 "Fecha": fixture.get("date", ""),
                 "Grupo": fixture.get("group", ""),
                 "Partido": fixture.get("label", ""),
+                "Rank": backtest.get("rank", ""),
                 "Modelo": model.get("model_label", ""),
                 "Disponible": "Si" if model.get("available") else "No",
                 "Pick": f"{decision.get('label', '')} {decision.get('team', '')}".strip(),
@@ -1343,6 +1428,11 @@ def alternatives_benchmark_table_rows(
                 "X %": probs.get("draw", ""),
                 "2 %": probs.get("away", ""),
                 "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
+                "Log-loss": backtest.get("log_loss", ""),
+                "Brier": backtest.get("brier", ""),
+                "Pick accuracy": backtest.get("pick_accuracy", ""),
+                "Score exacto": backtest.get("score_accuracy", ""),
+                "Confiabilidad": backtest.get("reliability_score", ""),
                 "Backtest vs Poisson": (backtest.get("vs_poisson") or {}).get("summary", ""),
                 "Warnings": " | ".join(model.get("warnings", [])),
             })
@@ -1523,7 +1613,8 @@ def sota_calculation_summary(config: Dict[str, Any]) -> str:
 def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[str, Any]:
     config = simulation_config(payload)
     config["pipeline_mode"] = pipeline_mode
-    config["backtest_last_n"] = int(_clamp_int(payload.get("backtest_last_n", 20), 5, 100))
+    default_backtest_last_n = 7 if pipeline_mode == ALTERNATIVES_BENCHMARK_PIPELINE_MODE else 20
+    config["backtest_last_n"] = int(_clamp_int(payload.get("backtest_last_n", default_backtest_last_n), 5, 100))
     config["bayes_profile"] = str(payload.get("bayes_profile") or "deep").strip().lower()
     config["sota_device"] = str(payload.get("sota_device") or "auto").strip().lower()
     config["sota_calculation_mode"] = normalize_sota_calculation_mode(payload.get("sota_calculation_mode"))
