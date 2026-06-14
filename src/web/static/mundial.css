@@ -1717,9 +1717,19 @@ h3 { font-size: 16px; }
   color: var(--muted);
   font-size: 12px;
 }
+.report-panel > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  list-style-position: inside;
+}
+.report-panel > summary strong,
 .report-panel > header strong {
   color: var(--ink);
   font-size: 13px;
+}
+.report-panel > summary small {
+  margin-left: 8px;
 }
 .technical-meta-row {
   display: flex;
@@ -1793,6 +1803,16 @@ h3 { font-size: 16px; }
 }
 .models-drawer .alternative-model-list {
   padding: 0 10px 10px;
+}
+.feature-context-drawer {
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+.feature-context-drawer summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
 }
 .consensus-badge {
   display: inline-flex;

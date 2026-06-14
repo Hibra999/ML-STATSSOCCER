@@ -1,6 +1,7 @@
 import json
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -293,6 +294,7 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert fixture_report["fixture"]["kickoff_iso"] == "2026-06-20T18:00:00+00:00"
     assert fixture_report["fixture"]["countdown_state"] == "ready"
     assert [model["model_key"] for model in fixture_report["models"]] == result["summary"]["score_models"]
+    assert all("feature_context" in model for model in fixture_report["models"])
     assert fixture_report["baseline_poisson"]["model_key"] == "independent_poisson"
     assert "consensus" not in fixture_report
     assert "consensus_score_distribution" not in fixture_report
@@ -305,11 +307,15 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert all("rps" in item for item in result["model_backtests"])
     assert all("expected_calibration_error" in item for item in result["model_backtests"])
     assert all("top3_score_accuracy" in item for item in result["model_backtests"])
+    assert all("feature_usage_counts" in item for item in result["model_backtests"])
     assert all("ou25_log_loss" in item for item in result["model_backtests"])
     first_backtest_row = result["model_backtests"][0]["matches"][0]
     assert first_backtest_row["pick"] in {"1", "X", "2"}
     assert first_backtest_row["actual_pick"] in {"1", "X", "2"}
     assert isinstance(first_backtest_row["pick_hit"], bool)
+    assert first_backtest_row["most_probable_score"] == first_backtest_row["modal_score"]
+    assert "most_probable_score_probability" in first_backtest_row
+    assert isinstance(first_backtest_row["most_probable_score_hit"], bool)
     assert isinstance(first_backtest_row["top3_score_hit"], bool)
     assert "rps" in first_backtest_row
     assert [item["line"] for item in first_backtest_row["over_under"]] == ["0.5", "1.5", "2.5", "3.5"]
@@ -330,6 +336,7 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert (tmp_path / f"{result['report_id']}_predictions.html").exists()
     assert (tmp_path / f"{result['report_id']}_predictions.csv").exists()
     assert (tmp_path / f"{result['report_id']}_backtest.html").exists()
+    assert "Marcador #1" in (tmp_path / f"{result['report_id']}_backtest.html").read_text(encoding="utf-8")
     assert (tmp_path / f"{result['report_id']}_backtest.csv").exists()
     assert (tmp_path / "latest.json").exists()
     assert progress[-1]["stage"] == "complete"
@@ -824,6 +831,87 @@ def test_worldcup_results_refresh_uses_verified_local_rows_when_remote_sources_a
     assert pd.read_csv(results_path).shape[0] == 8
 
 
+def test_worldcup_results_refresh_and_backtest_auto_use_nine_verified_finals(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 23, 30, tzinfo=timezone.utc))
+    pd.DataFrame(columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+    tournament = {
+        "matches": [
+            {"num": 1, "date": "2026-06-11", "time": "13:00 UTC-6", "team1": "Mexico", "team2": "South Africa", "group": "Group A"},
+            {"num": 2, "date": "2026-06-11", "time": "20:00 UTC-6", "team1": "South Korea", "team2": "Czech Republic", "group": "Group A"},
+            {"num": 5, "date": "2026-06-12", "time": "18:00 UTC-4", "team1": "Canada", "team2": "Bosnia & Herzegovina", "group": "Group B"},
+            {"num": 9, "date": "2026-06-12", "time": "18:00 UTC-7", "team1": "USA", "team2": "Paraguay", "group": "Group D"},
+            {"num": 6, "date": "2026-06-13", "time": "15:00 UTC-4", "team1": "Qatar", "team2": "Switzerland", "group": "Group B"},
+            {"num": 13, "date": "2026-06-13", "time": "18:00 UTC-4", "team1": "Brazil", "team2": "Morocco", "group": "Group C"},
+            {"num": 14, "date": "2026-06-13", "time": "21:00 UTC-4", "team1": "Haiti", "team2": "Scotland", "group": "Group C"},
+            {"num": 10, "date": "2026-06-13", "time": "21:00 UTC-5", "team1": "Australia", "team2": "Turkey", "group": "Group D"},
+            {"num": 17, "date": "2026-06-14", "time": "18:00 UTC-4", "team1": "Germany", "team2": "Curaçao", "group": "Group E"},
+        ],
+    }
+    monkeypatch.setattr(worldcup_data, "fetch_fotmob_worldcup_result_rows", lambda working, warnings: [])
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", lambda working, warnings: [])
+
+    refresh = worldcup_data.refresh_worldcup_2026_results(tournament, refresh=True)
+    confirmed = services.confirmed_worldcup_2026_backtest_rows(tournament)
+
+    assert refresh["verified_final_rows"] == 9
+    assert refresh["confirmed_results"] == 9
+    assert confirmed.shape[0] == 9
+    germany = confirmed[confirmed["Team 1"].eq("Germany") & confirmed["Team 2"].eq("Curaçao")].iloc[0]
+    assert germany["G1"] == 7
+    assert germany["G2"] == 1
+
+    class FakeModel:
+        max_goals = 10
+
+        def match_probabilities(self, home, away, max_goals=None):
+            return {
+                "home": 0.52,
+                "draw": 0.26,
+                "away": 0.22,
+                "over05": 0.9,
+                "under05": 0.1,
+                "over15": 0.7,
+                "under15": 0.3,
+                "over25": 0.45,
+                "under25": 0.55,
+                "over35": 0.2,
+                "under35": 0.8,
+                "lambda1": 1.3,
+                "lambda2": 0.9,
+            }
+
+        def score_model_metadata(self):
+            return {"key": "independent_poisson", "label": "Poisson", "available": True, "params": {}, "warnings": []}
+
+    class FakeWorldCupModel:
+        @classmethod
+        def from_history(cls, historical_df, teams, **kwargs):
+            return FakeModel()
+
+    history = pd.DataFrame([
+        {"Date": "2022-11-20", "Year": 2022, "Team 1": "Mexico", "Team 2": "Canada", "G1": 1, "G2": 0, "Round": "Group", "Group": "A"},
+        {"Date": "2022-11-21", "Year": 2022, "Team 1": "Germany", "Team 2": "Brazil", "G1": 2, "G2": 1, "Round": "Group", "Group": "A"},
+    ])
+    monkeypatch.setattr(services, "WorldCupModel", FakeWorldCupModel)
+    monkeypatch.setattr(services, "fixture_results_status", lambda fixture_df=None: {"source": "verified-test"})
+
+    result = services.alternatives_backtest_report(
+        history_df=history,
+        tournament=tournament,
+        config=services.report_pipeline_config({}, services.ALTERNATIVES_BENCHMARK_PIPELINE_MODE),
+        model_sequence=["independent_poisson"],
+        start_time=0.0,
+        hardware={},
+    )
+
+    assert result["summary"]["evaluated_matches"] == 9
+    assert result["models"][0]["evaluated_matches"] == 9
+    assert len(result["models"][0]["matches"]) == 9
+
+
 def test_worldcup_results_refresh_updates_conflicting_local_result(tmp_path, monkeypatch):
     from src.web import mundial_services as services
 
@@ -985,6 +1073,56 @@ def test_alternatives_backtest_auto_uses_confirmed_2026_walk_forward_without_lea
     assert result["models"][0]["matches"][0]["pick_hit"] is True
     assert result["models"][0]["matches"][0]["over_under"][0]["hit"] is True
     assert result["models"][0]["rank"] == 1
+
+
+def test_benchmark_feature_context_uses_only_pre_match_history(monkeypatch):
+    from src.web import mundial_services as services
+    from src.worldcup.model import WorldCupModel
+
+    history = pd.DataFrame([
+        {"Date": "2026-06-09", "Year": 2026, "Team 1": "Mexico", "Team 2": "Canada", "G1": 1, "G2": 0, "Round": "Group", "Group": "A"},
+        {"Date": "2026-06-10", "Year": 2026, "Team 1": "Mexico", "Team 2": "Canada", "G1": 8, "G2": 0, "Round": "Group", "Group": "A"},
+    ])
+    tournament = {"matches": [{"num": 1, "date": "2026-06-10", "team1": "Mexico", "team2": "Canada", "group": "Group A"}]}
+    model = WorldCupModel.from_history(history.iloc[:1], teams=["Mexico", "Canada"])
+
+    source = services.BenchmarkFeatureSource(tournament=tournament, history_df=history, config={})
+    context = source.context_for_match(
+        model,
+        {"No.": 1, "Fecha": "2026-06-10", "Equipo 1": "Mexico", "Equipo 2": "Canada", "Grupo": "Group A"},
+        model_key="independent_poisson",
+    )
+
+    assert context["history_rows"] == 1
+    assert context["_feature_row"]["history_last_3_goals_for_avg_home"] == pytest.approx(1.0)
+    assert context["_feature_row"]["history_last_3_goal_diff_avg_diff"] == pytest.approx(2.0)
+
+
+def test_benchmark_feature_enhanced_model_works_without_optional_caches(monkeypatch):
+    from src.web import mundial_services as services
+    from src.worldcup.model import WorldCupModel
+
+    monkeypatch.setattr(services, "load_market_data", lambda **kwargs: {"matches": pd.DataFrame(), "qualifiers": pd.DataFrame(), "warnings": []})
+    monkeypatch.setattr(services, "load_api_football_data", lambda **kwargs: {"team_stats": pd.DataFrame(), "lineups": pd.DataFrame(), "injuries": pd.DataFrame(), "market_rows": pd.DataFrame(), "warnings": []})
+    monkeypatch.setattr(services, "load_international_matches", lambda required=False: pd.DataFrame())
+    monkeypatch.setattr(services, "player_features_dataframe", lambda tournament: pd.DataFrame())
+
+    history = pd.DataFrame([
+        {"Date": "2022-11-20", "Year": 2022, "Team 1": "Mexico", "Team 2": "Canada", "G1": 1, "G2": 0, "Round": "Group", "Group": "A"},
+    ])
+    model = WorldCupModel.from_history(history, teams=["Mexico", "Canada"])
+    source = services.BenchmarkFeatureSource(tournament={"matches": []}, history_df=history, config={})
+    enhanced = services.apply_benchmark_feature_model(model, "independent_poisson", source, history_df=history)
+
+    probabilities = enhanced.match_probabilities_for_match("Mexico", "Canada", match={"Fecha": "2026-06-11", "Equipo 1": "Mexico", "Equipo 2": "Canada"})
+
+    assert set(probabilities) >= {"home", "draw", "away", "over25", "under25"}
+    assert "feature_context" in probabilities
+    assert probabilities["feature_context"]["cutoff"] == "strictly_before_match"
+
+
+def test_worldcup_ui_uses_marcador_1_label():
+    assert "Marcador #1" in Path("src/web/static/mundial.js").read_text(encoding="utf-8")
 
 
 def test_consensus_rounding_signature_and_strength_levels():

@@ -35,6 +35,7 @@ from src.worldcup.score_models import (
     DEFAULT_SCORE_MODEL,
     build_score_model,
     normalize_score_model_key,
+    probabilities_from_score_grid,
     sample_scores_from_grid,
     score_model_options,
 )
@@ -47,11 +48,22 @@ from src.worldcup.sota_alternatives import (
     sota_baseline_context,
 )
 from src.worldcup.data import CACHE_ROOT, fixture_results_status, group_letter, groups_from_tournament, refresh_worldcup_2026_results
+from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
 from src.worldcup.international_provider import (
     INTERNATIONAL_ROOT,
     contextual_poisson_for_match,
     international_results_status,
     load_international_matches,
+    recent15_feature_table,
+)
+from src.worldcup.market_provider import load_market_data, normalize_market_frame, qualifier_feature_table
+from src.worldcup.training import (
+    HISTORY_REFERENCE_DATE,
+    TARGET_WORLDCUP_YEAR,
+    build_history_feature_table,
+    build_matchup_feature_table,
+    json_safe,
+    match_feature_row,
 )
 from src.worldcup.lanus_provider import (
     LINEUPS_ROOT,
@@ -249,6 +261,486 @@ def poisson_probabilities_from_lambdas(lambda1: float, lambda2: float, max_goals
 def _poisson_pmf(goals: int, rate: float) -> float:
     safe_rate = max(float(rate), 1e-9)
     return math.exp(-safe_rate) * (safe_rate ** int(goals)) / math.factorial(int(goals))
+
+
+class BenchmarkFeatureSource:
+    def __init__(self, tournament: Dict[str, Any], history_df: pd.DataFrame | None, config: Dict[str, Any]):
+        self.tournament = tournament or {}
+        self.history_df = normalize_feature_history(history_df)
+        self.config = dict(config or {})
+        self.warnings: List[str] = []
+        self.market_rows = pd.DataFrame()
+        self.qualifier_rows = pd.DataFrame()
+        self.api_football: Dict[str, pd.DataFrame] = {}
+        self.international_matches = pd.DataFrame()
+        self.fixture_feature_rows = pd.DataFrame()
+        self.context_cache: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        self._load_cached_sources()
+
+    def _load_cached_sources(self) -> None:
+        try:
+            market = load_market_data(allow_download=False, force_download=False, use_scraper=False)
+            self.market_rows = market.get("matches", pd.DataFrame()).copy()
+            self.qualifier_rows = market.get("qualifiers", pd.DataFrame()).copy()
+            self.warnings.extend(str(item) for item in market.get("warnings", []) if str(item))
+        except Exception as exc:
+            self.warnings.append(f"Odds cache no disponible para features ({exc.__class__.__name__}).")
+        try:
+            api_bundle = load_api_football_data(allow_download=False, force_download=False)
+            self.api_football = {
+                key: api_bundle.get(key, pd.DataFrame()).copy()
+                for key in ("team_stats", "lineups", "injuries", "market_rows")
+            }
+            api_market = self.api_football.get("market_rows", pd.DataFrame())
+            if api_market is not None and not api_market.empty:
+                self.market_rows = normalize_market_frame(pd.concat([self.market_rows, api_market], ignore_index=True))
+            self.warnings.extend(str(item) for item in api_bundle.get("warnings", []) if str(item))
+        except Exception as exc:
+            self.warnings.append(f"API-Football cache no disponible para features ({exc.__class__.__name__}).")
+        try:
+            self.international_matches = load_international_matches(required=False)
+        except Exception as exc:
+            self.warnings.append(f"all_matches.csv no disponible para features recientes ({exc.__class__.__name__}).")
+        try:
+            self.fixture_feature_rows = player_features_dataframe(self.tournament)
+        except Exception as exc:
+            self.warnings.append(f"Cache XI/jugadores no disponible para features ({exc.__class__.__name__}).")
+
+    def context_for_match(
+            self,
+            model: Any,
+            fixture: pd.Series | Dict[str, Any],
+            model_key: str,
+            history_df: pd.DataFrame | None = None,
+    ) -> Dict[str, Any]:
+        record = fixture.to_dict() if hasattr(fixture, "to_dict") else dict(fixture or {})
+        home = str(record.get("Equipo 1", record.get("Team 1", record.get("home", ""))) or "")
+        away = str(record.get("Equipo 2", record.get("Team 2", record.get("away", ""))) or "")
+        fixture_id = record.get("No.", record.get("FixtureId", record.get("id", "")))
+        match_date = record.get("Fecha", record.get("Date", record.get("date", "")))
+        date_ts = pd.to_datetime(match_date, errors="coerce")
+        reference_date = str(date_ts.date()) if pd.notna(date_ts) else HISTORY_REFERENCE_DATE
+        match_year = int(date_ts.year) if pd.notna(date_ts) else int(record.get("Year", 0) or TARGET_WORLDCUP_YEAR)
+        history_source = normalize_feature_history(history_df if history_df is not None else self.history_df)
+        cache_key = (
+            str(model_key),
+            str(fixture_id),
+            str(reference_date),
+            str(home),
+            str(away),
+            dataframe_fingerprint_for_report(history_source),
+            id(model),
+        )
+        cached = self.context_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            history_cutoff = history_before_feature_date(history_source, date_ts)
+            teams = sorted({team for team in [home, away, *teams_from_feature_history(history_cutoff)] if str(team).strip()})
+            history_features = build_history_feature_table(history_cutoff, reference_date=reference_date)
+            matchup_features = build_matchup_feature_table(history_cutoff, reference_date=reference_date)
+            qualifier_features = qualifier_feature_table(self.qualifier_rows, reference_date=reference_date, teams=teams)
+            api_features = api_football_feature_table(
+                self.api_football.get("team_stats", pd.DataFrame()),
+                reference_date=reference_date,
+                teams=teams,
+                lineups=self.api_football.get("lineups", pd.DataFrame()),
+                injuries=self.api_football.get("injuries", pd.DataFrame()),
+            )
+            recent_features = recent15_feature_table(
+                self.international_matches,
+                teams=teams,
+                before_date=reference_date,
+                base_model=model,
+            )
+            date_for_current_fixture = pd.Timestamp(date_ts).tz_localize(None) if pd.notna(date_ts) else pd.NaT
+            xi_features = safe_fixture_feature_rows_asof(
+                self.fixture_feature_rows,
+                fixture_id=fixture_id,
+                reference_date=reference_date,
+                allow_current_fixture=pd.notna(date_for_current_fixture)
+                and date_for_current_fixture.normalize() >= pd.Timestamp(_now_utc().date()),
+            )
+            feature_row = match_feature_row(
+                model,
+                pd.DataFrame(),
+                home,
+                away,
+                history_team_features=history_features,
+                matchup_features=matchup_features,
+                market_rows=self.market_rows,
+                qualifier_features=qualifier_features,
+                api_football_features=api_features,
+                recent15_features=recent_features,
+                fixture_feature_rows=xi_features,
+                fixture_id=fixture_id,
+                match_date=reference_date,
+                match_year=match_year,
+                fixture_context=record,
+                dc_rho=score_model_rho(model),
+                feature_profile="balanced",
+            )
+            context = public_feature_context(
+                feature_row=feature_row,
+                model_key=model_key,
+                reference_date=reference_date,
+                history_rows=int(history_cutoff.shape[0]),
+                source_warnings=self.warnings,
+            )
+        except Exception as exc:
+            context = {
+                "available": False,
+                "model_key": str(model_key),
+                "reference_date": reference_date,
+                "cutoff": "strictly_before_match",
+                "usage_counts": {},
+                "available_families": [],
+                "warnings": unique_strings([*self.warnings, f"Feature context no disponible ({exc.__class__.__name__}: {exc})."]),
+                "_feature_row": {},
+            }
+        self.context_cache[cache_key] = context
+        return context
+
+
+class BenchmarkFeatureEnhancedScoreModel:
+    def __init__(
+            self,
+            base_model: Any,
+            model_key: str,
+            feature_source: BenchmarkFeatureSource,
+            history_df: pd.DataFrame | None = None,
+    ):
+        self.base_model = base_model
+        self.model_key = str(model_key or DEFAULT_SCORE_MODEL)
+        self.feature_source = feature_source
+        self.history_df = history_df
+        self.max_goals = int(getattr(base_model, "max_goals", DEFAULT_CONFIG["max_goals"]))
+        self.last_feature_context: Dict[str, Any] = {}
+
+    def profile(self, team: str):
+        return self.base_model.profile(team)
+
+    def adjusted(self, rating_adjustments: Dict[str, float]):
+        adjusted = self.base_model.adjusted(rating_adjustments)
+        return BenchmarkFeatureEnhancedScoreModel(adjusted, self.model_key, self.feature_source, self.history_df)
+
+    def score_model_metadata(self) -> Dict[str, Any]:
+        metadata = dict(score_model_metadata(self.base_model))
+        metadata["feature_enhanced"] = True
+        return metadata
+
+    def expected_goals(self, team1: str, team2: str) -> Tuple[float, float]:
+        return self.expected_goals_for_match(team1, team2, match=None)
+
+    def expected_goals_for_match(self, team1: str, team2: str, match: Dict[str, Any] | None = None) -> Tuple[float, float]:
+        lambda_home, lambda_away, _ = self.adjusted_lambdas_and_context(team1, team2, match=match)
+        return lambda_home, lambda_away
+
+    def match_probabilities(self, team1: str, team2: str, max_goals: int | None = None) -> Dict[str, Any]:
+        return self.match_probabilities_for_match(team1, team2, match=None, max_goals=max_goals)
+
+    def match_probabilities_for_match(
+            self,
+            team1: str,
+            team2: str,
+            match: Dict[str, Any] | None = None,
+            max_goals: int | None = None,
+    ) -> Dict[str, Any]:
+        limit_goals = int(max_goals if max_goals is not None else self.max_goals)
+        base_probabilities = score_model_probabilities_for_match(self.base_model, team1, team2, match, limit_goals)
+        lambda_home, lambda_away, context = self.adjusted_lambdas_and_context(
+            team1,
+            team2,
+            match=match,
+            base_probabilities=base_probabilities,
+        )
+        if not (context.get("lambda_adjustment") or {}).get("active"):
+            output = dict(base_probabilities)
+        else:
+            grid = self.score_grid_from_lambdas(lambda_home, lambda_away, max_goals=limit_goals)
+            output = probabilities_from_score_grid(grid, lambda1=lambda_home, lambda2=lambda_away)
+        output["feature_context"] = strip_internal_feature_context(context)
+        return output
+
+    def score_grid(self, team1: str, team2: str, match: Dict[str, Any] | None = None, max_goals: int | None = None) -> np.ndarray:
+        limit_goals = int(max_goals if max_goals is not None else self.max_goals)
+        lambda_home, lambda_away, _ = self.adjusted_lambdas_and_context(team1, team2, match=match)
+        return self.score_grid_from_lambdas(lambda_home, lambda_away, max_goals=limit_goals)
+
+    def score_grid_from_lambdas(self, lambda1: float, lambda2: float, max_goals: int | None = None) -> np.ndarray:
+        grid = match_score_grid_for_lambdas(self.base_model, lambda1, lambda2, max_goals=int(max_goals or self.max_goals))
+        if grid is not None:
+            return normalize_score_grid_array(grid)
+        return normalize_score_grid_array(poisson_score_grid(lambda1, lambda2, max_goals=int(max_goals or self.max_goals)))
+
+    def adjusted_lambdas_and_context(
+            self,
+            team1: str,
+            team2: str,
+            match: Dict[str, Any] | None = None,
+            base_probabilities: Dict[str, Any] | None = None,
+    ) -> Tuple[float, float, Dict[str, Any]]:
+        base_probabilities = base_probabilities or score_model_probabilities_for_match(
+            self.base_model,
+            team1,
+            team2,
+            match,
+            self.max_goals,
+        )
+        lambda_home = float_or_zero(base_probabilities.get("lambda1")) or 1.25
+        lambda_away = float_or_zero(base_probabilities.get("lambda2")) or 1.05
+        context = self.feature_source.context_for_match(
+            self.base_model,
+            match or {"Equipo 1": team1, "Equipo 2": team2},
+            model_key=self.model_key,
+            history_df=self.history_df,
+        )
+        adjustment = lambda_adjustment_from_feature_row(context.get("_feature_row") or {})
+        lambda_home = float(np.clip(lambda_home * adjustment["home_factor"], 0.2, 4.8))
+        lambda_away = float(np.clip(lambda_away * adjustment["away_factor"], 0.2, 4.8))
+        public_context = dict(context)
+        public_context["lambda_adjustment"] = {
+            **adjustment,
+            "base_lambda_home": round(float_or_zero(base_probabilities.get("lambda1")), 4),
+            "base_lambda_away": round(float_or_zero(base_probabilities.get("lambda2")), 4),
+            "lambda_home": round(lambda_home, 4),
+            "lambda_away": round(lambda_away, 4),
+        }
+        self.last_feature_context = public_context
+        return lambda_home, lambda_away, public_context
+
+
+def benchmark_feature_source(tournament: Dict[str, Any], history_df: pd.DataFrame | None, config: Dict[str, Any]) -> BenchmarkFeatureSource:
+    return BenchmarkFeatureSource(tournament=tournament, history_df=history_df, config=config)
+
+
+def apply_benchmark_feature_model(
+        model: Any,
+        model_key: str,
+        feature_source: BenchmarkFeatureSource | None,
+        history_df: pd.DataFrame | None,
+) -> Any:
+    if feature_source is None:
+        return model
+    if isinstance(model, BenchmarkFeatureEnhancedScoreModel):
+        return model
+    return BenchmarkFeatureEnhancedScoreModel(model, model_key, feature_source, history_df=history_df)
+
+
+def score_model_probabilities_for_match(
+        model: Any,
+        home: str,
+        away: str,
+        match: Dict[str, Any] | None,
+        max_goals: int,
+) -> Dict[str, Any]:
+    method = getattr(model, "match_probabilities_for_match", None)
+    if callable(method):
+        return method(home, away, match=match, max_goals=max_goals)
+    return model.match_probabilities(home, away, max_goals=max_goals)
+
+
+def normalize_feature_history(history_df: pd.DataFrame | None) -> pd.DataFrame:
+    if history_df is None or history_df.empty:
+        return pd.DataFrame(columns=["Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group"])
+    working = history_df.copy()
+    for column in ("Date", "Team 1", "Team 2", "G1", "G2"):
+        if column not in working.columns:
+            working[column] = np.nan
+    working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
+    return working[working["Date"].notna()].sort_values("Date", kind="stable").reset_index(drop=True)
+
+
+def history_before_feature_date(history_df: pd.DataFrame, date_ts: pd.Timestamp) -> pd.DataFrame:
+    if history_df is None or history_df.empty:
+        return normalize_feature_history(history_df)
+    working = normalize_feature_history(history_df)
+    if pd.notna(date_ts):
+        cutoff = pd.Timestamp(date_ts).tz_localize(None)
+        return working[working["Date"] < cutoff].copy()
+    return working.copy()
+
+
+def teams_from_feature_history(history_df: pd.DataFrame) -> List[str]:
+    if history_df is None or history_df.empty:
+        return []
+    teams: List[str] = []
+    for column in ("Team 1", "Team 2"):
+        if column in history_df.columns:
+            teams.extend(str(value) for value in history_df[column].dropna().tolist() if str(value).strip())
+    return sorted(set(teams))
+
+
+def dataframe_fingerprint_for_report(frame: pd.DataFrame) -> str:
+    if frame is None or frame.empty:
+        return "empty"
+    columns = [column for column in ("Date", "Team 1", "Team 2", "G1", "G2") if column in frame.columns]
+    payload = frame[columns].tail(20).astype(str).to_json(orient="records", force_ascii=True)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def safe_fixture_feature_rows_asof(
+        fixture_feature_rows: pd.DataFrame,
+        fixture_id: Any,
+        reference_date: str,
+        allow_current_fixture: bool,
+) -> pd.DataFrame:
+    if fixture_feature_rows is None or fixture_feature_rows.empty or fixture_id in {"", None}:
+        return pd.DataFrame()
+    if not allow_current_fixture:
+        return pd.DataFrame(columns=fixture_feature_rows.columns)
+    working = fixture_feature_rows.copy()
+    if "fixture_id" not in working.columns and "Fixture" in working.columns:
+        working["fixture_id"] = working["Fixture"].astype(str)
+    if "Equipo" not in working.columns:
+        return pd.DataFrame(columns=working.columns)
+    scoped = working[working["fixture_id"].astype(str) == str(fixture_id)].copy() if "fixture_id" in working.columns else pd.DataFrame()
+    if scoped.empty:
+        return pd.DataFrame(columns=working.columns)
+    if "Prediction safe" in scoped.columns:
+        scoped = scoped[scoped["Prediction safe"].astype(str).str.lower().isin({"si", "sí", "yes", "true", "1"})].copy()
+    return scoped
+
+
+def score_model_rho(model: Any) -> float:
+    try:
+        metadata = score_model_metadata(model)
+        params = metadata.get("params") if isinstance(metadata.get("params"), dict) else {}
+        return float(params.get("rho", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+FEATURE_FAMILY_PREFIXES = {
+    "rating": ("rating_", "attack_", "defense_", "matches_", "host_"),
+    "form": ("history_", "recent15_", "trend_", "form_"),
+    "odds": ("market_", "model_vs_market_", "market_vs_model_", "model_market_"),
+    "xg_shots": ("qualifier_xg", "qualifier_shots", "api_football_xg", "api_football_total_shots", "api_football_shots"),
+    "api_football": ("api_football_",),
+    "xi_players": ("xi_", "lineup_", "injury_"),
+    "h2h": ("h2h_",),
+    "fixture": ("fixture_", "stage_", "venue_"),
+    "score_grid": ("prob_score_", "prob_home_", "prob_away_", "dc_", "model_entropy_", "poisson_"),
+}
+
+
+def public_feature_context(
+        feature_row: Dict[str, Any],
+        model_key: str,
+        reference_date: str,
+        history_rows: int,
+        source_warnings: Iterable[Any],
+) -> Dict[str, Any]:
+    counts = feature_usage_counts(feature_row)
+    available_families = [key for key, count in counts.items() if int(count or 0) > 0]
+    sample = feature_context_sample(feature_row)
+    return {
+        "available": bool(available_families),
+        "model_key": str(model_key),
+        "reference_date": reference_date,
+        "cutoff": "strictly_before_match",
+        "history_rows": int(history_rows),
+        "usage_counts": counts,
+        "available_families": available_families,
+        "sample": sample,
+        "warnings": unique_strings(source_warnings),
+        "_feature_row": feature_row,
+    }
+
+
+def strip_internal_feature_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: json_safe(value) for key, value in (context or {}).items() if not str(key).startswith("_")}
+
+
+def feature_usage_counts(feature_row: Dict[str, Any]) -> Dict[str, int]:
+    counts = {family: 0 for family in FEATURE_FAMILY_PREFIXES}
+    for key, value in (feature_row or {}).items():
+        if not feature_value_is_present(value):
+            continue
+        key_text = str(key)
+        for family, prefixes in FEATURE_FAMILY_PREFIXES.items():
+            if key_text.startswith(prefixes):
+                counts[family] += 1
+                break
+    return counts
+
+
+def combined_feature_usage_counts(rows: Iterable[Dict[str, Any]]) -> Dict[str, int]:
+    totals = {family: 0 for family in FEATURE_FAMILY_PREFIXES}
+    for row in rows or []:
+        context = row.get("feature_context") if isinstance(row, dict) else {}
+        counts = (context or {}).get("usage_counts") if isinstance(context, dict) else {}
+        for family in totals:
+            totals[family] += int((counts or {}).get(family) or 0)
+    return totals
+
+
+def feature_value_is_present(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(number) and abs(number) > 1e-9)
+
+
+def feature_context_sample(feature_row: Dict[str, Any], limit: int = 12) -> Dict[str, float]:
+    preferred_tokens = ("market_prob", "recent15", "history_last_5", "history_last_10", "api_football", "qualifier_xg", "xi_")
+    ranked = []
+    for index, (key, value) in enumerate((feature_row or {}).items()):
+        if not feature_value_is_present(value):
+            continue
+        key_text = str(key)
+        preferred = 0 if any(token in key_text for token in preferred_tokens) else 1
+        ranked.append((preferred, index, key_text, round(float(value), 6)))
+    return {key: value for _, _, key, value in sorted(ranked)[:limit]}
+
+
+def lambda_adjustment_from_feature_row(feature_row: Dict[str, Any]) -> Dict[str, Any]:
+    terms: List[Dict[str, Any]] = []
+
+    def add(name: str, value: Any, scale: float, weight: float) -> None:
+        number = float_or_zero(value)
+        if abs(number) <= 1e-9:
+            return
+        normalized = float(np.clip(number / max(scale, 1e-9), -1.0, 1.0))
+        contribution = normalized * float(weight)
+        if abs(contribution) <= 1e-9:
+            return
+        terms.append({
+            "name": name,
+            "value": round(number, 6),
+            "weight": round(float(weight), 4),
+            "contribution": round(contribution, 6),
+        })
+
+    add("rating_diff", feature_row.get("rating_diff"), 240.0, 0.035)
+    add("recent15_goal_diff", feature_row.get("recent15_adjusted_goal_diff_avg_diff"), 2.0, 0.065)
+    add("history_form_5", feature_row.get("history_last_5_goal_diff_avg_diff"), 2.0, 0.045)
+    add("history_form_10", feature_row.get("history_last_10_goal_diff_avg_diff"), 2.0, 0.035)
+    add("history_form_15", feature_row.get("history_last_15_goal_diff_avg_diff"), 2.0, 0.03)
+    add("qualifier_xg", feature_row.get("qualifier_xg_avg_diff"), 1.5, 0.045)
+    add("api_xg", first_feature_value(feature_row, ("api_football_xg_for_avg_diff", "api_football_expected_goals_for_avg_diff")), 1.5, 0.045)
+    add("api_shots", first_feature_value(feature_row, ("api_football_total_shots_for_avg_diff", "api_football_shots_for_avg_diff")), 10.0, 0.025)
+    add("xi_rating", first_feature_value(feature_row, ("xi_xi_rating_prom_diff", "xi_rating_prom_diff")), 1.0, 0.04)
+    if float_or_zero(feature_row.get("market_has_1x2")) > 0:
+        market_edge = float_or_zero(feature_row.get("market_prob_home")) - float_or_zero(feature_row.get("market_prob_away"))
+        add("market_no_vig_edge", market_edge, 0.35, 0.07)
+
+    edge = float(np.clip(sum(float(item["contribution"]) for item in terms), -0.18, 0.18))
+    return {
+        "active": bool(terms),
+        "edge": round(edge, 6),
+        "home_factor": round(math.exp(edge), 6),
+        "away_factor": round(math.exp(-0.85 * edge), 6),
+        "terms": terms[:8],
+    }
+
+
+def first_feature_value(feature_row: Dict[str, Any], keys: Iterable[str]) -> float:
+    for key in keys:
+        if key in feature_row and feature_value_is_present(feature_row.get(key)):
+            return float(feature_row.get(key))
+    return 0.0
 COUNTRY_CODES = {
     "Algeria": "dz",
     "Argentina": "ar",
@@ -916,6 +1408,7 @@ def alternatives_benchmark_report(
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_refresh = refresh_worldcup_2026_results(tournament, refresh=True)
     history_df, history_source = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    feature_source = benchmark_feature_source(tournament, history_df, config)
     model_sequence = list(BENCHMARK_SCORE_MODEL_SEQUENCE)
     tuning_summary = tune_benchmark_poisson_recent_matches(
         history_df=history_df,
@@ -955,6 +1448,7 @@ def alternatives_benchmark_report(
         hardware=hardware,
         model_sequence=model_sequence,
         history_df=history_df,
+        feature_source=feature_source,
         progress_callback=progress_callback,
     )
 
@@ -965,6 +1459,7 @@ def alternatives_benchmark_report(
         model_sequence=model_sequence,
         start_time=start_time,
         hardware=hardware,
+        feature_source=feature_source,
         progress_callback=progress_callback,
     )
     backtests = backtest.get("models", [])
@@ -1035,7 +1530,7 @@ def alternatives_benchmark_report(
         "config": config,
         "best_model": best_model,
         "backtest": backtest_summary,
-        "feature_research": worldcup_feature_research_summary(),
+        "feature_research": worldcup_feature_research_summary(feature_source),
     }
     report = persist_upcoming_report({
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1067,8 +1562,15 @@ def alternatives_benchmark_report(
     return report
 
 
-def poisson_baseline_report_for_fixture(base_model: WorldCupModel, fixture: pd.Series, config: Dict[str, Any]) -> Dict[str, Any]:
+def poisson_baseline_report_for_fixture(
+        base_model: WorldCupModel,
+        fixture: pd.Series,
+        config: Dict[str, Any],
+        feature_source: BenchmarkFeatureSource | None = None,
+        history_df: pd.DataFrame | None = None,
+) -> Dict[str, Any]:
     prediction_model = apply_recent_context_model(base_model, config)
+    prediction_model = apply_benchmark_feature_model(prediction_model, DEFAULT_SCORE_MODEL, feature_source, history_df)
     metadata = score_model_metadata(prediction_model)
     probabilities = model_probabilities_for_fixture(prediction_model, fixture, config)
     report = score_prediction_model_report(
@@ -1082,6 +1584,9 @@ def poisson_baseline_report_for_fixture(base_model: WorldCupModel, fixture: pd.S
     score_distribution = score_distribution_for_fixture(prediction_model, fixture, probabilities, config)
     report["score_distribution"] = score_distribution
     report["top_scores"] = score_distribution.get("top_scores", [])
+    if report["top_scores"]:
+        report["top_score"] = report["top_scores"][0].get("score", report.get("top_score", ""))
+        report["top_score_probability"] = report["top_scores"][0].get("probability", 0.0)
     report["heatmap"] = score_distribution.get("heatmap", {})
     report["source"] = "Poisson baseline"
     return report
@@ -1226,6 +1731,7 @@ def alternatives_backtest_report(
         model_sequence: List[str],
         start_time: float,
         hardware: Dict[str, Any],
+        feature_source: BenchmarkFeatureSource | None = None,
         progress_callback=None,
 ) -> Dict[str, Any]:
     scope = "worldcup_2026_confirmed_auto"
@@ -1274,6 +1780,7 @@ def alternatives_backtest_report(
         hardware=hardware,
         model_index=1,
         model_total=max(len(model_sequence), 1),
+        feature_source=feature_source,
         progress_callback=progress_callback,
     )
     models: List[Dict[str, Any]] = []
@@ -1292,6 +1799,7 @@ def alternatives_backtest_report(
                 hardware=hardware,
                 model_index=model_index,
                 model_total=max(model_total, 1),
+                feature_source=feature_source,
                 progress_callback=progress_callback,
             )
         models.append(compare_backtest_to_baseline(metrics, baseline_metrics))
@@ -1383,6 +1891,7 @@ def evaluate_score_model_walk_forward_2026(
         hardware: Dict[str, Any],
         model_index: int,
         model_total: int,
+        feature_source: BenchmarkFeatureSource | None = None,
         progress_callback=None,
 ) -> Dict[str, Any]:
     totals = empty_backtest_totals()
@@ -1449,6 +1958,7 @@ def evaluate_score_model_walk_forward_2026(
                     "warnings": [warning],
                 }
         prediction_model = apply_recent_context_model(model, config)
+        prediction_model = apply_benchmark_feature_model(prediction_model, model_key, feature_source, history_df=train_df)
         row_metrics = score_model_backtest_prediction(prediction_model, eval_row, config)
         if not row_metrics:
             continue
@@ -1459,12 +1969,14 @@ def evaluate_score_model_walk_forward_2026(
         if not bool(metadata.get("available", True)):
             model_available = False
             warnings.extend(str(item) for item in metadata.get("warnings", []) if str(item))
+    feature_usage = combined_feature_usage_counts(match_rows)
     return {
         "model_key": str(model_key),
         "model_label": score_model_display_label(model_key),
         "available": bool(model_available) and totals["evaluated"] > 0,
         "warnings": unique_strings(warnings),
         "evaluated_matches": int(totals["evaluated"]),
+        "feature_usage_counts": feature_usage,
         **backtest_metric_summary(totals),
         "matches": match_rows,
         "sample": sample_rows,
@@ -1481,6 +1993,7 @@ def rank_backtest_models(models: List[Dict[str, Any]], summary: Dict[str, Any]) 
             float_or_zero(pair[1].get("rps")) if pair[1].get("available") else float("inf"),
             float_or_zero(pair[1].get("expected_calibration_error")) if pair[1].get("available") else float("inf"),
             float_or_zero(pair[1].get("brier")) if pair[1].get("available") else float("inf"),
+            -float_or_zero(pair[1].get("score_accuracy")),
             -float_or_zero(pair[1].get("top3_score_accuracy")),
             float_or_zero(pair[1].get("ou25_log_loss")) if pair[1].get("available") else float("inf"),
             pair[0],
@@ -1495,7 +2008,7 @@ def rank_backtest_models(models: List[Dict[str, Any]], summary: Dict[str, Any]) 
         payload["ranking_metric"] = "log_loss"
         payload["ranking_reason"] = (
             "Ordenado por menor log-loss; desempates: menor RPS, menor ECE, menor Brier, "
-            "mayor top-3 marcador y menor log-loss U/O 2.5."
+            "mayor marcador #1, mayor top-3 marcador y menor log-loss U/O 2.5."
         )
         payload["holdout_start"] = summary.get("holdout_start", "")
         payload["holdout_end"] = summary.get("holdout_end", "")
@@ -1627,6 +2140,7 @@ def evaluate_score_model_backtest(
         "available": bool(metadata.get("available", True)) and totals["evaluated"] > 0,
         "warnings": [str(item) for item in metadata.get("warnings", []) if str(item)],
         "evaluated_matches": int(totals["evaluated"]),
+        "feature_usage_counts": combined_feature_usage_counts(match_rows),
         **backtest_metric_summary(totals),
         "matches": match_rows,
         "sample": sample_rows,
@@ -1834,6 +2348,7 @@ def score_model_backtest_prediction(model: Any, row: pd.Series | Dict[str, Any],
     )
     modal_index = int(np.argmax(grid))
     modal_home, modal_away = np.unravel_index(modal_index, grid.shape)
+    modal_probability = float(grid[int(modal_home), int(modal_away)])
     score_probability = score_grid_actual_probability(grid, actual_home, actual_away)
     actual_score_rank = score_rank_from_grid(grid, actual_home, actual_away)
     expected_home, expected_away, expected_total, expected_margin = expected_score_from_grid(grid)
@@ -1841,6 +2356,8 @@ def score_model_backtest_prediction(model: Any, row: pd.Series | Dict[str, Any],
     actual_margin = float(actual_home - actual_away)
     over_under_rows = backtest_over_under_rows(probabilities, total_goals)
     confidence = max(outcome_probabilities.values()) if outcome_probabilities else 0.0
+    modal_score = f"{int(modal_home)}-{int(modal_away)}"
+    modal_hit = int(modal_home) == actual_home and int(modal_away) == actual_away
     return {
         "log_loss": -math.log(max(outcome_probabilities.get(actual_outcome, 0.0), 1e-12)),
         "brier": multiclass_brier_score(outcome_probabilities, actual_outcome),
@@ -1849,7 +2366,7 @@ def score_model_backtest_prediction(model: Any, row: pd.Series | Dict[str, Any],
         "entropy": probability_entropy(outcome_probabilities),
         "sharpness": confidence,
         "pick_hit": 1 if pick == actual_outcome else 0,
-        "score_hit": 1 if int(modal_home) == actual_home and int(modal_away) == actual_away else 0,
+        "score_hit": 1 if modal_hit else 0,
         "top3_score_hit": 1 if actual_score_rank <= 3 else 0,
         "top5_score_hit": 1 if actual_score_rank <= 5 else 0,
         "expected_home_goals": expected_home,
@@ -1879,15 +2396,20 @@ def score_model_backtest_prediction(model: Any, row: pd.Series | Dict[str, Any],
             "actual_pick": outcome_label(actual_outcome),
             "actual_pick_key": actual_outcome,
             "pick_hit": bool(pick == actual_outcome),
-            "modal_score": f"{int(modal_home)}-{int(modal_away)}",
+            "modal_score": modal_score,
+            "most_probable_score": modal_score,
+            "most_probable_score_probability": round(modal_probability * 100.0, 3),
+            "most_probable_score_hit": bool(modal_hit),
             "expected_score": f"{expected_home:.2f}-{expected_away:.2f}",
             "actual_score_rank": actual_score_rank,
+            "score_hit": bool(modal_hit),
             "top3_score_hit": bool(actual_score_rank <= 3),
             "top5_score_hit": bool(actual_score_rank <= 5),
             "rps": round(ranked_probability_score(outcome_probabilities, actual_outcome), 6),
             "confidence": round(confidence * 100.0, 3),
             "actual_probability": round(outcome_probabilities.get(actual_outcome, 0.0) * 100.0, 3),
             "score_probability": round(score_probability * 100.0, 3),
+            "feature_context": probabilities.get("feature_context", {}),
             "probabilities": {
                 "home": round(outcome_probabilities["home"] * 100.0, 3),
                 "draw": round(outcome_probabilities["draw"] * 100.0, 3),
@@ -1997,6 +2519,7 @@ def compare_backtest_to_baseline(metrics: Dict[str, Any], baseline: Dict[str, An
     brier_delta = round(float_or_zero(metrics.get("brier")) - float_or_zero(baseline.get("brier")), 6)
     rps_delta = round(float_or_zero(metrics.get("rps")) - float_or_zero(baseline.get("rps")), 6)
     pick_delta = round(float_or_zero(metrics.get("pick_accuracy")) - float_or_zero(baseline.get("pick_accuracy")), 6)
+    score_delta = round(float_or_zero(metrics.get("score_accuracy")) - float_or_zero(baseline.get("score_accuracy")), 6)
     top3_delta = round(float_or_zero(metrics.get("top3_score_accuracy")) - float_or_zero(baseline.get("top3_score_accuracy")), 6)
     ou25_delta = round(float_or_zero(metrics.get("ou25_log_loss")) - float_or_zero(baseline.get("ou25_log_loss")), 6)
     wins = (
@@ -2004,10 +2527,11 @@ def compare_backtest_to_baseline(metrics: Dict[str, Any], baseline: Dict[str, An
         + int(brier_delta < 0.0)
         + int(rps_delta < 0.0)
         + int(pick_delta > 0.0)
+        + int(score_delta > 0.0)
         + int(top3_delta > 0.0)
         + int(ou25_delta < 0.0)
     )
-    beats = wins >= 4 or (log_loss_delta < 0.0 and rps_delta < 0.0 and (brier_delta < 0.0 or pick_delta > 0.0 or top3_delta > 0.0))
+    beats = wins >= 4 or (log_loss_delta < 0.0 and rps_delta < 0.0 and (brier_delta < 0.0 or pick_delta > 0.0 or score_delta > 0.0 or top3_delta > 0.0))
     return {
         **metrics,
         "baseline_model_key": DEFAULT_SCORE_MODEL,
@@ -2017,12 +2541,13 @@ def compare_backtest_to_baseline(metrics: Dict[str, Any], baseline: Dict[str, An
             "brier_delta": brier_delta,
             "rps_delta": rps_delta,
             "pick_accuracy_delta": pick_delta,
+            "score_accuracy_delta": score_delta,
             "top3_score_accuracy_delta": top3_delta,
             "ou25_log_loss_delta": ou25_delta,
             "metric_wins": wins,
-            "metric_total": 6,
+            "metric_total": 7,
             "beats_poisson": bool(beats),
-            "summary": backtest_delta_summary(log_loss_delta, brier_delta, rps_delta, pick_delta, top3_delta, ou25_delta, wins),
+            "summary": backtest_delta_summary(log_loss_delta, brier_delta, rps_delta, pick_delta, score_delta, top3_delta, ou25_delta, wins),
         },
     }
 
@@ -2032,16 +2557,18 @@ def backtest_delta_summary(
         brier_delta: float,
         rps_delta: float,
         pick_delta: float,
+        score_delta: float,
         top3_delta: float,
         ou25_delta: float,
         wins: int,
 ) -> str:
     return (
-        f"{wins}/6 metricas; "
+        f"{wins}/7 metricas; "
         f"LL {format_signed_metric(log_loss_delta)}; "
         f"RPS {format_signed_metric(rps_delta)}; "
         f"Brier {format_signed_metric(brier_delta)}; "
         f"pick {format_signed_pp(pick_delta)}; "
+        f"marcador#1 {format_signed_pp(score_delta)}; "
         f"top3 {format_signed_pp(top3_delta)}; "
         f"U/O2.5 {format_signed_metric(ou25_delta)}"
     )
@@ -2056,7 +2583,7 @@ def best_alternative_from_backtests(backtests: List[Dict[str, Any]]) -> Dict[str
         return {"available": False, "reason": "Sin modelos evaluables en backtest."}
     winner = dict(sorted(candidates, key=lambda item: int(item.get("rank") or 9999))[0])
     winner["available"] = True
-    winner["selection_policy"] = "Modelo #1 del backtesting walk-forward: menor log-loss; desempates por RPS, ECE, Brier, top-3 marcador y U/O 2.5. Sin ponderar otros modelos."
+    winner["selection_policy"] = "Modelo #1 del backtesting walk-forward: menor log-loss; desempates por RPS, ECE, Brier, marcador #1, top-3 marcador y U/O 2.5. Sin ponderar otros modelos."
     return winner
 
 
@@ -2071,12 +2598,13 @@ def alternatives_with_backtests(alternatives: List[Dict[str, Any]], backtest_by_
     return output
 
 
-def worldcup_feature_research_summary() -> Dict[str, Any]:
+def worldcup_feature_research_summary(feature_source: BenchmarkFeatureSource | None = None) -> Dict[str, Any]:
     feature_store_files = sorted(FEATURE_STORE_ROOT.glob("*.json")) if FEATURE_STORE_ROOT.exists() else []
     market_root = PROJECT_ROOT / "storage" / "worldcup" / "market"
     xg_root = PROJECT_ROOT / "storage" / "worldcup" / "xg"
     api_root = PROJECT_ROOT / "storage" / "worldcup" / "api_football"
     lineup_root = PROJECT_ROOT / "storage" / "worldcup" / "lineups"
+    source_status = benchmark_feature_source_status(feature_source)
     families = [
         {
             "key": "dynamic_team_strength",
@@ -2088,7 +2616,7 @@ def worldcup_feature_research_summary() -> Dict[str, Any]:
         {
             "key": "market_odds",
             "label": "Cuotas de mercado",
-            "status": "cached" if market_root.exists() and any(market_root.glob("*.csv")) else "optional",
+            "status": "cached" if source_status.get("odds_rows", 0) > 0 or (market_root.exists() and any(market_root.glob("*.csv"))) else "optional",
             "features": ["1X2 no-vig", "U/O 2.5 no-vig", "movimiento de linea", "benchmark vs mercado"],
             "impact": "Las cuotas suelen ser un baseline muy fuerte; se usan como feature solo si existen antes del partido.",
         },
@@ -2102,14 +2630,14 @@ def worldcup_feature_research_summary() -> Dict[str, Any]:
         {
             "key": "lineups_players",
             "label": "Alineaciones, lesiones y jugadores",
-            "status": "cached" if lineup_root.exists() and any(lineup_root.glob("*.json")) else "optional",
+            "status": "cached" if source_status.get("xi_rows", 0) > 0 or (lineup_root.exists() and any(lineup_root.glob("*.json"))) else "optional",
             "features": ["XI confirmado/probable", "ratings por jugador", "minutos", "bajas"],
             "impact": "Permite multiplicadores de lambda cuando hay XI confiable antes del kickoff.",
         },
         {
             "key": "api_football_context",
             "label": "API-Football contextual",
-            "status": "cached" if api_root.exists() and any(api_root.glob("*.json")) else "optional",
+            "status": "cached" if source_status.get("api_team_stats_rows", 0) > 0 or (api_root.exists() and any(api_root.glob("*.json"))) else "optional",
             "features": ["estadisticas recientes", "odds", "lineups", "injuries"],
             "impact": "Fuente opcional; el reporte no debe depender de red ni credenciales para funcionar.",
         },
@@ -2120,6 +2648,7 @@ def worldcup_feature_research_summary() -> Dict[str, Any]:
         "recommendation": "Primero usar ratings/form + cuotas/xG/XI cacheados; despues comparar contra mercado y Poisson por walk-forward.",
         "feature_store_files": [str(path) for path in feature_store_files[:8]],
         "active_or_cached_families": active,
+        "source_status": source_status,
         "families": families,
         "research_basis": [
             {
@@ -2162,6 +2691,32 @@ def worldcup_feature_research_summary() -> Dict[str, Any]:
     }
 
 
+def benchmark_feature_source_status(feature_source: BenchmarkFeatureSource | None) -> Dict[str, Any]:
+    if feature_source is None:
+        return {
+            "history_rows": 0,
+            "odds_rows": 0,
+            "qualifier_rows": 0,
+            "api_team_stats_rows": 0,
+            "api_lineup_rows": 0,
+            "api_injury_rows": 0,
+            "international_rows": 0,
+            "xi_rows": 0,
+            "warnings": [],
+        }
+    return {
+        "history_rows": int(feature_source.history_df.shape[0]),
+        "odds_rows": int(feature_source.market_rows.shape[0]) if feature_source.market_rows is not None else 0,
+        "qualifier_rows": int(feature_source.qualifier_rows.shape[0]) if feature_source.qualifier_rows is not None else 0,
+        "api_team_stats_rows": int((feature_source.api_football.get("team_stats", pd.DataFrame())).shape[0]),
+        "api_lineup_rows": int((feature_source.api_football.get("lineups", pd.DataFrame())).shape[0]),
+        "api_injury_rows": int((feature_source.api_football.get("injuries", pd.DataFrame())).shape[0]),
+        "international_rows": int(feature_source.international_matches.shape[0]) if feature_source.international_matches is not None else 0,
+        "xi_rows": int(feature_source.fixture_feature_rows.shape[0]) if feature_source.fixture_feature_rows is not None else 0,
+        "warnings": unique_strings(feature_source.warnings),
+    }
+
+
 def alternatives_benchmark_table_rows(
         fixture_reports: List[Dict[str, Any]],
         backtest_by_key: Dict[str, Dict[str, Any]],
@@ -2188,7 +2743,8 @@ def alternatives_benchmark_table_rows(
             "Modelo": model.get("model_label", ""),
             "Disponible": "Si" if model.get("available") else "No",
             "Pick": f"{decision.get('label', '')} {decision.get('team', '')}".strip(),
-            "Marcador": model.get("top_score", ""),
+            "Marcador #1": model.get("top_score", ""),
+            "Marcador #1 %": model.get("top_score_probability", ""),
             "Top scores": top_scores,
             "Probabilidad": probs.get(pick_key, ""),
             "1 %": probs.get("home", ""),
@@ -2252,6 +2808,7 @@ def upcoming_sota_fixture_reports(
         hardware: Dict[str, Any],
         model_sequence: List[str] | Tuple[str, ...] | None = None,
         history_df: pd.DataFrame | None = None,
+        feature_source: BenchmarkFeatureSource | None = None,
         progress_callback=None,
 ) -> List[Dict[str, Any]]:
     fixture_reports = [
@@ -2322,6 +2879,7 @@ def upcoming_sota_fixture_reports(
                 "warnings": [f"{exc.__class__.__name__}: {exc}; se usa Poisson independiente."],
             }
         score_model = apply_recent_context_model(score_model, config)
+        score_model = apply_benchmark_feature_model(score_model, model_key, feature_source, history_df=history_df)
         for fixture_index, fixture in enumerate(fixtures, start=1):
             emit_report_progress(
                 progress_callback,
@@ -2347,6 +2905,9 @@ def upcoming_sota_fixture_reports(
             score_distribution = score_distribution_for_fixture(score_model, fixture, probabilities, config)
             model_report["score_distribution"] = score_distribution
             model_report["top_scores"] = score_distribution.get("top_scores", [])
+            if model_report["top_scores"]:
+                model_report["top_score"] = model_report["top_scores"][0].get("score", model_report.get("top_score", ""))
+                model_report["top_score_probability"] = model_report["top_scores"][0].get("probability", 0.0)
             model_report["heatmap"] = score_distribution.get("heatmap", {})
             fixture_reports[fixture_index - 1]["models"].append(model_report)
     return fixture_reports
@@ -2668,6 +3229,7 @@ def score_prediction_model_report(
         },
         "top_score": f"{modal_home}-{modal_away}",
         "modal_score": f"{modal_home}-{modal_away}",
+        "feature_context": probabilities.get("feature_context", {}),
         "params": metadata.get("params", {}),
         "source": "Poisson/SOTA",
     }
@@ -3578,10 +4140,11 @@ def backtest_model_report_card_html(model: Dict[str, Any]) -> str:
           {metric_bar_html("RPS", format_metric(model.get("rps", "")), inverse_metric_percent(model.get("rps"), 0.75))}
           {metric_bar_html("ECE", format_metric(model.get("expected_calibration_error", "")), inverse_metric_percent(model.get("expected_calibration_error"), 0.35))}
           {metric_bar_html("Pick %", f"{format_metric(float_or_zero(model.get('pick_accuracy')) * 100)}%", float_or_zero(model.get("pick_accuracy")) * 100)}
+          {metric_bar_html("Marcador #1", f"{format_metric(float_or_zero(model.get('score_accuracy')) * 100)}%", float_or_zero(model.get("score_accuracy")) * 100)}
           {metric_bar_html("Top-3 marcador", f"{format_metric(float_or_zero(model.get('top3_score_accuracy')) * 100)}%", float_or_zero(model.get("top3_score_accuracy")) * 100)}
           {metric_bar_html("Brier", format_metric(model.get("brier", "")), inverse_metric_percent(model.get("brier"), 0.75))}
           {metric_bar_html("U/O 2.5 LL", format_metric(model.get("ou25_log_loss", "")), inverse_metric_percent(model.get("ou25_log_loss"), 1.2))}
-          {metric_bar_html("Vs Poisson", f"{escape_report_html(vs.get('metric_wins', 0))}/{escape_report_html(vs.get('metric_total', 6))}", float_or_zero(vs.get("metric_wins")) * (100.0 / max(float_or_zero(vs.get("metric_total")), 1.0)))}
+          {metric_bar_html("Vs Poisson", f"{escape_report_html(vs.get('metric_wins', 0))}/{escape_report_html(vs.get('metric_total', 7))}", float_or_zero(vs.get("metric_wins")) * (100.0 / max(float_or_zero(vs.get("metric_total")), 1.0)))}
         </div>
         <p>{escape_report_html(vs.get("summary", ""))}</p>
       </article>
@@ -3600,7 +4163,7 @@ def backtest_csv_text(report: Dict[str, Any]) -> str:
     writer.writerow(["Detalle partidos"])
     match_columns = [
         "Rank", "Modelo", "Fecha", "Partido", "Resultado", "Pick", "Pick real", "Acierto",
-        "Marcador modal", "Esperado", "Top-3 marcador", "Top-5 marcador", "RPS",
+        "Marcador #1", "Marcador #1 %", "Esperado", "Top-3 marcador", "Top-5 marcador", "RPS",
         "Confianza", "Prob. real", "Prob. marcador",
     ]
     writer.writerow(match_columns)
@@ -3615,7 +4178,8 @@ def backtest_csv_text(report: Dict[str, Any]) -> str:
                 row.get("pick", ""),
                 row.get("actual_pick", ""),
                 "Si" if row.get("pick_hit") else "No",
-                row.get("modal_score", ""),
+                row.get("most_probable_score", row.get("modal_score", "")),
+                row.get("most_probable_score_probability", row.get("score_probability", "")),
                 row.get("expected_score", ""),
                 "Si" if row.get("top3_score_hit") else "No",
                 "Si" if row.get("top5_score_hit") else "No",
@@ -3630,7 +4194,7 @@ def backtest_csv_text(report: Dict[str, Any]) -> str:
 def backtest_metrics_table(report: Dict[str, Any]) -> Dict[str, Any]:
     columns = [
         "Rank", "Modelo", "Disponible", "Evaluados", "Log-loss", "RPS", "ECE", "MCE", "Brier",
-        "Pick %", "Top-3 marcador %", "Top-5 marcador %", "U/O 2.5 LL", "U/O 2.5 Brier",
+        "Pick %", "Marcador #1 %", "Top-3 marcador %", "Top-5 marcador %", "U/O 2.5 LL", "U/O 2.5 Brier",
         "U/O %", "Score-log", "Goles MAE", "Total goles MAE", "Margen MAE", "Macro F1",
         "Balanced acc", "Vs Poisson", "Warnings",
     ]
@@ -3648,6 +4212,7 @@ def backtest_metrics_table(report: Dict[str, Any]) -> Dict[str, Any]:
             "MCE": item.get("max_calibration_error", ""),
             "Brier": item.get("brier", ""),
             "Pick %": round(float_or_zero(item.get("pick_accuracy")) * 100.0, 3),
+            "Marcador #1 %": round(float_or_zero(item.get("score_accuracy")) * 100.0, 3),
             "Top-3 marcador %": round(float_or_zero(item.get("top3_score_accuracy")) * 100.0, 3),
             "Top-5 marcador %": round(float_or_zero(item.get("top5_score_accuracy")) * 100.0, 3),
             "U/O 2.5 LL": item.get("ou25_log_loss", ""),

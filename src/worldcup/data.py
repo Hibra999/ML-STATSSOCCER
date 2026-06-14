@@ -106,6 +106,16 @@ VERIFIED_WORLD_CUP_2026_RESULTS: List[Dict[str, Any]] = [
         "source": "verified:user-table",
         "available_after_utc": "2026-06-14T00:00:00+00:00",
     },
+    {
+        "date": "2026-06-14",
+        "home": "Germany",
+        "away": "Curaçao",
+        "home_goals": 7,
+        "away_goals": 1,
+        "status": "final",
+        "source": "verified:user-table",
+        "available_after_utc": "2026-06-14T23:00:00+00:00",
+    },
 ]
 
 FALLBACK_2026_GROUPS: Dict[str, List[str]] = {

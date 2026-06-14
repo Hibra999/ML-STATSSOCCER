@@ -141,7 +141,7 @@ FEATURE_PROFILE_BALANCED = "balanced"
 DEFAULT_FEATURE_PROFILE = FEATURE_PROFILE_BALANCED
 DEFAULT_MAX_FEATURES = 480
 FEATURE_PROFILES = {FEATURE_PROFILE_FULL, FEATURE_PROFILE_BALANCED}
-HISTORY_FEATURE_WINDOWS = (3, 5, 10)
+HISTORY_FEATURE_WINDOWS = (3, 5, 10, 15)
 HISTORY_REFERENCE_DATE = "2026-06-11"
 WALK_FORWARD_ROOT = Path("storage") / "worldcup" / "walk_forward"
 WALK_FORWARD_MATCHES_FILE = WALK_FORWARD_ROOT / "matches.csv"
@@ -3553,7 +3553,7 @@ def balanced_history_column(column: Any) -> bool:
         "last_goals_against",
     }:
         return True
-    if safe.startswith(("all_", "last_3_", "last_5_", "last_10_")):
+    if safe.startswith(("all_", "last_3_", "last_5_", "last_10_", "last_15_")):
         return safe.endswith(BALANCED_HISTORY_KEY_SUFFIXES)
     if safe.startswith(("all_trend_", "last_10_trend_", "last_5_trend_")):
         return True

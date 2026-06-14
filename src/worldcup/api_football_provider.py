@@ -574,7 +574,7 @@ def api_football_feature_table(
             "rest_days_last": float(rest_days.iloc[-1]) if not rest_days.empty else 0.0,
         }
         record.update(api_window_features(frame, window=len(frame), prefix="all"))
-        for window in (3, 5, 10):
+        for window in (3, 5, 10, 15):
             record.update(api_window_features(frame, window=window, prefix=f"last_{window}"))
         record["trend_points_ppg_3_vs_10"] = record.get("last_3_points_ppg", 0.0) - record.get("last_10_points_ppg", 0.0)
         record["trend_goal_diff_3_vs_10"] = record.get("last_3_goal_diff_avg", 0.0) - record.get("last_10_goal_diff_avg", 0.0)

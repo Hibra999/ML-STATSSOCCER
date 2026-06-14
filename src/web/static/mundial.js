@@ -720,7 +720,7 @@ function topRankedFixturePickHtml(model, backtest) {
     <div class="client-main-pick">
       <span>Pick principal</span>
       <strong>${escapeHtml(decision.label || "-")} · ${escapeHtml(decision.team || "")}${confidence !== "" ? ` · ${escapeHtml(formatNumber(confidence))}%` : ""}</strong>
-      <small>Marcador ${escapeHtml(item.top_score || "-")} · λ ${escapeHtml(expected.home ?? "-")}/${escapeHtml(expected.away ?? "-")}${backtest.reliability_score !== undefined ? ` · confiabilidad ${escapeHtml(formatNumber(backtest.reliability_score ?? 0))}` : ""}</small>
+      <small>Marcador #1 ${escapeHtml(item.top_score || "-")}${item.top_score_probability !== undefined ? ` · ${escapeHtml(formatNumber(item.top_score_probability))}%` : ""} · λ ${escapeHtml(expected.home ?? "-")}/${escapeHtml(expected.away ?? "-")}${backtest.reliability_score !== undefined ? ` · confiabilidad ${escapeHtml(formatNumber(backtest.reliability_score ?? 0))}` : ""}</small>
     </div>
     <div class="top-scores compact">
       ${topScores.slice(0, 3).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
@@ -741,24 +741,42 @@ function alternativeModelRowHtml(model, backtest) {
     <b>${escapeHtml(formatNumber(backtest.reliability_score ?? 0))}</b>
     <span>${escapeHtml(decision.label || "-")} ${escapeHtml(decision.team || "")}${confidence !== "" ? ` · ${escapeHtml(formatNumber(confidence))}%` : ""}</span>
     <span>${escapeHtml(item.top_score || "-")} · λ ${escapeHtml(expected.home ?? "-")}/${escapeHtml(expected.away ?? "-")}</span>
-    <small>LL ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))} · RPS ${escapeHtml(formatNumber(backtest.rps ?? "-"))} · Top-3 ${escapeHtml(formatNumber(Number(backtest.top3_score_accuracy || 0) * 100))}% · ECE ${escapeHtml(formatNumber(backtest.expected_calibration_error ?? "-"))}${warnings.length ? ` · ${escapeHtml(warnings[0])}` : ""}</small>
+    <small>LL ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))} · RPS ${escapeHtml(formatNumber(backtest.rps ?? "-"))} · Marcador #1 ${escapeHtml(formatNumber(Number(backtest.score_accuracy || 0) * 100))}% · Top-3 ${escapeHtml(formatNumber(Number(backtest.top3_score_accuracy || 0) * 100))}% · ECE ${escapeHtml(formatNumber(backtest.expected_calibration_error ?? "-"))}${warnings.length ? ` · ${escapeHtml(warnings[0])}` : ""}</small>
     <div class="top-scores compact">
       ${topScores.slice(0, 3).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
     </div>
+    ${featureContextDetailsHtml(item.feature_context)}
   </div>`;
+}
+
+function featureContextDetailsHtml(context) {
+  const item = context || {};
+  const counts = item.usage_counts || {};
+  const sample = item.sample || {};
+  const families = item.available_families || [];
+  if (!families.length && !Object.keys(sample).length) return "";
+  return `<details class="feature-context-drawer">
+    <summary>Feature audit · ${escapeHtml(families.length)} familias</summary>
+    <div class="technical-meta-row compact">
+      ${Object.entries(counts).filter(([, value]) => Number(value || 0) > 0).map(([key, value]) => `<span>${escapeHtml(key)} ${escapeHtml(value)}</span>`).join("")}
+    </div>
+    <div class="technical-meta-row compact">
+      ${Object.entries(sample).slice(0, 8).map(([key, value]) => `<span>${escapeHtml(key)}=${escapeHtml(formatNumber(value))}</span>`).join("")}
+    </div>
+  </details>`;
 }
 
 function backtestTableHtml(backtests, summary) {
   const rows = backtests || [];
-  return `<section class="report-panel alternatives-backtest-panel">
-    <header>
+  return `<details class="report-panel alternatives-backtest-panel">
+    <summary>
       <strong>Ranking de confiabilidad</strong>
       <small>${escapeHtml((summary || {}).evaluated_matches || 0)} evaluados 2026 · ${escapeHtml((summary || {}).train_matches || 0)} históricos base · ${escapeHtml((summary || {}).source || "")}</small>
-    </header>
+    </summary>
     <div class="benchmark-bar-list">
       ${rows.map((item) => benchmarkMetricCardHtml(item)).join("") || loadingHtml("Sin backtest")}
     </div>
-  </section>`;
+  </details>`;
 }
 
 function benchmarkMetricCardHtml(item) {
@@ -776,10 +794,11 @@ function benchmarkMetricCardHtml(item) {
       ${compactMetricBarHtml("RPS", formatNumber(item.rps ?? "-"), inverseMetricPercent(item.rps, 0.75))}
       ${compactMetricBarHtml("ECE", formatNumber(item.expected_calibration_error ?? "-"), inverseMetricPercent(item.expected_calibration_error, 0.35))}
       ${compactMetricBarHtml("Pick %", `${formatNumber(Number(item.pick_accuracy || 0) * 100)}%`, Number(item.pick_accuracy || 0) * 100)}
+      ${compactMetricBarHtml("Marcador #1", `${formatNumber(Number(item.score_accuracy || 0) * 100)}%`, Number(item.score_accuracy || 0) * 100)}
       ${compactMetricBarHtml("Top-3 marcador", `${formatNumber(Number(item.top3_score_accuracy || 0) * 100)}%`, Number(item.top3_score_accuracy || 0) * 100)}
       ${compactMetricBarHtml("Brier", formatNumber(item.brier ?? "-"), inverseMetricPercent(item.brier, 0.75))}
       ${compactMetricBarHtml("U/O 2.5 LL", formatNumber(item.ou25_log_loss ?? "-"), inverseMetricPercent(item.ou25_log_loss, 1.2))}
-      ${compactMetricBarHtml("Vs Poisson", `${escapeHtml(vs.metric_wins ?? 0)}/${escapeHtml(vs.metric_total ?? 6)}`, Number(vs.metric_wins || 0) * (100 / Math.max(Number(vs.metric_total || 6), 1)))}
+      ${compactMetricBarHtml("Vs Poisson", `${escapeHtml(vs.metric_wins ?? 0)}/${escapeHtml(vs.metric_total ?? 7)}`, Number(vs.metric_wins || 0) * (100 / Math.max(Number(vs.metric_total || 7), 1)))}
     </div>
     <small>${escapeHtml(vs.summary || "")}</small>
   </article>`;
@@ -807,13 +826,13 @@ function backtestPredictionReviewHtml(backtests) {
   const leader = (backtests || []).find((item) => item && item.available) || (backtests || [])[0] || {};
   const rows = leader.matches || leader.sample || [];
   if (!rows.length) return "";
-  return `<section class="report-panel backtest-review-panel">
-    <header>
+  return `<details class="report-panel backtest-review-panel">
+    <summary>
       <strong>Backtest: predicción vs resultado</strong>
-      <small>${escapeHtml(leader.model_label || leader.model_key || "Modelo #1")} · 1X2 y over/under</small>
-    </header>
+      <small>${escapeHtml(leader.model_label || leader.model_key || "Modelo #1")} · Marcador #1, 1X2 y over/under</small>
+    </summary>
     ${backtestMatchTableHtml(leader)}
-  </section>`;
+  </details>`;
 }
 
 function backtestMatchTableHtml(backtest) {
@@ -821,12 +840,13 @@ function backtestMatchTableHtml(backtest) {
   if (!rows.length) return loadingHtml("Sin partidos evaluados");
   return `<div class="alternatives-backtest-table backtest-match-table">
     <table>
-      <thead><tr><th>Fecha</th><th>Partido</th><th>Resultado</th><th>1X2 pred.</th><th>1X2 real</th><th>U/O 0.5</th><th>U/O 1.5</th><th>U/O 2.5</th><th>U/O 3.5</th></tr></thead>
+      <thead><tr><th>Fecha</th><th>Partido</th><th>Resultado</th><th>Marcador #1</th><th>1X2 pred.</th><th>1X2 real</th><th>U/O 0.5</th><th>U/O 1.5</th><th>U/O 2.5</th><th>U/O 3.5</th></tr></thead>
       <tbody>${rows.map((row) => `
         <tr>
           <td>${escapeHtml(row.date || "")}</td>
           <td>${escapeHtml(row.match || "")}</td>
           <td>${escapeHtml(row.actual_score || "")}</td>
+          <td>${backtestScoreCellHtml(row)}</td>
           <td>${backtestOutcomeCellHtml(row)}</td>
           <td>${escapeHtml(row.actual_pick || "-")}</td>
           ${["0.5", "1.5", "2.5", "3.5"].map((line) => `<td>${backtestOverUnderCellHtml((row.over_under || []).find((item) => String(item.line) === line))}</td>`).join("")}
@@ -834,6 +854,15 @@ function backtestMatchTableHtml(backtest) {
       `).join("")}</tbody>
     </table>
   </div>`;
+}
+
+function backtestScoreCellHtml(row) {
+  const score = (row && (row.most_probable_score || row.modal_score)) || "-";
+  const hit = Boolean(row && (row.most_probable_score_hit || row.score_hit));
+  const probability = Number(row && row.most_probable_score_probability);
+  const top3 = row && row.top3_score_hit ? " · Top-3" : "";
+  const probabilityText = Number.isFinite(probability) ? `${formatNumber(probability)}%` : "-";
+  return `<span class="backtest-result-cell ${escapeAttr(hit ? "hit" : "miss")}"><b>${escapeHtml(score)}</b><small>${escapeHtml(hit ? "Acertó" : "Falló")} · ${escapeHtml(probabilityText)}${escapeHtml(top3)}</small></span>`;
 }
 
 function backtestOutcomeCellHtml(row) {
@@ -872,6 +901,7 @@ function alternativeBenchmarkCardHtml(item) {
         <span>Log-loss ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))}</span>
         <span>RPS ${escapeHtml(formatNumber(backtest.rps ?? "-"))}</span>
         <span>ECE ${escapeHtml(formatNumber(backtest.expected_calibration_error ?? "-"))}</span>
+        <span>Marcador #1 ${escapeHtml(formatNumber(Number(backtest.score_accuracy || 0) * 100))}%</span>
         <span>Top-3 ${escapeHtml(formatNumber(Number(backtest.top3_score_accuracy || 0) * 100))}%</span>
         <span>Brier ${escapeHtml(formatNumber(backtest.brier ?? "-"))}</span>
         <span>Pick ${escapeHtml(formatNumber(Number(backtest.pick_accuracy || 0) * 100))}%</span>
