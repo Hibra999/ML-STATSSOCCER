@@ -413,8 +413,8 @@ async function runUpcomingPredictions() {
   const group = document.getElementById("upcoming-group-filter").value || "";
   const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
   const calculationLabel = sotaCalculationMode === "monte_carlo"
-    ? `SOTA Monte Carlo N=${formatInteger(currentMonteCarloSimulations())}`
-    : "SOTA rápido: matriz exacta";
+    ? `SOTA Monte Carlo mezcla N=${formatInteger(currentMonteCarloSimulations())}`
+    : "Consenso exacto";
   document.getElementById("upcoming-summary").textContent = `Generando ${calculationLabel} con Poisson ultimos ${currentPoissonRecentMatches()}...`;
   try {
     const job = await api("/api/mundial/predict-upcoming-report", jsonOptions({
@@ -445,7 +445,7 @@ function renderUpcomingReport(report) {
   const fixtures = report.fixture_reports || [];
   const hardware = summary.hardware || {};
   const warnings = summary.warnings || [];
-  const calculationLabel = summary.sota_calculation_label || (summary.pipeline_mode === "poisson_sota" ? "SOTA rápido: matriz exacta, sin simulación" : "");
+  const calculationLabel = summary.sota_calculation_label || (summary.pipeline_mode === "poisson_sota" ? "Consenso exacto: matriz promedio, sin simulacion" : "");
   document.getElementById("upcoming-summary").textContent =
     `${summary.pipeline_label || "Reporte"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()}${calculationLabel ? ` - ${calculationLabel}` : ""} - ${summary.report_id || report.report_id || ""}`;
   document.getElementById("upcoming-predictions").innerHTML = "";
@@ -540,7 +540,7 @@ function clientPrimaryReportPayload(report) {
     const outcomeProbability = Number(mc.outcome_probability ?? probabilities[outcome] ?? 0);
     return {
       mode: "monte_carlo",
-      label: `SOTA Monte Carlo: N=${formatInteger(mc.iterations || 0)}`,
+      label: `SOTA Monte Carlo por mezcla: N=${formatInteger(mc.iterations || 0)}`,
       probabilities,
       distribution: mc,
       stats: report.model_statistics || {},
@@ -558,7 +558,7 @@ function clientPrimaryReportPayload(report) {
   const consensus = (report && report.consensus) || {};
   return {
     mode: "exact",
-    label: (report && report.sota_calculation_label) || "Matriz exacta, sin simulación",
+    label: (report && report.sota_calculation_label) || "Consenso exacto: matriz promedio, sin simulacion",
     probabilities: {},
     distribution: (report && report.consensus_score_distribution) || {},
     stats: (report && report.model_statistics) || {},
@@ -713,8 +713,8 @@ function clientScorePanelHtml(distribution, primary) {
   if (!payload.available) return "";
   const topScores = payload.top_scores || [];
   const sourceLabel = primary && primary.mode === "monte_carlo"
-    ? `Monte Carlo · N=${formatInteger(payload.iterations || 0)}`
-    : "Matriz consenso";
+    ? `Monte Carlo mezcla · N=${formatInteger(payload.iterations || 0)}`
+    : "Consenso exacto";
   return `<section class="client-score-panel">
     <header><strong>Marcadores probables</strong><small>${escapeHtml(sourceLabel)}</small></header>
     <div class="top-scores compact">
@@ -738,7 +738,7 @@ function reportFixtureCardHtml(report) {
   const topModels = report.top_models_1x2 || [];
   const stats = report.model_statistics || {};
   const scoreDistribution = (monteCarlo.available ? monteCarlo : report.consensus_score_distribution) || {};
-  const calculationLabel = report.sota_calculation_label || (monteCarlo.available ? `SOTA Monte Carlo: N=${formatInteger(monteCarlo.iterations || 0)}` : "Matriz exacta, sin simulación");
+  const calculationLabel = report.sota_calculation_label || (monteCarlo.available ? `SOTA Monte Carlo por mezcla: N=${formatInteger(monteCarlo.iterations || 0)}` : "Consenso exacto: matriz promedio, sin simulacion");
   const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
   const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
   const consensusClass = ["Baja", ""].includes(consensus.strength || "") ? "low" : "";
@@ -817,9 +817,11 @@ function reportConsensusScoreHtml(distribution) {
   const lambdas = payload.lambdas || {};
   const topScores = payload.top_scores || [];
   const isMonteCarlo = payload.calculation_mode === "monte_carlo";
-  const title = isMonteCarlo ? "Monte Carlo consenso" : "Matriz consenso de marcador";
+  const title = isMonteCarlo ? "Monte Carlo por mezcla de modelos" : "Consenso exacto de marcador";
+  const delta = (payload.probability_deltas || {})[payload.outcome || ""];
+  const deltaText = Number.isFinite(Number(delta)) ? ` · Δ exacto ${formatSignedNumber(delta)}pp` : "";
   const subtitle = isMonteCarlo
-    ? `N=${formatInteger(payload.iterations || 0)} · ${payload.backend || "numpy"} · λ ${formatNumber(lambdas.home ?? "-")}/${formatNumber(lambdas.away ?? "-")}`
+    ? `${payload.model_count || 0} modelos · N=${formatInteger(payload.iterations || 0)} · ${payload.backend || "numpy"}${deltaText} · λ ${formatNumber(lambdas.home ?? "-")}/${formatNumber(lambdas.away ?? "-")}`
     : `${payload.model_count || 0} modelos · λ ${formatNumber(lambdas.home ?? "-")}/${formatNumber(lambdas.away ?? "-")}`;
   return `<section class="report-panel consensus-score-panel">
     <header>
@@ -1427,6 +1429,13 @@ function formatNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return value;
   return number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatSignedNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return value;
+  const formatted = formatNumber(Math.abs(number));
+  return `${number >= 0 ? "+" : "-"}${formatted}`;
 }
 
 function formatInteger(value) {

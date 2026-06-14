@@ -13,7 +13,8 @@ def test_sota_sequence_temporarily_excludes_bayes_models_but_catalog_keeps_them(
 
     assert disabled.isdisjoint(services.SOTA_SCORE_MODEL_SEQUENCE)
     assert disabled <= catalog_keys
-    assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 8
+    assert "xg_poisson_local" not in services.SOTA_SCORE_MODEL_SEQUENCE
+    assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 7
 
 
 def test_consensus_rounding_signature_and_strength_levels():
@@ -169,7 +170,7 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     assert (tmp_path / "latest.json").exists()
     latest = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
     assert latest["report_id"] == result["report_id"]
-    assert any(item.get("model_key") == "xg_poisson_local" for item in progress)
+    assert not any(item.get("model_key") == "xg_poisson_local" for item in progress)
     assert {item.get("model_total") for item in progress if item.get("model_key")} == {len(services.SOTA_SCORE_MODEL_SEQUENCE)}
 
 
@@ -206,10 +207,12 @@ def test_poisson_sota_report_monte_carlo_consensus_uses_form_iterations(tmp_path
     ])
     captured = {}
 
-    def fake_count_matrix(grid, iterations, seed, backend="numpy"):
+    def fake_count_matrix(grids, weights, iterations, seed, backend="numpy"):
         captured["iterations"] = iterations
         captured["backend"] = backend
-        return np.array([[35000, 15000], [40000, 10000]]), "numpy"
+        captured["grid_count"] = len(grids)
+        captured["weights"] = list(weights)
+        return np.array([[35000, 15000], [40000, 10000]]), "numpy", [iterations]
 
     monkeypatch.setattr(services, "REPORTS_ROOT", tmp_path)
     monkeypatch.setattr(services, "SOTA_SCORE_MODEL_SEQUENCE", ["independent_poisson"])
@@ -219,7 +222,7 @@ def test_poisson_sota_report_monte_carlo_consensus_uses_form_iterations(tmp_path
     monkeypatch.setattr(services, "groups_from_tournament", lambda tournament: {"Group A": ["Mexico", "Canada"]})
     monkeypatch.setattr(services, "load_historical_matches", lambda refresh=False: (pd.DataFrame(), "history-test"))
     monkeypatch.setattr(services, "contextual_poisson_for_match", lambda *args, **kwargs: {})
-    monkeypatch.setattr(services, "monte_carlo_count_matrix_from_grid", fake_count_matrix)
+    monkeypatch.setattr(services, "monte_carlo_count_matrix_from_model_grids", fake_count_matrix)
     monkeypatch.setattr(services, "detect_hardware", lambda: {
         "cpu_count": 8,
         "default_n_jobs": -1,
@@ -244,10 +247,153 @@ def test_poisson_sota_report_monte_carlo_consensus_uses_form_iterations(tmp_path
     assert result["summary"]["sota_calculation_mode"] == "monte_carlo"
     assert result["summary"]["monte_carlo_iterations"] == 100000
     assert captured["iterations"] == 100000
+    assert captured["grid_count"] == 1
     assert monte_carlo["available"] is True
     assert monte_carlo["iterations"] == 100000
+    assert monte_carlo["source"] == "SOTA Monte Carlo por mezcla de modelos"
+    assert monte_carlo["exact_consensus"]["available"] is True
+    assert monte_carlo["model_count"] == 1
+    assert monte_carlo["model_sample_counts"][0]["sample_count"] == 100000
+    assert set(monte_carlo["probability_deltas"]) >= {"home", "draw", "away", "over25", "under25"}
     assert set(monte_carlo["probabilities"]) >= {"home", "draw", "away", "over05", "under05", "over25", "under25"}
     assert monte_carlo["top_scores"]
+
+
+def test_monte_carlo_model_entries_exclude_unavailable_and_fallback_models():
+    from src.web import mundial_services as services
+
+    def report(key, eligible=True, fallback=False):
+        return {
+            "model_key": key,
+            "model_label": key,
+            "consensus_eligible": eligible,
+            "fallback": fallback,
+            "score_distribution": {
+                "score_matrix": [[25.0, 25.0], [25.0, 25.0]],
+                "lambdas": {"home": 1.0, "away": 1.0},
+            },
+        }
+
+    entries = services.monte_carlo_model_grid_entries([
+        report("independent_poisson"),
+        report("xg_poisson_local", eligible=False),
+        report("dixon_coles_mle", fallback=True),
+    ])
+
+    assert [entry["model_key"] for entry in entries] == ["independent_poisson"]
+
+
+def test_monte_carlo_single_model_matches_that_model_distribution():
+    from src.web import mundial_services as services
+
+    grid = np.array([[0.20, 0.30], [0.10, 0.40]])
+    counts, backend, sample_counts = services.monte_carlo_count_matrix_from_model_grids(
+        grids=[grid],
+        weights=[1.0],
+        iterations=50000,
+        seed=17,
+        backend="numpy",
+    )
+
+    exact = services.score_grid_probabilities(grid)
+    simulated = services.score_grid_probabilities(counts)
+
+    assert backend == "numpy"
+    assert sample_counts == [50000]
+    for key in ("home", "draw", "away", "over05", "under05"):
+        assert abs(simulated[key] - exact[key]) < 1.5
+
+
+def test_monte_carlo_two_distinct_models_approximates_uniform_mixture():
+    from src.web import mundial_services as services
+
+    home_win_grid = np.array([[0.0, 0.0], [1.0, 0.0]])
+    away_win_grid = np.array([[0.0, 1.0], [0.0, 0.0]])
+
+    counts, backend, sample_counts = services.monte_carlo_count_matrix_from_model_grids(
+        grids=[home_win_grid, away_win_grid],
+        weights=[0.5, 0.5],
+        iterations=40000,
+        seed=2026,
+        backend="numpy",
+    )
+    simulated = services.score_grid_probabilities(counts)
+
+    assert backend == "numpy"
+    assert abs(sample_counts[0] - sample_counts[1]) < 900
+    assert 48.0 <= simulated["home"] <= 52.0
+    assert 48.0 <= simulated["away"] <= 52.0
+    assert simulated["draw"] == 0.0
+
+
+def test_sota_model_weights_use_walk_forward_metrics_and_penalize_experimental(monkeypatch):
+    from src.web import mundial_services as services
+
+    def entry(key):
+        return {
+            "model_key": key,
+            "model_label": key,
+            "grid": np.ones((2, 2), dtype=float) / 4.0,
+            "model_report": {},
+        }
+
+    monkeypatch.setattr(services, "load_sota_performance_metrics", lambda: ({
+        "independent_poisson": {"sample_size": 120, "brier": 0.40},
+        "dixon_coles_mle": {"sample_size": 120, "brier": 0.80},
+    }, "storage/worldcup/walk_forward/sota_model_metrics.json"))
+
+    payload = services.sota_model_weighting_payload([
+        entry("independent_poisson"),
+        entry("dixon_coles_mle"),
+    ])
+    weights = {item["model_key"]: item["weight"] for item in payload["items"]}
+
+    assert payload["source"] == "walk_forward_metrics"
+    assert weights["independent_poisson"] > weights["dixon_coles_mle"]
+    assert payload["metrics_path"].endswith("sota_model_metrics.json")
+
+    monkeypatch.setattr(services, "load_sota_performance_metrics", lambda: ({}, ""))
+    payload = services.sota_model_weighting_payload([
+        entry("independent_poisson"),
+        entry("copula_weibull_count"),
+    ])
+    weights = {item["model_key"]: item["weight"] for item in payload["items"]}
+    reasons = {item["model_key"]: item["reasons"] for item in payload["items"]}
+
+    assert payload["source"] == "uniform_with_experimental_penalty"
+    assert weights["copula_weibull_count"] < weights["independent_poisson"]
+    assert any("penalizacion experimental" in reason for reason in reasons["copula_weibull_count"])
+
+
+def test_consensus_agreement_and_model_statistics_include_ranges():
+    from src.web import mundial_services as services
+
+    reports = [
+        {
+            "consensus_eligible": True,
+            "signature": "home|over|over|under|under",
+            "decision": {"outcome": "home"},
+            "totals": {"0.5": "over", "1.5": "over", "2.5": "under", "3.5": "under"},
+            "probabilities": {"home": 60, "draw": 20, "away": 20, "over05": 90, "under05": 10, "over15": 70, "under15": 30, "over25": 40, "under25": 60, "over35": 20, "under35": 80},
+            "expected_goals": {"home": 1.5, "away": 0.8},
+            "top_score": "1-0",
+        },
+        {
+            "consensus_eligible": True,
+            "signature": "home|over|over|under|under",
+            "decision": {"outcome": "home"},
+            "totals": {"0.5": "over", "1.5": "over", "2.5": "under", "3.5": "under"},
+            "probabilities": {"home": 50, "draw": 25, "away": 25, "over05": 85, "under05": 15, "over15": 65, "under15": 35, "over25": 35, "under25": 65, "over35": 18, "under35": 82},
+            "expected_goals": {"home": 1.3, "away": 1.0},
+            "top_score": "1-1",
+        },
+    ]
+
+    consensus = services.fixture_consensus(reports)
+    statistics = services.model_statistics_payload(reports)
+
+    assert consensus["agreement"] == {"market": "1X2", "pick": "home", "pick_label": "1", "count": 2, "total": 2, "share": 1.0}
+    assert statistics["probability_ranges"]["home"] == {"min": 50.0, "max": 60.0, "spread": 10.0}
 
 
 def test_sota_report_honors_explicit_cuda_when_detected_and_warns_cpu_bound(monkeypatch):
