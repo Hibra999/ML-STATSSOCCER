@@ -2398,6 +2398,12 @@ h3 { font-size: 16px; }
 .best-alternative-panel .client-main-pick {
   margin: 0;
 }
+.alternatives-model-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+}
 .alternative-model-card {
   display: grid;
   gap: 10px;

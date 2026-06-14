@@ -593,7 +593,7 @@ function alternativesBenchmarkHtml(report) {
     </section>
     <section class="report-panel">
       <header><strong>Detalles por modelo</strong><small>Colapsables para revisar disponibilidad, métricas y advertencias</small></header>
-      <div class="client-report-grid alternatives-model-grid">
+      <div class="alternatives-model-list">
         ${rankedModels.map((item) => alternativeBenchmarkCardHtml(item)).join("") || loadingHtml("Sin modelos")}
       </div>
     </section>

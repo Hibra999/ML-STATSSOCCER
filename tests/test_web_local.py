@@ -381,6 +381,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "future-outcome-bars" in app_source
     assert "future-total-cards" in app_source
     assert "future-score-strip" in app_source
+    assert "alternatives-model-list" in app_source
     assert "U/O 2.5" in app_source
     assert "finalizados detectados" in app_source
     assert "upcoming-benchmark-tuning-enabled" in html_source
