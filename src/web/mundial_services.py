@@ -80,18 +80,10 @@ SOTA_SCORE_MODEL_SEQUENCE = [
     "independent_poisson",
     "dixon_coles_mle",
     "bivariate_poisson_mle",
-    "diagonal_inflated_bivariate_poisson",
-    "zero_inflated_generalized_poisson",
-    "negative_binomial_mle",
-    "conway_maxwell_poisson",
-    "skellam_margin",
-    "copula_weibull_count",
 ]
 ALTERNATIVE_SCORE_MODEL_SEQUENCE = list(ALTERNATIVE_SCORE_MODEL_KEYS)
 BENCHMARK_SCORE_MODEL_SEQUENCE = list(dict.fromkeys([*SOTA_SCORE_MODEL_SEQUENCE, *ALTERNATIVE_SCORE_MODEL_KEYS]))
-SOTA_EXPERIMENTAL_MODEL_PENALTIES = {
-    "copula_weibull_count": 0.65,
-}
+SOTA_EXPERIMENTAL_MODEL_PENALTIES: Dict[str, float] = {}
 SOTA_MIN_PERFORMANCE_SAMPLES = 30
 REPORT_TOTAL_GOAL_LINES = (0.5, 1.5, 2.5, 3.5)
 REPORT_SCORE_MATRIX_GOALS = 6
@@ -1124,6 +1116,8 @@ def tune_benchmark_poisson_recent_matches(
         "n_trials": int(config.get("benchmark_tuning_trials") or 0),
         "sampler": str(config.get("benchmark_tuning_sampler") or "tpe"),
         "objective": "mean_log_loss",
+        "scope": "all_active_models",
+        "model_sequence": list(model_sequence),
         "trials": [],
         "warnings": [],
     }

@@ -52,19 +52,25 @@ def test_sota_and_alternative_sequences_are_statistical_score_models():
     assert disabled.isdisjoint(services.SOTA_SCORE_MODEL_SEQUENCE)
     assert disabled <= catalog_keys
     assert "xg_poisson_local" not in services.SOTA_SCORE_MODEL_SEQUENCE
-    assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 9
+    assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 3
     assert services.ALTERNATIVE_SCORE_MODEL_SEQUENCE == [
         "dixon_coles_mle",
         "bivariate_poisson_mle",
+    ]
+    assert services.BENCHMARK_SCORE_MODEL_SEQUENCE == services.SOTA_SCORE_MODEL_SEQUENCE
+    assert "independent_poisson" not in services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
+    removed = {
         "diagonal_inflated_bivariate_poisson",
         "zero_inflated_generalized_poisson",
         "negative_binomial_mle",
         "conway_maxwell_poisson",
         "skellam_margin",
         "copula_weibull_count",
-    ]
-    assert services.BENCHMARK_SCORE_MODEL_SEQUENCE == services.SOTA_SCORE_MODEL_SEQUENCE
-    assert "independent_poisson" not in services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
+    }
+    assert removed.isdisjoint(catalog_keys)
+    assert removed.isdisjoint(services.SOTA_SCORE_MODEL_SEQUENCE)
+    assert removed.isdisjoint(services.ALTERNATIVE_SCORE_MODEL_SEQUENCE)
+    assert removed.isdisjoint(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
 
 
 def test_alternatives_benchmark_aliases_and_statistical_registry():
@@ -80,12 +86,6 @@ def test_alternatives_benchmark_aliases_and_statistical_registry():
         "independent_poisson",
         "dixon_coles_mle",
         "bivariate_poisson_mle",
-        "diagonal_inflated_bivariate_poisson",
-        "zero_inflated_generalized_poisson",
-        "negative_binomial_mle",
-        "conway_maxwell_poisson",
-        "skellam_margin",
-        "copula_weibull_count",
     ]
     alternatives = sota_alternatives_catalog()
     assert [item["key"] for item in alternatives] == services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
@@ -421,6 +421,8 @@ def test_benchmark_optuna_tunes_poisson_recent_matches(monkeypatch):
 
     assert summary["enabled"] is True
     assert summary["available"] is True
+    assert summary["scope"] == "all_active_models"
+    assert summary["model_sequence"] == ["independent_poisson", "dixon_coles_mle"]
     assert summary["best_poisson_recent_matches"] == 12
     assert summary["best_value"] == 0.25
     assert [trial["poisson_recent_matches"] for trial in summary["trials"]] == [5, 12, 30]
@@ -1131,7 +1133,7 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     assert result["fixture_reports"][0]["models"][0]["model_key"] == "independent_poisson"
     assert "monte_carlo_consensus" not in result["fixture_reports"][0]
     assert result["fixture_reports"][0]["consensus"]["eligible_models"] == len(services.SOTA_SCORE_MODEL_SEQUENCE)
-    assert len(result["fixture_reports"][0]["top_models_1x2"]) == 4
+    assert len(result["fixture_reports"][0]["top_models_1x2"]) == min(4, len(services.SOTA_SCORE_MODEL_SEQUENCE))
     assert result["fixture_reports"][0]["consensus_score_distribution"]["available"] is True
     assert result["fixture_reports"][0]["model_statistics"]["model_count"] == len(services.SOTA_SCORE_MODEL_SEQUENCE)
     assert result["fixture_reports"][0]["models"][0]["score_distribution"]["top_scores"]
@@ -1294,7 +1296,7 @@ def test_monte_carlo_two_distinct_models_approximates_uniform_mixture():
     assert simulated["draw"] == 0.0
 
 
-def test_sota_model_weights_use_walk_forward_metrics_and_penalize_experimental(monkeypatch):
+def test_sota_model_weights_use_walk_forward_metrics_and_uniform_fallback(monkeypatch):
     from src.web import mundial_services as services
 
     def entry(key):
@@ -1323,14 +1325,13 @@ def test_sota_model_weights_use_walk_forward_metrics_and_penalize_experimental(m
     monkeypatch.setattr(services, "load_sota_performance_metrics", lambda: ({}, ""))
     payload = services.sota_model_weighting_payload([
         entry("independent_poisson"),
-        entry("copula_weibull_count"),
+        entry("dixon_coles_mle"),
     ])
     weights = {item["model_key"]: item["weight"] for item in payload["items"]}
-    reasons = {item["model_key"]: item["reasons"] for item in payload["items"]}
 
-    assert payload["source"] == "uniform_with_experimental_penalty"
-    assert weights["copula_weibull_count"] < weights["independent_poisson"]
-    assert any("penalizacion experimental" in reason for reason in reasons["copula_weibull_count"])
+    assert payload["source"] == "uniform"
+    assert weights["dixon_coles_mle"] == weights["independent_poisson"]
+    assert payload["experimental_penalties"] == {}
 
 
 def test_consensus_agreement_and_model_statistics_include_ranges():

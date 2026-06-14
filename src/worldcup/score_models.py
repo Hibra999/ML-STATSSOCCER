@@ -44,30 +44,6 @@ SCORE_MODEL_OPTIONS = [
         "heavy": False,
     },
     {
-        "key": "diagonal_inflated_bivariate_poisson",
-        "label": "Bivariado diagonal-inflado",
-        "description": "Poisson bivariado con masa extra en empates para calibrar draws.",
-        "heavy": False,
-    },
-    {
-        "key": "zero_inflated_generalized_poisson",
-        "label": "Poisson generalizado ZI",
-        "description": "Marginales Poisson generalizadas con inflacion de ceros para sobredispersion y 0-0.",
-        "heavy": False,
-    },
-    {
-        "key": "negative_binomial_mle",
-        "label": "Binomial negativa MLE",
-        "description": "Marginales binomial negativa para goles sobredispersos con dispersion estimada por maxima verosimilitud.",
-        "heavy": False,
-    },
-    {
-        "key": "conway_maxwell_poisson",
-        "label": "Conway-Maxwell Poisson",
-        "description": "Marginales CMP para ajustar sub/sobredispersion respecto a Poisson.",
-        "heavy": False,
-    },
-    {
         "key": "bayesian_hierarchical_poisson",
         "label": "Bayes jerarquico Poisson",
         "description": "Ataque/defensa/localia con priors jerarquicos en PyMC.",
@@ -77,18 +53,6 @@ SCORE_MODEL_OPTIONS = [
         "key": "bayesian_dynamic_poisson",
         "label": "Bayes dinamico Poisson",
         "description": "Variante dinamica por periodos; requiere backend bayesiano disponible.",
-        "heavy": True,
-    },
-    {
-        "key": "skellam_margin",
-        "label": "Skellam margen",
-        "description": "Repondera la matriz por distribucion de diferencia de goles.",
-        "heavy": False,
-    },
-    {
-        "key": "copula_weibull_count",
-        "label": "Weibull + copula Frank",
-        "description": "Marginales discrete-Weibull unidas por copula Frank experimental.",
         "heavy": True,
     },
     {
@@ -305,25 +269,6 @@ def fit_score_model_state(
         state = ScoreModelState(key, label, True, {"rho": _estimate_dixon_coles_rho(rows)}, fingerprint=fingerprint)
     elif key == "bivariate_poisson_mle":
         state = ScoreModelState(key, label, True, {"corr_share": _estimate_bivariate_corr_share(rows)}, fingerprint=fingerprint)
-    elif key == "diagonal_inflated_bivariate_poisson":
-        corr_share, diagonal_boost = _estimate_diagonal_inflated_params(rows)
-        state = ScoreModelState(
-            key,
-            label,
-            True,
-            {"corr_share": corr_share, "diagonal_boost": diagonal_boost},
-            fingerprint=fingerprint,
-        )
-    elif key == "zero_inflated_generalized_poisson":
-        state = ScoreModelState(key, label, True, _estimate_zigp_params(rows), fingerprint=fingerprint)
-    elif key == "negative_binomial_mle":
-        state = ScoreModelState(key, label, True, _estimate_negative_binomial_params(rows), fingerprint=fingerprint)
-    elif key == "conway_maxwell_poisson":
-        state = ScoreModelState(key, label, True, _estimate_conway_maxwell_poisson_params(rows), fingerprint=fingerprint)
-    elif key == "skellam_margin":
-        state = ScoreModelState(key, label, True, _estimate_skellam_params(rows), fingerprint=fingerprint)
-    elif key == "copula_weibull_count":
-        state = ScoreModelState(key, label, True, _estimate_copula_weibull_params(rows), fingerprint=fingerprint)
     else:
         state = ScoreModelState(
             key=DEFAULT_SCORE_MODEL,
@@ -350,19 +295,6 @@ def score_grid_from_lambdas(state: ScoreModelState | Dict[str, Any], lambda1: fl
         return dixon_coles_score_grid(lambda1, lambda2, rho=float(params.get("rho", 0.0)), max_goals=max_goals)
     if key == "bivariate_poisson_mle":
         return bivariate_poisson_score_grid(lambda1, lambda2, float(params.get("corr_share", 0.0)), max_goals=max_goals)
-    if key == "diagonal_inflated_bivariate_poisson":
-        grid = bivariate_poisson_score_grid(lambda1, lambda2, float(params.get("corr_share", 0.0)), max_goals=max_goals)
-        return diagonal_inflate_grid(grid, float(params.get("diagonal_boost", 1.0)))
-    if key == "zero_inflated_generalized_poisson":
-        return zero_inflated_generalized_poisson_grid(lambda1, lambda2, params, max_goals=max_goals)
-    if key == "negative_binomial_mle":
-        return negative_binomial_score_grid(lambda1, lambda2, params, max_goals=max_goals)
-    if key == "conway_maxwell_poisson":
-        return conway_maxwell_poisson_grid(lambda1, lambda2, params, max_goals=max_goals)
-    if key == "skellam_margin":
-        return skellam_reweighted_grid(lambda1, lambda2, float(params.get("margin_scale", 1.0)), max_goals=max_goals)
-    if key == "copula_weibull_count":
-        return copula_weibull_score_grid(lambda1, lambda2, params, max_goals=max_goals)
     return poisson_score_grid(lambda1=lambda1, lambda2=lambda2, max_goals=max_goals)
 
 
@@ -430,147 +362,6 @@ def bivariate_poisson_score_grid(lambda1: float, lambda2: float, corr_share: flo
                 )
             grid[home_goals, away_goals] = _logsumexp(terms)
     return _normalize_grid(grid)
-
-
-def diagonal_inflate_grid(grid: np.ndarray, diagonal_boost: float) -> np.ndarray:
-    adjusted = np.asarray(grid, dtype=float).copy()
-    boost = float(np.clip(diagonal_boost, 0.05, 20.0))
-    diagonal = np.diag_indices(min(adjusted.shape))
-    adjusted[diagonal] *= boost
-    return _normalize_grid(adjusted)
-
-
-def zero_inflated_generalized_poisson_grid(lambda1: float, lambda2: float, params: Dict[str, Any], max_goals: int = 10) -> np.ndarray:
-    home = generalized_poisson_pmf_vector(
-        lambda1,
-        alpha=float(params.get("alpha_home", params.get("alpha", 0.0))),
-        zero_inflation=float(params.get("zero_home", params.get("zero_inflation", 0.0))),
-        max_goals=max_goals,
-    )
-    away = generalized_poisson_pmf_vector(
-        lambda2,
-        alpha=float(params.get("alpha_away", params.get("alpha", 0.0))),
-        zero_inflation=float(params.get("zero_away", params.get("zero_inflation", 0.0))),
-        max_goals=max_goals,
-    )
-    return _normalize_grid(np.outer(home, away))
-
-
-def generalized_poisson_pmf_vector(rate: float, alpha: float, zero_inflation: float, max_goals: int = 10) -> np.ndarray:
-    rate = _clamp_rate(rate)
-    alpha = float(np.clip(alpha, -0.45, 0.95))
-    zero_inflation = float(np.clip(zero_inflation, 0.0, 0.75))
-    probs = np.zeros(int(max_goals) + 1, dtype=float)
-    for goals in range(int(max_goals) + 1):
-        term = rate + alpha * goals
-        if goals == 0:
-            gp = math.exp(-rate)
-        elif term <= 0:
-            gp = 0.0
-        else:
-            gp = rate * (term ** (goals - 1)) * math.exp(-term) / math.factorial(goals)
-        probs[goals] = (1.0 - zero_inflation) * gp
-    probs[0] += zero_inflation
-    return _normalize_vector(probs)
-
-
-def negative_binomial_score_grid(lambda1: float, lambda2: float, params: Dict[str, Any], max_goals: int = 10) -> np.ndarray:
-    home = negative_binomial_pmf_vector(lambda1, float(params.get("size_home", params.get("size", 12.0))), max_goals=max_goals)
-    away = negative_binomial_pmf_vector(lambda2, float(params.get("size_away", params.get("size", 12.0))), max_goals=max_goals)
-    return _normalize_grid(np.outer(home, away))
-
-
-def negative_binomial_pmf_vector(rate: float, size: float, max_goals: int = 10) -> np.ndarray:
-    rate = _clamp_rate(rate)
-    size = float(np.clip(size, 0.25, 120.0))
-    probs = np.zeros(int(max_goals) + 1, dtype=float)
-    log_p = math.log(size / (size + rate))
-    log_q = math.log(rate / (size + rate))
-    for goals in range(int(max_goals) + 1):
-        probs[goals] = math.exp(
-            math.lgamma(goals + size)
-            - math.lgamma(size)
-            - math.lgamma(goals + 1)
-            + size * log_p
-            + goals * log_q
-        )
-    probs[-1] += max(0.0, 1.0 - float(probs.sum()))
-    return _normalize_vector(probs)
-
-
-def conway_maxwell_poisson_grid(lambda1: float, lambda2: float, params: Dict[str, Any], max_goals: int = 10) -> np.ndarray:
-    home = conway_maxwell_poisson_pmf_vector(lambda1, float(params.get("nu_home", params.get("nu", 1.0))), max_goals=max_goals)
-    away = conway_maxwell_poisson_pmf_vector(lambda2, float(params.get("nu_away", params.get("nu", 1.0))), max_goals=max_goals)
-    return _normalize_grid(np.outer(home, away))
-
-
-def conway_maxwell_poisson_pmf_vector(rate: float, nu: float, max_goals: int = 10) -> np.ndarray:
-    rate = _clamp_rate(rate)
-    nu = float(np.clip(nu, 0.25, 3.5))
-    goals = np.arange(int(max_goals) + 1, dtype=float)
-    log_probs = goals * math.log(rate) - nu * np.asarray([math.lgamma(int(goal) + 1) for goal in goals], dtype=float)
-    log_probs -= float(log_probs.max())
-    probs = np.exp(log_probs)
-    return _normalize_vector(probs)
-
-
-def skellam_reweighted_grid(lambda1: float, lambda2: float, margin_scale: float, max_goals: int = 10) -> np.ndarray:
-    grid = poisson_score_grid(lambda1, lambda2, max_goals=max_goals)
-    margin_scale = float(np.clip(margin_scale, 0.45, 2.5))
-    if abs(margin_scale - 1.0) < 1e-6:
-        return grid
-    goals = np.arange(grid.shape[0], dtype=int)
-    home_goals, away_goals = np.meshgrid(goals, goals, indexing="ij")
-    margins = np.abs(home_goals - away_goals)
-    weights = np.power(margin_scale, margins.astype(float))
-    return _normalize_grid(grid * weights)
-
-
-def copula_weibull_score_grid(lambda1: float, lambda2: float, params: Dict[str, Any], max_goals: int = 10) -> np.ndarray:
-    beta_home = float(params.get("beta_home", params.get("beta", 1.15)))
-    beta_away = float(params.get("beta_away", params.get("beta", 1.15)))
-    theta = float(np.clip(params.get("theta", 0.0), -12.0, 12.0))
-    home_pmf = discrete_weibull_pmf(lambda1, beta_home, max_goals=max_goals)
-    away_pmf = discrete_weibull_pmf(lambda2, beta_away, max_goals=max_goals)
-    home_cdf = np.cumsum(home_pmf)
-    away_cdf = np.cumsum(away_pmf)
-    grid = np.zeros((max_goals + 1, max_goals + 1), dtype=float)
-    for home_goals in range(max_goals + 1):
-        u1 = float(home_cdf[home_goals])
-        u0 = float(home_cdf[home_goals - 1]) if home_goals else 0.0
-        for away_goals in range(max_goals + 1):
-            v1 = float(away_cdf[away_goals])
-            v0 = float(away_cdf[away_goals - 1]) if away_goals else 0.0
-            grid[home_goals, away_goals] = (
-                frank_copula_cdf(u1, v1, theta)
-                - frank_copula_cdf(u0, v1, theta)
-                - frank_copula_cdf(u1, v0, theta)
-                + frank_copula_cdf(u0, v0, theta)
-            )
-    return _normalize_grid(np.maximum(grid, 0.0))
-
-
-def discrete_weibull_pmf(mean: float, beta: float, max_goals: int = 10) -> np.ndarray:
-    beta = float(np.clip(beta, 0.45, 3.5))
-    mean = _clamp_rate(mean)
-    q = _discrete_weibull_q_for_mean(mean, beta, max_goals=max(40, max_goals * 8))
-    goals = np.arange(max_goals + 1, dtype=float)
-    probs = np.power(q, np.power(goals, beta)) - np.power(q, np.power(goals + 1.0, beta))
-    probs[-1] += max(0.0, 1.0 - float(probs.sum()))
-    return _normalize_vector(probs)
-
-
-def frank_copula_cdf(u: float, v: float, theta: float) -> float:
-    u = float(np.clip(u, 0.0, 1.0))
-    v = float(np.clip(v, 0.0, 1.0))
-    theta = float(theta)
-    if abs(theta) < 1e-7:
-        return u * v
-    denominator = math.expm1(-theta)
-    if abs(denominator) < 1e-12:
-        return u * v
-    inner = 1.0 + (math.expm1(-theta * u) * math.expm1(-theta * v)) / denominator
-    return float(np.clip(-math.log(max(inner, 1e-12)) / theta, 0.0, 1.0))
 
 
 def _fit_bayesian_state(
@@ -785,194 +576,6 @@ def _estimate_bivariate_corr_share(rows: List[Dict[str, Any]]) -> float:
     return float(np.clip(_minimize_scalar(objective, 0.0, 0.55), 0.0, 0.55))
 
 
-def _estimate_diagonal_inflated_params(rows: List[Dict[str, Any]]) -> Tuple[float, float]:
-    try:
-        from scipy import optimize
-
-        def objective(values: np.ndarray) -> float:
-            share = float(np.clip(values[0], 0.0, 0.55))
-            boost = float(math.exp(np.clip(values[1], -2.5, 3.0)))
-            total = 0.0
-            for row in rows:
-                grid = bivariate_poisson_score_grid(row["lambda1"], row["lambda2"], share, max_goals=10)
-                total -= _grid_log_probability(diagonal_inflate_grid(grid, boost), row)
-            return total
-
-        result = optimize.minimize(objective, np.asarray([0.05, math.log(1.35)]), bounds=[(0.0, 0.55), (-2.5, 3.0)], method="L-BFGS-B")
-        if result.success:
-            return float(result.x[0]), float(math.exp(result.x[1]))
-    except Exception:
-        pass
-    share = _estimate_bivariate_corr_share(rows)
-    draws = sum(1 for row in rows if row["g1"] == row["g2"])
-    base_draw = np.mean([
-        bivariate_poisson_score_grid(row["lambda1"], row["lambda2"], share, max_goals=10).diagonal().sum()
-        for row in rows
-    ])
-    observed_draw = draws / max(len(rows), 1)
-    boost = float(np.clip(observed_draw / max(base_draw, 1e-9), 0.4, 8.0))
-    return share, boost
-
-
-def _estimate_zigp_params(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    try:
-        from scipy import optimize
-
-        def objective(values: np.ndarray) -> float:
-            params = {
-                "alpha_home": float(values[0]),
-                "alpha_away": float(values[1]),
-                "zero_home": float(values[2]),
-                "zero_away": float(values[3]),
-            }
-            total = 0.0
-            for row in rows:
-                grid = zero_inflated_generalized_poisson_grid(row["lambda1"], row["lambda2"], params, max_goals=10)
-                total -= _grid_log_probability(grid, row)
-            return total
-
-        result = optimize.minimize(
-            objective,
-            np.asarray([0.05, 0.05, 0.04, 0.04]),
-            bounds=[(-0.35, 0.75), (-0.35, 0.75), (0.0, 0.45), (0.0, 0.45)],
-            method="L-BFGS-B",
-        )
-        if result.success:
-            return {
-                "alpha_home": float(result.x[0]),
-                "alpha_away": float(result.x[1]),
-                "zero_home": float(result.x[2]),
-                "zero_away": float(result.x[3]),
-            }
-    except Exception:
-        pass
-    zero_home = sum(1 for row in rows if row["g1"] == 0) / max(len(rows), 1)
-    zero_away = sum(1 for row in rows if row["g2"] == 0) / max(len(rows), 1)
-    return {
-        "alpha_home": 0.05,
-        "alpha_away": 0.05,
-        "zero_home": float(np.clip(zero_home * 0.2, 0.0, 0.25)),
-        "zero_away": float(np.clip(zero_away * 0.2, 0.0, 0.25)),
-    }
-
-
-def _estimate_negative_binomial_params(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    try:
-        from scipy import optimize
-
-        def objective(values: np.ndarray) -> float:
-            params = {
-                "size_home": float(math.exp(np.clip(values[0], math.log(0.35), math.log(90.0)))),
-                "size_away": float(math.exp(np.clip(values[1], math.log(0.35), math.log(90.0)))),
-            }
-            total = 0.0
-            for row in rows:
-                grid = negative_binomial_score_grid(row["lambda1"], row["lambda2"], params, max_goals=10)
-                total -= _grid_log_probability(grid, row)
-            return total
-
-        result = optimize.minimize(
-            objective,
-            np.asarray([math.log(12.0), math.log(12.0)]),
-            bounds=[(math.log(0.35), math.log(90.0)), (math.log(0.35), math.log(90.0))],
-            method="L-BFGS-B",
-        )
-        if result.success:
-            return {
-                "size_home": float(math.exp(result.x[0])),
-                "size_away": float(math.exp(result.x[1])),
-            }
-    except Exception:
-        pass
-    return {
-        "size_home": _negative_binomial_size_fallback(rows, "g1", "lambda1"),
-        "size_away": _negative_binomial_size_fallback(rows, "g2", "lambda2"),
-    }
-
-
-def _negative_binomial_size_fallback(rows: List[Dict[str, Any]], goal_key: str, lambda_key: str) -> float:
-    goals = np.asarray([float(row[goal_key]) for row in rows], dtype=float)
-    rates = np.asarray([float(row[lambda_key]) for row in rows], dtype=float)
-    if goals.size <= 1:
-        return 24.0
-    residual = goals - rates
-    variance = float(np.var(residual) + np.mean(rates))
-    mean_rate = float(np.mean(rates))
-    extra_variance = max(variance - mean_rate, 1e-6)
-    size = (mean_rate * mean_rate) / extra_variance
-    return float(np.clip(size, 0.5, 80.0))
-
-
-def _estimate_conway_maxwell_poisson_params(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    try:
-        from scipy import optimize
-
-        def objective(values: np.ndarray) -> float:
-            params = {
-                "nu_home": float(np.clip(values[0], 0.3, 3.0)),
-                "nu_away": float(np.clip(values[1], 0.3, 3.0)),
-            }
-            total = 0.0
-            for row in rows:
-                grid = conway_maxwell_poisson_grid(row["lambda1"], row["lambda2"], params, max_goals=10)
-                total -= _grid_log_probability(grid, row)
-            return total
-
-        result = optimize.minimize(
-            objective,
-            np.asarray([1.0, 1.0]),
-            bounds=[(0.3, 3.0), (0.3, 3.0)],
-            method="L-BFGS-B",
-        )
-        if result.success:
-            return {
-                "nu_home": float(result.x[0]),
-                "nu_away": float(result.x[1]),
-            }
-    except Exception:
-        pass
-    return {
-        "nu_home": _conway_maxwell_nu_fallback(rows, "g1", "lambda1"),
-        "nu_away": _conway_maxwell_nu_fallback(rows, "g2", "lambda2"),
-    }
-
-
-def _conway_maxwell_nu_fallback(rows: List[Dict[str, Any]], goal_key: str, lambda_key: str) -> float:
-    goals = np.asarray([float(row[goal_key]) for row in rows], dtype=float)
-    rates = np.asarray([float(row[lambda_key]) for row in rows], dtype=float)
-    if goals.size <= 1:
-        return 1.0
-    mean_rate = max(float(np.mean(rates)), 1e-6)
-    dispersion = float(np.var(goals - rates) + mean_rate) / mean_rate
-    return float(np.clip(1.0 / max(dispersion, 1e-6), 0.35, 2.5))
-
-
-def _estimate_skellam_params(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    margins = np.asarray([abs(row["g1"] - row["g2"]) for row in rows], dtype=float)
-    expected = np.asarray([
-        abs(row["lambda1"] - row["lambda2"]) + math.sqrt(max(row["lambda1"] + row["lambda2"], 1e-9)) * 0.55
-        for row in rows
-    ], dtype=float)
-    scale = float(np.clip((margins.mean() + 1e-9) / max(float(expected.mean()), 1e-9), 0.55, 1.9))
-    return {"margin_scale": scale}
-
-
-def _estimate_copula_weibull_params(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    beta = 1.12
-
-    def objective(theta: float) -> float:
-        return -sum(
-            _grid_log_probability(
-                copula_weibull_score_grid(row["lambda1"], row["lambda2"], {"beta": beta, "theta": theta}, max_goals=10),
-                row,
-            )
-            for row in rows
-        )
-
-    theta = float(np.clip(_minimize_scalar(objective, -8.0, 8.0), -8.0, 8.0))
-    return {"beta": beta, "theta": theta}
-
-
 def _fit_xg_local_state(label: str, fingerprint: str) -> ScoreModelState:
     if not LOCAL_XG_FILE.exists():
         return ScoreModelState(
@@ -1055,24 +658,6 @@ def _minimize_scalar(fn, lower: float, upper: float) -> float:
     return float(candidates[int(np.argmin(values))])
 
 
-def _discrete_weibull_q_for_mean(mean: float, beta: float, max_goals: int) -> float:
-    def expected(q_value: float) -> float:
-        goals = np.arange(max_goals + 1, dtype=float)
-        probs = np.power(q_value, np.power(goals, beta)) - np.power(q_value, np.power(goals + 1.0, beta))
-        probs[-1] += max(0.0, 1.0 - float(probs.sum()))
-        return float(np.sum(goals * _normalize_vector(probs)))
-
-    low = 1e-6
-    high = 0.999999
-    for _ in range(48):
-        mid = (low + high) / 2.0
-        if expected(mid) < mean:
-            low = mid
-        else:
-            high = mid
-    return float((low + high) / 2.0)
-
-
 def _fit_fingerprint(key: str, history_df: pd.DataFrame | None, teams: Iterable[str], config: Dict[str, Any]) -> str:
     digest = hashlib.sha256()
     digest.update(normalize_score_model_key(key).encode("utf-8"))
@@ -1133,17 +718,6 @@ def _normalize_grid(grid: np.ndarray) -> np.ndarray:
     total = float(output.sum())
     if total <= 0:
         return np.full_like(output, 1.0 / max(output.size, 1), dtype=float)
-    return output / total
-
-
-def _normalize_vector(values: np.ndarray) -> np.ndarray:
-    output = np.asarray(values, dtype=float)
-    output = np.maximum(np.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
-    total = float(output.sum())
-    if total <= 0:
-        fallback = np.zeros_like(output)
-        fallback[0] = 1.0
-        return fallback
     return output / total
 
 

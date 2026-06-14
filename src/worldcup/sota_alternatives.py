@@ -11,12 +11,6 @@ ALTERNATIVES_EVIDENCE_POLICY = "local_backtest_vs_poisson"
 ALTERNATIVE_SCORE_MODEL_KEYS = [
     "dixon_coles_mle",
     "bivariate_poisson_mle",
-    "diagonal_inflated_bivariate_poisson",
-    "zero_inflated_generalized_poisson",
-    "negative_binomial_mle",
-    "conway_maxwell_poisson",
-    "skellam_margin",
-    "copula_weibull_count",
 ]
 
 
@@ -34,48 +28,6 @@ ALTERNATIVE_SCORE_MODELS: List[Dict[str, Any]] = [
         "model_name": "Poisson bivariado MLE",
         "family": "correlated_counts",
         "description": "Agrega un componente comun para correlacion positiva entre goles locales y visitantes.",
-    },
-    {
-        "rank": 3,
-        "key": "diagonal_inflated_bivariate_poisson",
-        "model_name": "Bivariado diagonal-inflado",
-        "family": "draw_calibration",
-        "description": "Parte del Poisson bivariado e infla la diagonal para calibrar empates.",
-    },
-    {
-        "rank": 4,
-        "key": "zero_inflated_generalized_poisson",
-        "model_name": "Poisson generalizado zero-inflated",
-        "family": "overdispersion_zero_inflation",
-        "description": "Usa marginales Poisson generalizadas con inflacion de ceros para capturar sobredispersion.",
-    },
-    {
-        "rank": 5,
-        "key": "negative_binomial_mle",
-        "model_name": "Binomial negativa MLE",
-        "family": "overdispersed_counts",
-        "description": "Ajusta marginales binomial negativa para capturar varianza de goles mayor que Poisson.",
-    },
-    {
-        "rank": 6,
-        "key": "conway_maxwell_poisson",
-        "model_name": "Conway-Maxwell Poisson",
-        "family": "dispersion_adjusted_counts",
-        "description": "Usa marginales CMP para modelar subdispersion o sobredispersion frente a Poisson.",
-    },
-    {
-        "rank": 7,
-        "key": "skellam_margin",
-        "model_name": "Skellam margen",
-        "family": "goal_difference",
-        "description": "Repondera la matriz por una distribucion de diferencia de goles.",
-    },
-    {
-        "rank": 8,
-        "key": "copula_weibull_count",
-        "model_name": "Weibull discreta + copula",
-        "family": "copula_count",
-        "description": "Combina marginales discrete-Weibull mediante copula Frank experimental.",
     },
 ]
 

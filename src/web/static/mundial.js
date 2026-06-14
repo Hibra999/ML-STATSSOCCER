@@ -656,6 +656,7 @@ function benchmarkTuningHtml(tuning) {
       <span>N ${escapeHtml(item.available ? item.best_poisson_recent_matches : "-")}</span>
       <span>Trials ${escapeHtml(item.n_trials || 0)}</span>
       <span>Log-loss ${escapeHtml(item.best_value !== null && item.best_value !== undefined ? formatNumber(item.best_value) : "-")}</span>
+      <span>${escapeHtml(item.scope === "all_active_models" ? "Todos los modelos activos" : item.scope || "")}</span>
       <span>${escapeHtml(item.available ? "Aplicado" : "No disponible")}</span>
     </div>
     ${warnings.length ? `<div class="warning-list">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
