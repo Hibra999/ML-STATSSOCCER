@@ -80,12 +80,12 @@
     <section id="predicciones" class="section-block worldcup-view">
       <div class="section-heading">
         <h2>Predicciones Futuras</h2>
-        <small id="upcoming-summary">Reporte de consenso por pipeline</small>
+        <small id="upcoming-summary">Reporte por pipeline</small>
       </div>
       <div class="prediction-dock clean-dock">
         <div>
           <h3>Próximos N partidos</h3>
-          <small>Poisson/SOTA raw o benchmark de alternativas</small>
+          <small>Poisson/SOTA o modelos estadísticos alternativos</small>
         </div>
         <label>Pipeline<select id="upcoming-pipeline-mode"><option value="poisson_sota">Poisson + SOTA</option><option value="alternatives_benchmark">Benchmark alternativas</option></select></label>
         <label>N partidos<input id="upcoming-predict-limit" type="number" min="1" max="72" step="1" value="8"></label>
@@ -104,6 +104,7 @@
         <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
         <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
         <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
+        <label>Backtest N<input id="upcoming-backtest-last-n" type="number" min="5" max="100" step="1" value="20"></label>
         <label class="hidden">Modelo marcador<select id="sim-score-model"></select></label>
         <input id="sim-max-goals" type="hidden" value="10">
         <input id="sim-poisson-recent-matches" type="hidden" value="15">

@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 
-def test_sota_sequence_temporarily_excludes_bayes_models_but_catalog_keeps_them():
+def test_sota_and_alternative_sequences_are_statistical_score_models():
     from src.web import mundial_services as services
     from src.worldcup.score_models import score_model_options
 
@@ -16,9 +16,18 @@ def test_sota_sequence_temporarily_excludes_bayes_models_but_catalog_keeps_them(
     assert disabled <= catalog_keys
     assert "xg_poisson_local" not in services.SOTA_SCORE_MODEL_SEQUENCE
     assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 7
+    assert services.ALTERNATIVE_SCORE_MODEL_SEQUENCE == [
+        "dixon_coles_mle",
+        "bivariate_poisson_mle",
+        "diagonal_inflated_bivariate_poisson",
+        "zero_inflated_generalized_poisson",
+        "skellam_margin",
+        "copula_weibull_count",
+    ]
+    assert "independent_poisson" not in services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
 
 
-def test_alternatives_benchmark_aliases_and_catalog_sources():
+def test_alternatives_benchmark_aliases_and_statistical_registry():
     from src.web import mundial_services as services
     from src.worldcup.sota_alternatives import sota_alternatives_catalog
 
@@ -37,21 +46,54 @@ def test_alternatives_benchmark_aliases_and_catalog_sources():
         "copula_weibull_count",
     ]
     alternatives = sota_alternatives_catalog()
-    assert len(alternatives) >= 8
-    assert {item["model_name"] for item in alternatives} >= {
-        "CatBoost + pi-ratings",
-        "Random Forest + ranking ability parameters",
-        "Bayesian weighted dynamic goal models",
-    }
-    assert all(item["source_url"].startswith("https://arxiv.org/abs/") for item in alternatives)
-    assert all(item["metric"] and item["reported_better_than"] for item in alternatives)
+    assert [item["key"] for item in alternatives] == services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
+    forbidden = {"catboost", "xgboost", "lightgbm", "random forest", "mlp", "machine learning"}
+    registry_text = json.dumps(alternatives).lower()
+    assert not any(term in registry_text for term in forbidden)
+    assert all(item["model_name"] and item["description"] for item in alternatives)
 
 
-def test_alternatives_benchmark_report_returns_sources_without_fitting(tmp_path, monkeypatch):
+def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_consensus(tmp_path, monkeypatch):
     from src.web import mundial_services as services
 
+    tournament = {
+        "name": "World Cup 2026",
+        "matches": [
+            {"num": 1, "date": "2026-06-11", "time": "19:00", "team1": "Argentina", "team2": "France", "group": "Group A", "ground": "Test"},
+        ],
+    }
+    history = pd.DataFrame([
+        {"Date": f"20{10 + index // 6:02d}-{(index % 12) + 1:02d}-01", "Year": 2010 + index // 6, "Team 1": home, "Team 2": away, "G1": g1, "G2": g2, "Round": "Group", "Group": "Test"}
+        for index, (home, away, g1, g2) in enumerate([
+            ("Argentina", "France", 2, 1),
+            ("Brazil", "England", 1, 1),
+            ("Argentina", "Brazil", 1, 0),
+            ("France", "England", 0, 0),
+            ("Brazil", "France", 2, 2),
+            ("England", "Argentina", 0, 1),
+            ("Argentina", "England", 3, 1),
+            ("France", "Brazil", 1, 2),
+            ("Brazil", "Argentina", 0, 0),
+            ("England", "France", 2, 1),
+            ("Argentina", "France", 1, 1),
+            ("Brazil", "England", 2, 0),
+        ])
+    ])
+    upcoming = pd.DataFrame([{
+        "No.": 1,
+        "Fecha": "2026-06-11",
+        "Hora": "19:00",
+        "Grupo": "Group A",
+        "Equipo 1": "Argentina",
+        "Equipo 2": "France",
+        "Sede": "Test",
+    }])
+
     monkeypatch.setattr(services, "REPORTS_ROOT", tmp_path)
-    monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: pytest.fail("benchmark mode must not load fixtures"))
+    monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: (tournament, "test:tournament"))
+    monkeypatch.setattr(services, "load_historical_matches", lambda refresh=False: (history, "test:history"))
+    monkeypatch.setattr(services, "upcoming_fixture_rows", lambda tournament, group_filter="": upcoming)
+    monkeypatch.setattr(services, "contextual_poisson_for_match", lambda *args, **kwargs: {"available": False, "reason": "test"})
     monkeypatch.setattr(services, "detect_hardware", lambda: {
         "cpu_count": 2,
         "default_n_jobs": -1,
@@ -67,18 +109,27 @@ def test_alternatives_benchmark_report_returns_sources_without_fitting(tmp_path,
 
     progress = []
     result = services.predict_upcoming_report(
-        {"pipeline_mode": "benchmark_alternativas", "limit": 5},
+        {"pipeline_mode": "benchmark_alternativas", "limit": 1, "backtest_last_n": 5, "stat_model_cache": False},
         progress_callback=progress.append,
     )
 
     assert result["summary"]["pipeline_mode"] == "alternatives_benchmark"
     assert result["summary"]["pipeline_label"] == "Benchmark alternativas"
-    assert result["summary"]["evidence_policy"] == "papers_benchmarks"
-    assert result["summary"]["score_models"] == []
-    assert result["fixture_reports"] == []
-    assert len(result["alternatives"]) >= 8
-    assert result["table"]["total"] == len(result["alternatives"])
-    assert all(item["source_url"].startswith("https://arxiv.org/abs/") for item in result["alternatives"])
+    assert result["summary"]["evidence_policy"] == "local_backtest_vs_poisson"
+    assert result["summary"]["score_models"] == services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
+    assert result["summary"]["baseline_model"]["key"] == "independent_poisson"
+    assert result["summary"]["backtest"]["evaluated_matches"] == 5
+    assert len(result["fixture_reports"]) == 1
+    fixture_report = result["fixture_reports"][0]
+    assert [model["model_key"] for model in fixture_report["models"]] == services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
+    assert fixture_report["baseline_poisson"]["model_key"] == "independent_poisson"
+    assert "consensus" not in fixture_report
+    assert "consensus_score_distribution" not in fixture_report
+    assert "consensus_eligible" not in fixture_report["baseline_poisson"]
+    assert all("consensus_eligible" not in model and "signature" not in model for model in fixture_report["models"])
+    assert len(result["model_backtests"]) == len(services.ALTERNATIVE_SCORE_MODEL_SEQUENCE)
+    assert result["best_model"]["model_key"] in services.ALTERNATIVE_SCORE_MODEL_SEQUENCE
+    assert result["table"]["total"] == len(services.ALTERNATIVE_SCORE_MODEL_SEQUENCE)
     assert (tmp_path / "latest.json").exists()
     assert progress[-1]["stage"] == "complete"
 

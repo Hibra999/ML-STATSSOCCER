@@ -1791,6 +1791,60 @@ h3 { font-size: 16px; }
 .model-consensus-row.fallback {
   background: #fff8f0;
 }
+.alternative-model-list {
+  display: grid;
+  gap: 8px;
+}
+.alternative-model-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) 86px minmax(120px, 0.85fr) minmax(110px, 0.75fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+  color: var(--muted);
+  font-size: 12px;
+}
+.alternative-model-row strong {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.alternative-model-row b {
+  color: var(--green);
+}
+.alternative-model-row small,
+.alternative-model-row .top-scores {
+  grid-column: 1 / -1;
+}
+.alternative-model-row.fallback {
+  background: #fff8f0;
+}
+.alternatives-backtest-table {
+  overflow-x: auto;
+}
+.alternatives-backtest-table table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+}
+.alternatives-backtest-table th,
+.alternatives-backtest-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  font-size: 12px;
+}
+.alternatives-backtest-table th {
+  color: var(--muted);
+  font-weight: 800;
+}
+.best-alternative-panel .client-main-pick {
+  margin: 0;
+}
 .agreement-matrix {
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
 }
