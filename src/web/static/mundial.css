@@ -1685,6 +1685,19 @@ h3 { font-size: 16px; }
   color: var(--ink);
   font-size: 13px;
 }
+.technical-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.technical-meta-row span {
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+}
 .top-models-grid {
   display: grid;
   gap: 7px;

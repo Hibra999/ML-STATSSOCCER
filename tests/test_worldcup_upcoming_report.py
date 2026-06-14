@@ -2,6 +2,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def test_sota_sequence_temporarily_excludes_bayes_models_but_catalog_keeps_them():
@@ -15,6 +16,109 @@ def test_sota_sequence_temporarily_excludes_bayes_models_but_catalog_keeps_them(
     assert disabled <= catalog_keys
     assert "xg_poisson_local" not in services.SOTA_SCORE_MODEL_SEQUENCE
     assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 7
+
+
+def test_ml_sota_pipeline_aliases_and_sequence_are_separate():
+    from src.web import mundial_services as services
+    from src.worldcup.sota_stacking import ML_SOTA_SCORE_MODEL_SEQUENCE
+
+    assert services.normalize_report_pipeline_mode("ML+SOTAPOISSION") == "ml_sota_poisson"
+    assert services.normalize_report_pipeline_mode("ml_sota_poission") == "ml_sota_poisson"
+    assert services.normalize_report_pipeline_mode("ml+sota_poisson") == "ml_sota_poisson"
+    assert services.normalize_report_pipeline_mode("poisson_sota") == "poisson_sota"
+    assert services.SOTA_SCORE_MODEL_SEQUENCE == [
+        "independent_poisson",
+        "dixon_coles_mle",
+        "bivariate_poisson_mle",
+        "diagonal_inflated_bivariate_poisson",
+        "zero_inflated_generalized_poisson",
+        "skellam_margin",
+        "copula_weibull_count",
+    ]
+    assert ML_SOTA_SCORE_MODEL_SEQUENCE == services.ML_SOTA_SCORE_MODEL_SEQUENCE
+    assert {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson", "xg_poisson_local", "market_blended_poisson"} <= set(ML_SOTA_SCORE_MODEL_SEQUENCE)
+
+
+def test_market_blended_poisson_removes_vig_and_infers_valid_lambdas():
+    from src.worldcup.sota_stacking import infer_lambdas_from_market_odds
+
+    result = infer_lambdas_from_market_odds(
+        {
+            "market_odds_home": 2.0,
+            "market_odds_draw": 3.5,
+            "market_odds_away": 4.0,
+            "market_odds_over25": 1.9,
+            "market_odds_under25": 1.95,
+        },
+        base_lambdas=(1.4, 1.0),
+        max_goals=8,
+    )
+
+    assert result["available"] is True
+    assert 0.2 <= result["lambda_home"] <= 4.8
+    assert 0.2 <= result["lambda_away"] <= 4.8
+    assert sum(result["targets"][key] for key in ("home", "draw", "away")) == pytest.approx(1.0)
+    assert result["targets"]["over25"] + result["targets"]["under25"] == pytest.approx(1.0)
+    assert result["vig"]["1x2"] > 0
+
+
+def test_ml_sota_artifact_creates_reuses_and_excludes_worldcup_2026(tmp_path, monkeypatch):
+    from src.worldcup import sota_stacking as stacking
+
+    history = pd.DataFrame([
+        {
+            "Date": f"2020-01-{day:02d}",
+            "Year": 2020,
+            "Team 1": "Mexico" if day % 2 else "Canada",
+            "Team 2": "Canada" if day % 2 else "Mexico",
+            "G1": day % 4,
+            "G2": (day + 1) % 3,
+            "Round": "Friendly",
+            "Group": "",
+        }
+        for day in range(1, 24)
+    ] + [
+        {
+            "Date": "2026-06-12",
+            "Year": 2026,
+            "Team 1": "Mexico",
+            "Team 2": "Canada",
+            "G1": 1,
+            "G2": 0,
+            "Round": "Group",
+            "Group": "Group A",
+            "is_worldcup_match": True,
+            "tournament": "FIFA World Cup",
+        }
+    ])
+
+    monkeypatch.setattr(stacking, "historical_expert_reports", lambda **kwargs: [])
+    monkeypatch.setattr(stacking, "stack_feature_row", lambda **kwargs: {"bias": 1.0, "row_number": float(len(kwargs.get("model_reports", [])))})
+    monkeypatch.setattr(stacking, "fit_probability_model", lambda x, y, classes, seed, target: (None, "heuristic_consensus", ""))
+
+    artifact = stacking.load_or_train_ml_sota_artifact(
+        history_df=history,
+        teams=["Mexico", "Canada"],
+        config={"ml_sota_max_train_rows": 8, "ml_sota_min_prior_rows": 3, "max_goals": 6},
+        market_rows=pd.DataFrame(),
+        artifact_root=tmp_path,
+    )
+    cached = stacking.load_or_train_ml_sota_artifact(
+        history_df=history,
+        teams=["Mexico", "Canada"],
+        config={"ml_sota_max_train_rows": 8, "ml_sota_min_prior_rows": 3, "max_goals": 6},
+        market_rows=pd.DataFrame(),
+        artifact_root=tmp_path,
+    )
+
+    assert (tmp_path / "ml_sota_poisson.pkl").exists()
+    assert (tmp_path / "ml_sota_poisson.json").exists()
+    assert artifact["cache_status"] == "created"
+    assert cached["cache_status"] == "hit"
+    assert artifact["removed_worldcup_2026_labels"] == 1
+    assert artifact["row_metadata"]
+    assert all(pd.Timestamp(item["max_prior_date"]) < pd.Timestamp(item["date"]) for item in artifact["row_metadata"])
+    assert {"brier", "log_loss", "ece"} <= set(artifact["metrics"]["result"])
 
 
 def test_consensus_rounding_signature_and_strength_levels():
@@ -172,6 +276,140 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     assert latest["report_id"] == result["report_id"]
     assert not any(item.get("model_key") == "xg_poisson_local" for item in progress)
     assert {item.get("model_total") for item in progress if item.get("model_key")} == {len(services.SOTA_SCORE_MODEL_SEQUENCE)}
+
+
+def test_ml_sota_poisson_report_returns_raw_consensus_and_calibrated_ml(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+
+    prediction_order = []
+    fit_order = []
+
+    class FakeModel:
+        max_goals = 10
+
+        def __init__(self, key="independent_poisson", available=True):
+            self.key = key
+            self.available = available
+
+        def match_probabilities(self, home, away, max_goals=None):
+            prediction_order.append(self.key)
+            return {
+                "home": 0.50,
+                "draw": 0.27,
+                "away": 0.23,
+                "over05": 0.88,
+                "under05": 0.12,
+                "over15": 0.66,
+                "under15": 0.34,
+                "over25": 0.42,
+                "under25": 0.58,
+                "over35": 0.22,
+                "under35": 0.78,
+                "lambda1": 1.3,
+                "lambda2": 0.95,
+                "modal_g1": 1,
+                "modal_g2": 0,
+            }
+
+        def score_model_metadata(self):
+            return {"key": self.key, "label": self.key, "available": self.available, "params": {}, "warnings": []}
+
+    fixtures = pd.DataFrame([
+        {"No.": 1, "Fecha": "2026-06-11", "Hora": "18:00 UTC+0", "Grupo": "Group A", "Equipo 1": "Mexico", "Equipo 2": "Canada", "Sede": "A"},
+    ])
+
+    monkeypatch.setattr(services, "REPORTS_ROOT", tmp_path)
+    monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: ({}, "fixture-test"))
+    monkeypatch.setattr(services, "build_model", lambda tournament, config: (FakeModel(), "history-test"))
+    monkeypatch.setattr(services, "upcoming_fixture_rows", lambda tournament, group_filter="": fixtures)
+    monkeypatch.setattr(services, "groups_from_tournament", lambda tournament: {"Group A": ["Mexico", "Canada"]})
+    monkeypatch.setattr(services, "load_historical_matches", lambda refresh=False: (pd.DataFrame(), "history-test"))
+    monkeypatch.setattr(services, "contextual_poisson_for_match", lambda *args, **kwargs: {})
+    monkeypatch.setattr(services, "load_cached_market_rows", lambda: pd.DataFrame())
+    monkeypatch.setattr(services, "detect_hardware", lambda: {
+        "cpu_count": 2,
+        "default_n_jobs": -1,
+        "cuda_available": False,
+        "cuda_devices": [],
+        "cuda_device_names": [],
+        "cuda_detection_source": "none",
+        "cuda_detection_sources": [],
+        "cuda_error": "sin dispositivos",
+        "cuda_warning": "sin dispositivos",
+        "device_default": "cpu",
+    })
+
+    def fake_build_score_model(base_model, history_df, teams, config):
+        key = config["score_model"]
+        fit_order.append(key)
+        available = key not in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson", "xg_poisson_local"}
+        return FakeModel(key=key, available=available)
+
+    monkeypatch.setattr(services, "build_score_model", fake_build_score_model)
+    monkeypatch.setattr(services, "market_blended_poisson_probabilities", lambda **kwargs: (
+        {
+            "home": 0.52,
+            "draw": 0.25,
+            "away": 0.23,
+            "over05": 0.89,
+            "under05": 0.11,
+            "over15": 0.68,
+            "under15": 0.32,
+            "over25": 0.44,
+            "under25": 0.56,
+            "over35": 0.24,
+            "under35": 0.76,
+            "lambda1": 1.35,
+            "lambda2": 0.92,
+            "modal_g1": 1,
+            "modal_g2": 0,
+        },
+        {"key": "market_blended_poisson", "label": "Market blended Poisson", "available": True, "params": {"blend_weight": 0.5}, "warnings": []},
+    ))
+    monkeypatch.setattr(services, "load_or_train_ml_sota_artifact", lambda **kwargs: {
+        "schema_version": "ml_sota_poisson_v1",
+        "trained_at": "2026-06-14T00:00:00+00:00",
+        "cache_status": "created",
+        "model_type": "heuristic_consensus",
+        "feature_columns": ["bias"],
+        "train_rows": 12,
+        "validation_rows": 3,
+        "test_rows": 3,
+        "market_blend_weight": 0.5,
+        "metrics": {"result": {"brier": 0.2, "log_loss": 0.9, "ece": 0.1, "samples": 3}},
+        "warnings": [],
+        "label_policy_notes": ["No usa partidos del Mundial 2026 como labels."],
+        "removed_worldcup_2026_labels": 0,
+    })
+    monkeypatch.setattr(services, "predict_ml_sota_for_report", lambda **kwargs: {
+        "available": True,
+        "model_label": "ML + SOTA Poisson",
+        "cache_status": "created",
+        "artifact": {"model_type": "heuristic_consensus"},
+        "raw_probabilities": {"home": 51.0, "draw": 26.0, "away": 23.0, "over25": 43.0, "under25": 57.0},
+        "calibrated_probabilities": {"home": 54.0, "draw": 24.0, "away": 22.0, "over05": 90.0, "under05": 10.0, "over15": 70.0, "under15": 30.0, "over25": 45.0, "under25": 55.0, "over35": 25.0, "under35": 75.0},
+        "outcome": "home",
+        "outcome_label": "1",
+        "outcome_probability": 54.0,
+        "metrics": {"result": {"brier": 0.2, "log_loss": 0.9, "ece": 0.1, "samples": 3}},
+        "warnings": [],
+    })
+
+    result = services.predict_upcoming_report({"pipeline_mode": "ML+SOTAPOISSION", "limit": 1})
+    report = result["fixture_reports"][0]
+    model_keys = [model["model_key"] for model in report["models"]]
+
+    assert result["summary"]["pipeline_mode"] == "ml_sota_poisson"
+    assert result["summary"]["pipeline_label"] == "ML + SOTA Poisson"
+    assert result["summary"]["score_models"] == services.ML_SOTA_SCORE_MODEL_SEQUENCE
+    assert set(services.ML_SOTA_SCORE_MODEL_SEQUENCE) == set(model_keys)
+    assert {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson", "xg_poisson_local", "market_blended_poisson"} <= set(model_keys)
+    assert report["consensus_score_distribution"]["available"] is True
+    assert report["ml_sota_poisson"]["calibrated_probabilities"]["home"] == 54.0
+    assert {"brier", "log_loss", "ece"} <= set(report["ml_sota_poisson"]["metrics"]["result"])
+    assert "monte_carlo_consensus" not in report
+    assert "market_blended_poisson" not in fit_order
+    assert prediction_order[0] == "independent_poisson"
 
 
 def test_poisson_sota_report_monte_carlo_consensus_uses_form_iterations(tmp_path, monkeypatch):

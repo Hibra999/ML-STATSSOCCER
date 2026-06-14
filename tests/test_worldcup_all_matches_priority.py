@@ -209,12 +209,12 @@ def test_validation_last_30_split_reserves_validation_before_test():
 
     train, validation, test, warning = training.split_validation_last_30_international_test(rows)
 
-    assert train.shape[0] == 12
-    assert validation.shape[0] == 2
-    assert test.shape[0] == 30
+    assert train.shape[0] == 35
+    assert validation.shape[0] == 4
+    assert test.shape[0] == 5
     assert pd.to_datetime(train["Date"]).max() < pd.to_datetime(validation["Date"]).min()
     assert pd.to_datetime(validation["Date"]).max() < pd.to_datetime(test["Date"]).min()
-    assert "validacion=2" in warning
+    assert "validacion=4" in warning
 
 
 def test_international_training_scope_keeps_since_2014_and_drops_future_dates():
@@ -269,10 +269,10 @@ def test_prepared_dataset_metadata_uses_last_30_international_test_and_policy_no
     assert prepared["benchmark_policy"] == training.BENCHMARK_POLICY
     assert prepared["worldcup_rows"] == 2
     assert prepared["label_source"] == "all_matches.csv"
-    assert prepared["split_policy"] == training.SPLIT_POLICY_VALIDATION_LAST_30
+    assert prepared["split_policy"] == training.SPLIT_POLICY_TEMPORAL_80_10_10
     assert prepared["training_start_year"] == 2014
-    assert prepared["test"].shape[0] == 30
-    assert prepared["validation"].shape[0] == 2
+    assert prepared["test"].shape[0] == 5
+    assert prepared["validation"].shape[0] == 4
     assert pd.concat([prepared["train"], prepared["validation"], prepared["test"]])["is_worldcup_match"].map(bool).any()
     assert pd.to_datetime(prepared["train"]["Date"]).max() < pd.to_datetime(prepared["test"]["Date"]).min()
     assert any("desde 2014" in note for note in prepared["label_policy_notes"])
@@ -359,7 +359,7 @@ def test_ensure_prepared_dataset_current_regenerates_old_schema(tmp_path, monkey
         "train": train_rows,
         "validation": validation_rows,
         "test": test_rows,
-        "split_policy": training.SPLIT_POLICY_VALIDATION_LAST_30,
+        "split_policy": training.SPLIT_POLICY_TEMPORAL_80_10_10,
         "training_start_year": training.INTERNATIONAL_TRAINING_START_YEAR,
     }
     calls = {"prepare": 0}

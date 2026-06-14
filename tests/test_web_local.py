@@ -283,7 +283,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "training-tuning-flow" not in html_source
     assert "Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson" not in html_source
     assert "upcoming-predict-limit" in html_source
-    assert "upcoming-pipeline-mode" not in html_source
+    assert "upcoming-pipeline-mode" in html_source
+    assert "ML + SOTA Poisson" in html_source
     assert "upcoming-sota-calculation-mode" in html_source
     assert "Consenso exacto" in html_source
     assert "Monte Carlo mezcla" in html_source
@@ -1168,15 +1169,15 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert status["trainable"] is True
     assert prepared["etl_ready"] is True
     assert status["etl_ready"] is True
-    assert status["test_rows"] == 30
+    assert status["test_rows"] > 0
     assert status["prediction_rows"] == 0
-    assert status["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
+    assert status["eval_strategy"] == training.EVAL_STRATEGY_TEMPORAL_80_10_10
     assert status["final_test_year"] == ""
     assert result["model"]["trained"] is True
     assert result["model"]["bundle"] is True
     assert result["model"]["model_id"] == "mex-test"
     assert result["model"]["model_type"] == "xgboost"
-    assert result["model"]["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
+    assert result["model"]["eval_strategy"] == training.EVAL_STRATEGY_TEMPORAL_80_10_10
     assert result["model"]["final_test_year"] == ""
     assert result["model"]["confusion_matrix"]["matrix"]
     assert set(result["model"]["market_models"]) == expected_markets
@@ -1186,7 +1187,7 @@ def test_worldcup_training_normalizes_trains_and_predicts(tmp_path, monkeypatch)
     assert result["model"]["etl_steps"]
     assert result["model"]["tuning_trace"]["enabled"] is False
     assert result["model"]["hardware"]["actual_device"] in {"cpu", "cuda"}
-    assert result["eval_rows"] == 30
+    assert result["eval_rows"] == status["test_rows"]
     assert prediction["fixture"]["home"] == "Mexico"
     assert set(prediction["probabilities"]) >= {"home", "draw", "away", "over05", "under05", "over15", "under15", "over25", "under25", "over35", "under35"}
     assert prediction["model_probs"]["ml_weight"] == 0.5
@@ -1294,14 +1295,14 @@ def test_worldcup_training_uses_team_strength_dataset_shape(tmp_path, monkeypatc
     assert status["validation_rows"] > 0
     assert status["prediction_rows"] == 0
     assert status["eval_rows"] > 0
-    assert status["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
+    assert status["eval_strategy"] == training.EVAL_STRATEGY_TEMPORAL_80_10_10
     assert status["final_test_year"] == ""
     assert result["mode"] == "match_result"
-    assert result["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
+    assert result["eval_strategy"] == training.EVAL_STRATEGY_TEMPORAL_80_10_10
     assert result["validation_rows"] > 0
     assert result["prediction_rows"] == 0
     assert result["model"]["target_column"] == "Label + GoalsDistribution + OverUnder05/15/25/35"
-    assert result["model"]["eval_strategy"] == training.EVAL_STRATEGY_LAST_30
+    assert result["model"]["eval_strategy"] == training.EVAL_STRATEGY_TEMPORAL_80_10_10
     expected_markets = {"result", "over_under_05", "over_under_15", "over_under_25", "over_under_35", "goals_distribution"}
     assert result["model"]["markets"]["result"]["confusion_matrix"]["labels"] == ["1 Local", "X Empate", "2 Visita"]
     assert set(result["model"]["markets"]) == expected_markets

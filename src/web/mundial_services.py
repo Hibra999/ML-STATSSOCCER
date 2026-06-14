@@ -35,6 +35,16 @@ from src.worldcup.score_models import (
     sample_scores_from_grid,
     score_model_options,
 )
+from src.worldcup.sota_stacking import (
+    ML_SOTA_PIPELINE_MODE,
+    ML_SOTA_SCORE_MODEL_SEQUENCE,
+    load_cached_market_rows,
+    load_or_train_ml_sota_artifact,
+    market_blended_poisson_probabilities,
+    ml_sota_label,
+    normalize_pipeline_mode as normalize_ml_sota_pipeline_mode,
+    predict_ml_sota_for_report,
+)
 from src.worldcup.data import CACHE_ROOT, fixture_results_status, group_letter, groups_from_tournament
 from src.worldcup.international_provider import (
     INTERNATIONAL_ROOT,
@@ -800,6 +810,35 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
     group_filter = str(payload.get("group") or "").strip()
     fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter).head(limit).copy()
     fixture_records = [fixture for _, fixture in fixture_df.iterrows()]
+    model_sequence = ML_SOTA_SCORE_MODEL_SEQUENCE if pipeline_mode == ML_SOTA_PIPELINE_MODE else SOTA_SCORE_MODEL_SEQUENCE
+    history_df = pd.DataFrame()
+    market_rows = pd.DataFrame()
+    ml_sota_artifact: Dict[str, Any] | None = None
+    if pipeline_mode == ML_SOTA_PIPELINE_MODE:
+        emit_report_progress(
+            progress_callback,
+            stage="artifact",
+            start_time=start_time,
+            model_index=0,
+            model_total=max(len(model_sequence), 1),
+            model_key="ml_sota_poisson",
+            fixture_index=0,
+            fixture_total=max(len(fixture_records), 1),
+            hardware=hardware,
+            message="Preparando artefacto ML+SOTA",
+        )
+        history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
+        market_rows = load_cached_market_rows()
+        group_map = groups_from_tournament(tournament)
+        team_names = [team for group_teams in group_map.values() for team in group_teams]
+        ml_sota_artifact = load_or_train_ml_sota_artifact(
+            history_df=history_df,
+            teams=team_names,
+            config=config,
+            market_rows=market_rows,
+            force_refit=bool(config.get("ml_sota_refit", False)),
+        )
+        config["ml_sota_market_blend_weight"] = float_or_zero(ml_sota_artifact.get("market_blend_weight", 0.5))
     fixture_reports = upcoming_sota_fixture_reports(
         tournament=tournament,
         base_model=base_model,
@@ -807,6 +846,9 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         config=config,
         start_time=start_time,
         hardware=hardware,
+        model_sequence=model_sequence,
+        history_df=history_df if not history_df.empty else None,
+        market_rows=market_rows if not market_rows.empty else None,
         progress_callback=progress_callback,
     )
     monte_carlo_seed_rng = (
@@ -814,11 +856,20 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         if pipeline_mode == "poisson_sota" and config.get("sota_calculation_mode") == "monte_carlo"
         else None
     )
-    for report in fixture_reports:
+    for report_index, report in enumerate(fixture_reports):
         report["consensus"] = fixture_consensus(report.get("models", []))
         report.update(fixture_model_analysis(report.get("models", [])))
         report["sota_calculation_mode"] = config.get("sota_calculation_mode", "exact")
         report["sota_calculation_label"] = sota_calculation_summary(config)
+        if ml_sota_artifact is not None:
+            report["ml_sota_poisson"] = predict_ml_sota_for_report(
+                artifact=ml_sota_artifact,
+                model_reports=report.get("models", []),
+                base_model=base_model,
+                fixture=fixture_records[report_index] if report_index < len(fixture_records) else report.get("fixture", {}),
+                config=config,
+                market_rows=market_rows,
+            )
         if monte_carlo_seed_rng is not None:
             report["monte_carlo_consensus"] = monte_carlo_consensus_from_models(
                 model_reports=report.get("models", []),
@@ -829,6 +880,11 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
                 seed=int(monte_carlo_seed_rng.integers(1, np.iinfo(np.int32).max)),
             )
         report["warnings"] = fixture_report_warnings(report)
+        if (report.get("ml_sota_poisson") or {}).get("warnings"):
+            report["warnings"] = unique_strings([
+                *report["warnings"],
+                *[f"ML+SOTA: {item}" for item in (report.get("ml_sota_poisson") or {}).get("warnings", []) if str(item)],
+            ])
         if report.get("monte_carlo_consensus"):
             report["warnings"] = unique_strings([
                 *report["warnings"],
@@ -837,7 +893,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
     table = table_payload(pd.DataFrame(upcoming_report_table_rows(fixture_reports)), page=1, page_size=max(limit * 12, 1))
     summary = {
         "pipeline_mode": pipeline_mode,
-        "pipeline_label": "Poisson + SOTA",
+        "pipeline_label": ml_sota_label() if pipeline_mode == ML_SOTA_PIPELINE_MODE else "Poisson + SOTA",
         "requested": limit,
         "returned": len(fixture_reports),
         "group": group_filter or "Todos",
@@ -851,9 +907,13 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         "sota_calculation_mode": config.get("sota_calculation_mode", "exact"),
         "sota_calculation_label": sota_calculation_summary(config),
         "monte_carlo_iterations": config["iterations"] if config.get("sota_calculation_mode") == "monte_carlo" else 0,
-        "score_models": SOTA_SCORE_MODEL_SEQUENCE,
+        "score_models": model_sequence,
+        "ml_sota_artifact": artifact_metadata_summary(ml_sota_artifact),
         "hardware": hardware,
-        "warnings": list(hardware.get("warnings", [])),
+        "warnings": unique_strings([
+            *list(hardware.get("warnings", [])),
+            *list((ml_sota_artifact or {}).get("warnings", []) if ml_sota_artifact else []),
+        ]),
         "config": config,
     }
     report = persist_upcoming_report({
@@ -885,6 +945,9 @@ def upcoming_sota_fixture_reports(
         config: Dict[str, Any],
         start_time: float,
         hardware: Dict[str, Any],
+        model_sequence: List[str] | Tuple[str, ...] | None = None,
+        history_df: pd.DataFrame | None = None,
+        market_rows: pd.DataFrame | None = None,
         progress_callback=None,
 ) -> List[Dict[str, Any]]:
     fixture_reports = [
@@ -912,10 +975,14 @@ def upcoming_sota_fixture_reports(
     ]
     group_map = groups_from_tournament(tournament)
     team_names = [team for group_teams in group_map.values() for team in group_teams]
-    history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
-    model_total = len(SOTA_SCORE_MODEL_SEQUENCE)
+    if history_df is None or history_df.empty:
+        history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    if market_rows is None:
+        market_rows = pd.DataFrame()
+    sequence = list(model_sequence or SOTA_SCORE_MODEL_SEQUENCE)
+    model_total = len(sequence)
     fixture_total = max(len(fixtures), 1)
-    for model_index, model_key in enumerate(SOTA_SCORE_MODEL_SEQUENCE, start=1):
+    for model_index, model_key in enumerate(sequence, start=1):
         emit_report_progress(
             progress_callback,
             stage="fitting",
@@ -928,27 +995,30 @@ def upcoming_sota_fixture_reports(
             hardware=hardware,
             message=f"Ajustando {score_model_display_label(model_key)}",
         )
-        try:
-            if model_key == DEFAULT_SCORE_MODEL:
+        score_model = base_model
+        metadata = {"key": model_key, "label": score_model_display_label(model_key), "available": True, "params": {}, "warnings": []}
+        if model_key != "market_blended_poisson":
+            try:
+                if model_key == DEFAULT_SCORE_MODEL:
+                    score_model = base_model
+                    metadata = score_model_metadata(score_model)
+                else:
+                    score_model = build_score_model(
+                        base_model,
+                        history_df=history_df,
+                        teams=team_names,
+                        config={**config, "score_model": model_key},
+                    )
+                    metadata = score_model_metadata(score_model)
+            except Exception as exc:
                 score_model = base_model
-                metadata = score_model_metadata(score_model)
-            else:
-                score_model = build_score_model(
-                    base_model,
-                    history_df=history_df,
-                    teams=team_names,
-                    config={**config, "score_model": model_key},
-                )
-                metadata = score_model_metadata(score_model)
-        except Exception as exc:
-            score_model = base_model
-            metadata = {
-                "key": model_key,
-                "label": score_model_display_label(model_key),
-                "available": False,
-                "params": {},
-                "warnings": [f"{exc.__class__.__name__}: {exc}; se usa Poisson independiente."],
-            }
+                metadata = {
+                    "key": model_key,
+                    "label": score_model_display_label(model_key),
+                    "available": False,
+                    "params": {},
+                    "warnings": [f"{exc.__class__.__name__}: {exc}; se usa Poisson independiente."],
+                }
         for fixture_index, fixture in enumerate(fixtures, start=1):
             emit_report_progress(
                 progress_callback,
@@ -962,7 +1032,15 @@ def upcoming_sota_fixture_reports(
                 hardware=hardware,
                 message=f"{score_model_display_label(model_key)}: {fixture.get('Equipo 1', '')} vs {fixture.get('Equipo 2', '')}",
             )
-            probabilities = model_probabilities_for_fixture(score_model, fixture, config)
+            if model_key == "market_blended_poisson":
+                probabilities, metadata = market_blended_poisson_probabilities(
+                    base_model=base_model,
+                    fixture=fixture,
+                    config=config,
+                    market_rows=market_rows,
+                )
+            else:
+                probabilities = model_probabilities_for_fixture(score_model, fixture, config)
             model_report = score_prediction_model_report(
                 model_key=model_key,
                 metadata=metadata,
@@ -971,7 +1049,7 @@ def upcoming_sota_fixture_reports(
                 config=config,
                 already_percent=False,
             )
-            score_distribution = score_distribution_for_fixture(score_model, fixture, probabilities, config)
+            score_distribution = score_distribution_for_fixture(score_model if model_key != "market_blended_poisson" else base_model, fixture, probabilities, config)
             model_report["score_distribution"] = score_distribution
             model_report["top_scores"] = score_distribution.get("top_scores", [])
             model_report["heatmap"] = score_distribution.get("heatmap", {})
@@ -980,7 +1058,7 @@ def upcoming_sota_fixture_reports(
 
 
 def normalize_report_pipeline_mode(value: Any) -> str:
-    return "poisson_sota"
+    return normalize_ml_sota_pipeline_mode(value)
 
 
 def normalize_sota_calculation_mode(value: Any) -> str:
@@ -1000,6 +1078,8 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
     config["bayes_profile"] = str(payload.get("bayes_profile") or "deep").strip().lower()
     config["sota_device"] = str(payload.get("sota_device") or "auto").strip().lower()
     config["sota_calculation_mode"] = normalize_sota_calculation_mode(payload.get("sota_calculation_mode"))
+    config["ml_sota_refit"] = bool(payload.get("ml_sota_refit", False))
+    config["ml_sota_max_train_rows"] = int(_clamp_int(payload.get("ml_sota_max_train_rows", 180), 30, 800))
     if config["sota_device"] not in {"auto", "cpu", "cuda"}:
         config["sota_device"] = "auto"
     config["score_model"] = DEFAULT_SCORE_MODEL
@@ -1009,6 +1089,10 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
         config["bayes_chains"] = 4
         config["stat_model_cache"] = True
         config["stat_model_refit"] = False
+    if pipeline_mode == ML_SOTA_PIPELINE_MODE and config["bayes_profile"] != "deep":
+        config["bayes_draws"] = min(int(config.get("bayes_draws") or 500), 500)
+        config["bayes_tune"] = min(int(config.get("bayes_tune") or 500), 500)
+        config["bayes_chains"] = min(int(config.get("bayes_chains") or 2), 2)
     return config
 
 
@@ -1076,7 +1160,7 @@ def stat_report_hardware(requested_device: Any, pipeline_mode: str, sota_calcula
     actual_device = "cpu"
     device_error = ""
     monte_carlo_backend = "numpy"
-    if pipeline_mode == "poisson_sota":
+    if pipeline_mode in {"poisson_sota", ML_SOTA_PIPELINE_MODE}:
         cuda_reason = detected.get("cuda_error") or detected.get("cuda_warning") or "sin dispositivos"
         if calculation_mode == "monte_carlo":
             if requested == "cpu":
@@ -2369,6 +2453,38 @@ def upcoming_report_table_rows(fixture_reports: List[Dict[str, Any]]) -> List[Di
     for report in fixture_reports:
         fixture = report.get("fixture", {})
         consensus = report.get("consensus", {})
+        ml_payload = report.get("ml_sota_poisson") or {}
+        if ml_payload.get("available"):
+            probs = ml_payload.get("calibrated_probabilities") or {}
+            outcome = str(ml_payload.get("outcome") or outcome_decision(probs))
+            totals = total_decisions(probs)
+            rows.append({
+                "No.": fixture.get("id", ""),
+                "Fecha": fixture.get("date", ""),
+                "Grupo": fixture.get("group", ""),
+                "Partido": fixture.get("label", ""),
+                "Consenso": consensus.get("outcome_label", ""),
+                "Fuerza": consensus.get("strength", ""),
+                "Modelo": ml_payload.get("model_label", ml_sota_label()),
+                "Disponible": "Si",
+                "Cuenta consenso": "ML calibrado",
+                "Pick": ml_payload.get("outcome_label", outcome_label(outcome)),
+                "Top score": "",
+                "Lambda Local": "",
+                "Lambda Visita": "",
+                "1 %": probs.get("home", ""),
+                "X %": probs.get("draw", ""),
+                "2 %": probs.get("away", ""),
+                "O0.5": probs.get("over05", ""),
+                "U0.5": probs.get("under05", ""),
+                "O1.5": probs.get("over15", ""),
+                "U1.5": probs.get("under15", ""),
+                "O2.5": probs.get("over25", ""),
+                "U2.5": probs.get("under25", ""),
+                "O3.5": probs.get("over35", ""),
+                "U3.5": probs.get("under35", ""),
+                "Warnings": " | ".join(ml_payload.get("warnings", [])),
+            })
         for model in report.get("models", []):
             probs = model.get("probabilities", {})
             expected = model.get("expected_goals", {})
@@ -2421,7 +2537,30 @@ def persist_upcoming_report(report: Dict[str, Any]) -> Dict[str, Any]:
     return output
 
 
+def artifact_metadata_summary(artifact: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not artifact:
+        return {"available": False}
+    return {
+        "available": True,
+        "schema_version": artifact.get("schema_version", ""),
+        "trained_at": artifact.get("trained_at", ""),
+        "cache_status": artifact.get("cache_status", ""),
+        "model_type": artifact.get("model_type", ""),
+        "feature_count": len(artifact.get("feature_columns") or []),
+        "train_rows": int(artifact.get("train_rows", 0) or 0),
+        "validation_rows": int(artifact.get("validation_rows", 0) or 0),
+        "test_rows": int(artifact.get("test_rows", 0) or 0),
+        "market_blend_weight": float_or_zero(artifact.get("market_blend_weight", 0.5)),
+        "metrics": artifact.get("metrics", {}),
+        "warnings": artifact.get("warnings", []),
+        "label_policy_notes": artifact.get("label_policy_notes", []),
+        "removed_worldcup_2026_labels": int(artifact.get("removed_worldcup_2026_labels", 0) or 0),
+    }
+
+
 def score_model_display_label(key: Any) -> str:
+    if str(key or "").strip().lower().replace("-", "_") == "market_blended_poisson":
+        return "Market blended Poisson"
     normalized = normalize_score_model_key(key)
     for option in score_model_options():
         if option.get("key") == normalized:
