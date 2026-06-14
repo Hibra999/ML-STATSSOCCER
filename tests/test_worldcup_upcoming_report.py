@@ -1177,12 +1177,11 @@ def test_poisson_sota_report_monte_carlo_consensus_uses_form_iterations(tmp_path
     ])
     captured = {}
 
-    def fake_count_matrix(grids, weights, iterations, seed, backend="numpy"):
+    def fake_count_matrix(grid, iterations, seed, backend="numpy"):
         captured["iterations"] = iterations
         captured["backend"] = backend
-        captured["grid_count"] = len(grids)
-        captured["weights"] = list(weights)
-        return np.array([[35000, 15000], [40000, 10000]]), "numpy", [iterations]
+        captured["grid_shape"] = tuple(np.asarray(grid).shape)
+        return np.array([[35000, 15000], [40000, 10000]]), "numpy"
 
     monkeypatch.setattr(services, "REPORTS_ROOT", tmp_path)
     monkeypatch.setattr(services, "SOTA_SCORE_MODEL_SEQUENCE", ["independent_poisson"])
@@ -1192,7 +1191,7 @@ def test_poisson_sota_report_monte_carlo_consensus_uses_form_iterations(tmp_path
     monkeypatch.setattr(services, "groups_from_tournament", lambda tournament: {"Group A": ["Mexico", "Canada"]})
     monkeypatch.setattr(services, "load_historical_matches", lambda refresh=False: (pd.DataFrame(), "history-test"))
     monkeypatch.setattr(services, "contextual_poisson_for_match", lambda *args, **kwargs: {})
-    monkeypatch.setattr(services, "monte_carlo_count_matrix_from_model_grids", fake_count_matrix)
+    monkeypatch.setattr(services, "monte_carlo_count_matrix_from_grid", fake_count_matrix)
     monkeypatch.setattr(services, "detect_hardware", lambda: {
         "cpu_count": 8,
         "default_n_jobs": -1,
@@ -1217,49 +1216,22 @@ def test_poisson_sota_report_monte_carlo_consensus_uses_form_iterations(tmp_path
     assert result["summary"]["sota_calculation_mode"] == "monte_carlo"
     assert result["summary"]["monte_carlo_iterations"] == 100000
     assert captured["iterations"] == 100000
-    assert captured["grid_count"] == 1
+    assert captured["grid_shape"] == (11, 11)
     assert monte_carlo["available"] is True
     assert monte_carlo["iterations"] == 100000
-    assert monte_carlo["source"] == "SOTA Monte Carlo por mezcla de modelos"
-    assert monte_carlo["exact_consensus"]["available"] is True
-    assert monte_carlo["model_count"] == 1
-    assert monte_carlo["model_sample_counts"][0]["sample_count"] == 100000
-    assert set(monte_carlo["probability_deltas"]) >= {"home", "draw", "away", "over25", "under25"}
+    assert monte_carlo["source"] == "SOTA Monte Carlo sobre matriz consenso"
+    assert "model_weights" not in monte_carlo
+    assert "model_sample_counts" not in monte_carlo
     assert set(monte_carlo["probabilities"]) >= {"home", "draw", "away", "over05", "under05", "over25", "under25"}
     assert monte_carlo["top_scores"]
 
 
-def test_monte_carlo_model_entries_exclude_unavailable_and_fallback_models():
-    from src.web import mundial_services as services
-
-    def report(key, eligible=True, fallback=False):
-        return {
-            "model_key": key,
-            "model_label": key,
-            "consensus_eligible": eligible,
-            "fallback": fallback,
-            "score_distribution": {
-                "score_matrix": [[25.0, 25.0], [25.0, 25.0]],
-                "lambdas": {"home": 1.0, "away": 1.0},
-            },
-        }
-
-    entries = services.monte_carlo_model_grid_entries([
-        report("independent_poisson"),
-        report("xg_poisson_local", eligible=False),
-        report("dixon_coles_mle", fallback=True),
-    ])
-
-    assert [entry["model_key"] for entry in entries] == ["independent_poisson"]
-
-
-def test_monte_carlo_single_model_matches_that_model_distribution():
+def test_monte_carlo_single_grid_matches_distribution():
     from src.web import mundial_services as services
 
     grid = np.array([[0.20, 0.30], [0.10, 0.40]])
-    counts, backend, sample_counts = services.monte_carlo_count_matrix_from_model_grids(
-        grids=[grid],
-        weights=[1.0],
+    counts, backend = services.monte_carlo_count_matrix_from_grid(
+        grid=grid,
         iterations=50000,
         seed=17,
         backend="numpy",
@@ -1269,69 +1241,8 @@ def test_monte_carlo_single_model_matches_that_model_distribution():
     simulated = services.score_grid_probabilities(counts)
 
     assert backend == "numpy"
-    assert sample_counts == [50000]
     for key in ("home", "draw", "away", "over05", "under05"):
         assert abs(simulated[key] - exact[key]) < 1.5
-
-
-def test_monte_carlo_two_distinct_models_approximates_uniform_mixture():
-    from src.web import mundial_services as services
-
-    home_win_grid = np.array([[0.0, 0.0], [1.0, 0.0]])
-    away_win_grid = np.array([[0.0, 1.0], [0.0, 0.0]])
-
-    counts, backend, sample_counts = services.monte_carlo_count_matrix_from_model_grids(
-        grids=[home_win_grid, away_win_grid],
-        weights=[0.5, 0.5],
-        iterations=40000,
-        seed=2026,
-        backend="numpy",
-    )
-    simulated = services.score_grid_probabilities(counts)
-
-    assert backend == "numpy"
-    assert abs(sample_counts[0] - sample_counts[1]) < 900
-    assert 48.0 <= simulated["home"] <= 52.0
-    assert 48.0 <= simulated["away"] <= 52.0
-    assert simulated["draw"] == 0.0
-
-
-def test_sota_model_weights_use_walk_forward_metrics_and_uniform_fallback(monkeypatch):
-    from src.web import mundial_services as services
-
-    def entry(key):
-        return {
-            "model_key": key,
-            "model_label": key,
-            "grid": np.ones((2, 2), dtype=float) / 4.0,
-            "model_report": {},
-        }
-
-    monkeypatch.setattr(services, "load_sota_performance_metrics", lambda: ({
-        "independent_poisson": {"sample_size": 120, "brier": 0.40},
-        "dixon_coles_mle": {"sample_size": 120, "brier": 0.80},
-    }, "storage/worldcup/walk_forward/sota_model_metrics.json"))
-
-    payload = services.sota_model_weighting_payload([
-        entry("independent_poisson"),
-        entry("dixon_coles_mle"),
-    ])
-    weights = {item["model_key"]: item["weight"] for item in payload["items"]}
-
-    assert payload["source"] == "walk_forward_metrics"
-    assert weights["independent_poisson"] > weights["dixon_coles_mle"]
-    assert payload["metrics_path"].endswith("sota_model_metrics.json")
-
-    monkeypatch.setattr(services, "load_sota_performance_metrics", lambda: ({}, ""))
-    payload = services.sota_model_weighting_payload([
-        entry("independent_poisson"),
-        entry("dixon_coles_mle"),
-    ])
-    weights = {item["model_key"]: item["weight"] for item in payload["items"]}
-
-    assert payload["source"] == "uniform"
-    assert weights["dixon_coles_mle"] == weights["independent_poisson"]
-    assert payload["experimental_penalties"] == {}
 
 
 def test_consensus_agreement_and_model_statistics_include_ranges():

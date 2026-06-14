@@ -453,7 +453,7 @@ async function runUpcomingPredictions() {
   const calculationLabel = pipelineMode === "alternatives_benchmark"
     ? `Benchmark alternativas${benchmarkTuningEnabled ? " + Optuna" : ""}`
     : sotaCalculationMode === "monte_carlo"
-    ? `SOTA Monte Carlo mezcla N=${formatInteger(currentMonteCarloSimulations())}`
+    ? `SOTA Monte Carlo consenso N=${formatInteger(currentMonteCarloSimulations())}`
     : "Consenso exacto";
   document.getElementById("upcoming-summary").textContent = `Generando ${calculationLabel} con Poisson ultimos ${currentPoissonRecentMatches()}...`;
   try {
@@ -969,7 +969,7 @@ function clientPrimaryReportPayload(report) {
     const outcomeProbability = Number(mc.outcome_probability ?? probabilities[outcome] ?? 0);
     return {
       mode: "monte_carlo",
-      label: `SOTA Monte Carlo por mezcla: N=${formatInteger(mc.iterations || 0)}`,
+      label: `SOTA Monte Carlo consenso: N=${formatInteger(mc.iterations || 0)}`,
       probabilities,
       distribution: mc,
       stats: report.model_statistics || {},
@@ -1152,7 +1152,7 @@ function clientScorePanelHtml(distribution, primary) {
   if (!payload.available) return "";
   const topScores = payload.top_scores || [];
   const sourceLabel = primary && primary.mode === "monte_carlo"
-    ? `Monte Carlo mezcla · N=${formatInteger(payload.iterations || 0)}`
+    ? `Monte Carlo consenso · N=${formatInteger(payload.iterations || 0)}`
     : "Consenso exacto";
   return `<section class="client-score-panel">
     <header><strong>Marcadores probables</strong><small>${escapeHtml(sourceLabel)}</small></header>
@@ -1177,7 +1177,7 @@ function reportFixtureCardHtml(report) {
   const topModels = report.top_models_1x2 || [];
   const stats = report.model_statistics || {};
   const scoreDistribution = (monteCarlo.available ? monteCarlo : report.consensus_score_distribution) || {};
-  const calculationLabel = report.sota_calculation_label || (monteCarlo.available ? `SOTA Monte Carlo por mezcla: N=${formatInteger(monteCarlo.iterations || 0)}` : "Consenso exacto: matriz promedio, sin simulacion");
+  const calculationLabel = report.sota_calculation_label || (monteCarlo.available ? `SOTA Monte Carlo consenso: N=${formatInteger(monteCarlo.iterations || 0)}` : "Consenso exacto: matriz promedio, sin simulacion");
   const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
   const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
   const consensusClass = ["Baja", ""].includes(consensus.strength || "") ? "low" : "";
@@ -1257,11 +1257,9 @@ function reportConsensusScoreHtml(distribution) {
   const lambdas = payload.lambdas || {};
   const topScores = payload.top_scores || [];
   const isMonteCarlo = payload.calculation_mode === "monte_carlo";
-  const title = isMonteCarlo ? "Monte Carlo por mezcla de modelos" : "Consenso exacto de marcador";
-  const delta = (payload.probability_deltas || {})[payload.outcome || ""];
-  const deltaText = Number.isFinite(Number(delta)) ? ` · Δ exacto ${formatSignedNumber(delta)}pp` : "";
+  const title = isMonteCarlo ? "Monte Carlo sobre matriz consenso" : "Consenso exacto de marcador";
   const subtitle = isMonteCarlo
-    ? `${payload.model_count || 0} modelos · N=${formatInteger(payload.iterations || 0)} · ${payload.backend || "numpy"}${deltaText} · λ ${formatNumber(lambdas.home ?? "-")}/${formatNumber(lambdas.away ?? "-")}`
+    ? `N=${formatInteger(payload.iterations || 0)} · ${payload.backend || "numpy"} · λ ${formatNumber(lambdas.home ?? "-")}/${formatNumber(lambdas.away ?? "-")}`
     : `${payload.model_count || 0} modelos · λ ${formatNumber(lambdas.home ?? "-")}/${formatNumber(lambdas.away ?? "-")}`;
   return `<section class="report-panel consensus-score-panel">
     <header>

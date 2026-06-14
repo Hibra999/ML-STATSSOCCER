@@ -287,7 +287,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Benchmark alternativas" in html_source
     assert "upcoming-sota-calculation-mode" in html_source
     assert "Consenso exacto" in html_source
-    assert "Monte Carlo mezcla" in html_source
+    assert "Monte Carlo consenso" in html_source
     assert "upcoming-report" in html_source
     assert "worldcup-upcoming-progress" in html_source
     assert "upcoming-predictions" in html_source
@@ -346,8 +346,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "reportConsensusScoreHtml" in app_source
     assert "sota_calculation_mode" in app_source
     assert "monte_carlo_consensus" in app_source
-    assert "SOTA Monte Carlo por mezcla: N=" in app_source
-    assert "probability_deltas" in app_source
+    assert "SOTA Monte Carlo consenso: N=" in app_source
     assert "Todos los modelos" in app_source
     assert "clientReportHtml" in app_source
     assert "Reporte cliente" in app_source

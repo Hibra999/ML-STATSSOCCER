@@ -83,8 +83,6 @@ SOTA_SCORE_MODEL_SEQUENCE = [
 ]
 ALTERNATIVE_SCORE_MODEL_SEQUENCE = list(ALTERNATIVE_SCORE_MODEL_KEYS)
 BENCHMARK_SCORE_MODEL_SEQUENCE = list(dict.fromkeys([*SOTA_SCORE_MODEL_SEQUENCE, *ALTERNATIVE_SCORE_MODEL_KEYS]))
-SOTA_EXPERIMENTAL_MODEL_PENALTIES: Dict[str, float] = {}
-SOTA_MIN_PERFORMANCE_SAMPLES = 30
 REPORT_TOTAL_GOAL_LINES = (0.5, 1.5, 2.5, 3.5)
 REPORT_SCORE_MATRIX_GOALS = 6
 REPORT_MAX_ITERATIONS = 100_000
@@ -851,9 +849,8 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         report["sota_calculation_mode"] = config.get("sota_calculation_mode", "exact")
         report["sota_calculation_label"] = sota_calculation_summary(config)
         if monte_carlo_seed_rng is not None:
-            report["monte_carlo_consensus"] = monte_carlo_consensus_from_models(
-                model_reports=report.get("models", []),
-                exact_distribution=report.get("consensus_score_distribution", {}),
+            report["monte_carlo_consensus"] = monte_carlo_consensus_from_distribution(
+                distribution=report.get("consensus_score_distribution", {}),
                 fixture=report.get("fixture", {}),
                 config=config,
                 hardware=hardware,
@@ -2381,7 +2378,7 @@ def normalize_sota_calculation_mode(value: Any) -> str:
 
 def sota_calculation_summary(config: Dict[str, Any]) -> str:
     if config.get("sota_calculation_mode") == "monte_carlo":
-        return f"SOTA Monte Carlo por mezcla de modelos: N={int(config.get('iterations') or DEFAULT_CONFIG['iterations']):,}"
+        return f"SOTA Monte Carlo sobre matriz consenso: N={int(config.get('iterations') or DEFAULT_CONFIG['iterations']):,}"
     return "Consenso exacto: matriz promedio, sin simulacion"
 
 
@@ -2865,336 +2862,6 @@ def consensus_score_distribution(model_reports: List[Dict[str, Any]]) -> Dict[st
     }
 
 
-def monte_carlo_consensus_from_models(
-        model_reports: List[Dict[str, Any]],
-        exact_distribution: Dict[str, Any],
-        fixture: Dict[str, Any],
-        config: Dict[str, Any],
-        hardware: Dict[str, Any],
-        seed: int,
-) -> Dict[str, Any]:
-    iterations = monte_carlo_match_iterations(config.get("iterations", DEFAULT_CONFIG["iterations"]))
-    entries = monte_carlo_model_grid_entries(model_reports)
-    if not entries:
-        return {
-            "available": False,
-            "calculation_mode": "monte_carlo",
-            "iterations": iterations,
-            "seed": int(seed),
-            "model_count": 0,
-            "reason": "Sin matrices individuales elegibles para simular.",
-            "warnings": ["Monte Carlo SOTA no se ejecuto porque no hay modelos disponibles sin fallback."],
-        }
-
-    weights_payload = sota_model_weighting_payload(entries)
-    weights = [float_or_zero(item.get("weight")) for item in weights_payload.get("items", [])]
-    grids = [entry["grid"] for entry in entries]
-    requested_backend = str((hardware or {}).get("monte_carlo_backend") or "numpy").strip().lower()
-    warnings: List[str] = []
-    try:
-        count_matrix, backend, model_sample_counts = monte_carlo_count_matrix_from_model_grids(
-            grids=grids,
-            weights=weights,
-            iterations=iterations,
-            seed=seed,
-            backend=requested_backend,
-        )
-    except Exception as exc:
-        if requested_backend != "numpy":
-            warnings.append(f"Monte Carlo CUDA fallo ({exc.__class__.__name__}); se recalculo en CPU/NumPy.")
-            count_matrix, backend, model_sample_counts = monte_carlo_count_matrix_from_model_grids(
-                grids=grids,
-                weights=weights,
-                iterations=iterations,
-                seed=seed,
-                backend="numpy",
-            )
-        else:
-            return {
-                "available": False,
-                "calculation_mode": "monte_carlo",
-                "iterations": iterations,
-                "seed": int(seed),
-                "model_count": len(entries),
-                "reason": f"Monte Carlo no disponible: {exc.__class__.__name__}",
-                "warnings": [f"Monte Carlo SOTA fallo: {exc}"],
-            }
-
-    source_distribution = exact_distribution if (exact_distribution or {}).get("available") else consensus_score_distribution(
-        [entry["model_report"] for entry in entries]
-    )
-    payload = monte_carlo_consensus_payload_from_counts(
-        count_matrix=count_matrix,
-        iterations=iterations,
-        source_distribution=source_distribution,
-        fixture=fixture,
-    )
-    exact_probabilities = (source_distribution or {}).get("probabilities", {})
-    simulated_probabilities = payload.get("probabilities", {})
-    payload.update({
-        "available": True,
-        "calculation_mode": "monte_carlo",
-        "source": "SOTA Monte Carlo por mezcla de modelos",
-        "matrix_source": "monte_carlo_model_mixture",
-        "iterations": iterations,
-        "seed": int(seed),
-        "backend": backend,
-        "requested_backend": requested_backend,
-        "requested_device": (hardware or {}).get("requested_device", "auto"),
-        "actual_device": "cuda" if backend in {"cupy", "torch"} else "cpu",
-        "cuda": backend in {"cupy", "torch"},
-        "model_count": len(entries),
-        "model_keys": [entry["model_key"] for entry in entries],
-        "model_weights": weights_payload,
-        "model_sample_counts": monte_carlo_model_sample_payload(
-            entries=entries,
-            weights_payload=weights_payload,
-            sample_counts=model_sample_counts,
-            iterations=iterations,
-        ),
-        "exact_consensus": {
-            "available": bool((source_distribution or {}).get("available")),
-            "source": (source_distribution or {}).get("source", "Consenso exacto"),
-            "matrix_source": (source_distribution or {}).get("matrix_source", "consensus_exact_average"),
-            "model_count": int((source_distribution or {}).get("model_count") or len(entries)),
-            "probabilities": exact_probabilities,
-            "top_scores": (source_distribution or {}).get("top_scores", []),
-        },
-        "exact_probabilities": exact_probabilities,
-        "probability_deltas": probability_delta_payload(simulated_probabilities, exact_probabilities),
-        "warnings": warnings,
-    })
-    if weights_payload.get("warnings"):
-        payload["warnings"] = unique_strings([*payload["warnings"], *weights_payload["warnings"]])
-    return payload
-
-
-def monte_carlo_model_grid_entries(model_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    for model in model_reports:
-        if not model.get("consensus_eligible") or model.get("fallback"):
-            continue
-        distribution = model.get("score_distribution") or {}
-        matrix = distribution.get("score_matrix")
-        if not matrix:
-            continue
-        grid = normalize_score_grid_array(np.asarray(matrix, dtype=float) / 100.0)
-        entries.append({
-            "model_key": str(model.get("model_key") or ""),
-            "model_label": str(model.get("model_label") or model.get("model_key") or "Modelo"),
-            "grid": grid,
-            "model_report": model,
-        })
-    return entries
-
-
-def sota_model_weighting_payload(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
-    metrics_by_key, metrics_path = load_sota_performance_metrics()
-    weighted_items: List[Dict[str, Any]] = []
-    raw_weights: List[float] = []
-    has_usable_metrics = False
-    used_experimental_penalty = False
-    warnings: List[str] = []
-    for entry in entries:
-        key = str(entry.get("model_key") or "")
-        metrics = metrics_by_key.get(key, {})
-        sample_size = sota_metric_sample_size(metrics)
-        raw_weight = 1.0
-        reasons: List[str] = []
-        metric_score = 1.0
-        metric_fields: List[str] = []
-        if metrics and sample_size >= SOTA_MIN_PERFORMANCE_SAMPLES:
-            metric_score, metric_fields = sota_performance_score(metrics)
-            raw_weight *= metric_score
-            has_usable_metrics = bool(metric_fields) or has_usable_metrics
-            reasons.append("metricas walk-forward")
-        elif metrics:
-            reasons.append(f"historico insuficiente ({sample_size}/{SOTA_MIN_PERFORMANCE_SAMPLES})")
-        else:
-            reasons.append("sin metricas walk-forward")
-        penalty = float(SOTA_EXPERIMENTAL_MODEL_PENALTIES.get(key, 1.0))
-        if penalty < 1.0 and sample_size < SOTA_MIN_PERFORMANCE_SAMPLES:
-            raw_weight *= penalty
-            used_experimental_penalty = True
-            reasons.append(f"penalizacion experimental x{penalty:.2f}")
-        raw_weight = max(float(raw_weight), 1e-9)
-        raw_weights.append(raw_weight)
-        weighted_items.append({
-            "model_key": key,
-            "model_label": str(entry.get("model_label") or key),
-            "raw_weight": round(raw_weight, 6),
-            "sample_size": sample_size,
-            "metric_score": round(metric_score, 6),
-            "metric_fields": metric_fields,
-            "reasons": reasons,
-        })
-
-    total_weight = float(sum(raw_weights))
-    if total_weight <= 0.0:
-        raw_weights = [1.0 for _ in weighted_items]
-        total_weight = float(sum(raw_weights))
-        warnings.append("Pesos SOTA invalidos; se uso ponderacion uniforme.")
-    for item, raw_weight in zip(weighted_items, raw_weights):
-        item["weight"] = round(float(raw_weight) / total_weight, 6)
-
-    if has_usable_metrics:
-        source = "walk_forward_metrics"
-    elif used_experimental_penalty:
-        source = "uniform_with_experimental_penalty"
-    else:
-        source = "uniform"
-    return {
-        "source": source,
-        "metrics_path": str(metrics_path) if metrics_path else "",
-        "min_samples": SOTA_MIN_PERFORMANCE_SAMPLES,
-        "experimental_penalties": dict(SOTA_EXPERIMENTAL_MODEL_PENALTIES),
-        "items": weighted_items,
-        "warnings": warnings,
-    }
-
-
-def load_sota_performance_metrics() -> Tuple[Dict[str, Dict[str, Any]], str]:
-    for path in sota_performance_metric_paths():
-        if not path.exists() or not path.is_file():
-            continue
-        try:
-            records = read_sota_metric_records(path)
-        except Exception:
-            continue
-        metrics = normalize_sota_metric_records(records)
-        if metrics:
-            return metrics, str(path)
-    return {}, ""
-
-
-def sota_performance_metric_paths() -> List[Path]:
-    return [
-        WALK_FORWARD_ROOT / "sota_model_metrics.json",
-        WALK_FORWARD_ROOT / "score_model_metrics.json",
-        WALK_FORWARD_ROOT / "sota_model_metrics.csv",
-        WALK_FORWARD_ROOT / "score_model_metrics.csv",
-        FEATURE_STORE_ROOT / "sota_model_metrics.json",
-        FEATURE_STORE_ROOT / "score_model_metrics.json",
-        FEATURE_STORE_ROOT / "sota_model_metrics.csv",
-        FEATURE_STORE_ROOT / "score_model_metrics.csv",
-    ]
-
-
-def read_sota_metric_records(path: Path) -> List[Dict[str, Any]]:
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        return pd.read_csv(path).to_dict(orient="records")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(payload, list):
-        return [dict(item) for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
-        for key in ("models", "metrics", "score_models"):
-            items = payload.get(key)
-            if isinstance(items, list):
-                return [dict(item) for item in items if isinstance(item, dict)]
-        records: List[Dict[str, Any]] = []
-        for key, value in payload.items():
-            if isinstance(value, dict):
-                records.append({"model_key": key, **value})
-        return records
-    return []
-
-
-def normalize_sota_metric_records(records: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    output: Dict[str, Dict[str, Any]] = {}
-    valid_keys = set(SOTA_SCORE_MODEL_SEQUENCE)
-    for record in records:
-        key = sota_metric_model_key(record)
-        if key not in valid_keys:
-            continue
-        output[key] = {str(item_key): item_value for item_key, item_value in record.items()}
-    return output
-
-
-def sota_metric_model_key(record: Dict[str, Any]) -> str:
-    for field in ("model_key", "score_model", "model", "key", "name"):
-        value = record.get(field)
-        if value is None:
-            continue
-        return str(value).strip().lower().replace("-", "_")
-    return ""
-
-
-def sota_metric_sample_size(metrics: Dict[str, Any]) -> int:
-    for field in ("sample_size", "samples", "matches", "rows", "count", "n", "fixture_count"):
-        value = float_or_zero(metrics.get(field))
-        if value > 0:
-            return int(round(value))
-    return 0
-
-
-def sota_performance_score(metrics: Dict[str, Any]) -> Tuple[float, List[str]]:
-    score = 1.0
-    fields: List[str] = []
-    brier = first_metric_value(metrics, ("brier", "brier_score", "market_brier"))
-    if brier > 0.0:
-        score *= float(np.clip((2.0 / 3.0) / brier, 0.35, 2.5))
-        fields.append("brier")
-    log_loss_value = first_metric_value(metrics, ("log_loss", "logloss", "cross_entropy"))
-    if log_loss_value > 0.0:
-        score *= float(np.clip(math.log(3.0) / log_loss_value, 0.35, 2.5))
-        fields.append("log_loss")
-    accuracy = first_metric_value(metrics, ("accuracy", "hit_rate", "win_rate"))
-    if accuracy > 0.0:
-        if accuracy > 1.0:
-            accuracy /= 100.0
-        score *= float(np.clip(accuracy / (1.0 / 3.0), 0.35, 2.5))
-        fields.append("accuracy")
-    if not fields:
-        return 1.0, []
-    return round(float(np.clip(score, 0.25, 4.0)), 6), fields
-
-
-def first_metric_value(metrics: Dict[str, Any], fields: Tuple[str, ...]) -> float:
-    normalized = {str(key).strip().lower(): value for key, value in metrics.items()}
-    for field in fields:
-        value = float_or_zero(normalized.get(field))
-        if value > 0.0:
-            return value
-    return 0.0
-
-
-def probability_delta_payload(simulated: Dict[str, Any], exact: Dict[str, Any]) -> Dict[str, float]:
-    keys = [
-        "home", "draw", "away",
-        *[f"over{total_line_suffix(line)}" for line in REPORT_TOTAL_GOAL_LINES],
-        *[f"under{total_line_suffix(line)}" for line in REPORT_TOTAL_GOAL_LINES],
-    ]
-    return {
-        key: round(float_or_zero((simulated or {}).get(key)) - float_or_zero((exact or {}).get(key)), 2)
-        for key in keys
-    }
-
-
-def monte_carlo_model_sample_payload(
-        entries: List[Dict[str, Any]],
-        weights_payload: Dict[str, Any],
-        sample_counts: List[int],
-        iterations: int,
-) -> List[Dict[str, Any]]:
-    weight_items = list((weights_payload or {}).get("items", []))
-    output: List[Dict[str, Any]] = []
-    for index, entry in enumerate(entries):
-        weight_item = weight_items[index] if index < len(weight_items) else {}
-        count = int(sample_counts[index]) if index < len(sample_counts) else 0
-        output.append({
-            "model_key": entry.get("model_key", ""),
-            "model_label": entry.get("model_label", ""),
-            "weight": float_or_zero(weight_item.get("weight")),
-            "raw_weight": float_or_zero(weight_item.get("raw_weight")),
-            "sample_count": count,
-            "sample_share": round(count / max(int(iterations), 1), 6),
-            "sample_size": int(weight_item.get("sample_size") or 0),
-            "reasons": list(weight_item.get("reasons") or []),
-        })
-    return output
-
-
 def monte_carlo_consensus_from_distribution(
         distribution: Dict[str, Any],
         fixture: Dict[str, Any],
@@ -3278,56 +2945,6 @@ def monte_carlo_count_matrix_from_grid(
     return monte_carlo_count_matrix_numpy(grid, iterations, seed), "numpy"
 
 
-def monte_carlo_count_matrix_from_model_grids(
-        grids: List[np.ndarray],
-        weights: List[float],
-        iterations: int,
-        seed: int,
-        backend: str = "numpy",
-) -> Tuple[np.ndarray, str, List[int]]:
-    normalized_grids, normalized_weights = normalize_monte_carlo_model_grids(grids, weights)
-    backend = str(backend or "numpy").strip().lower()
-    if backend == "cupy":
-        counts, sample_counts = monte_carlo_count_matrix_model_mixture_cupy(
-            normalized_grids,
-            normalized_weights,
-            iterations,
-            seed,
-        )
-        return counts, "cupy", sample_counts
-    if backend == "torch":
-        counts, sample_counts = monte_carlo_count_matrix_model_mixture_torch(
-            normalized_grids,
-            normalized_weights,
-            iterations,
-            seed,
-        )
-        return counts, "torch", sample_counts
-    counts, sample_counts = monte_carlo_count_matrix_model_mixture_numpy(
-        normalized_grids,
-        normalized_weights,
-        iterations,
-        seed,
-    )
-    return counts, "numpy", sample_counts
-
-
-def normalize_monte_carlo_model_grids(grids: List[np.ndarray], weights: List[float]) -> Tuple[List[np.ndarray], np.ndarray]:
-    arrays = [normalize_score_grid_array(grid) for grid in grids if np.asarray(grid).size]
-    if not arrays:
-        raise ValueError("No hay matrices de marcador para Monte Carlo.")
-    rows = min(array.shape[0] for array in arrays)
-    cols = min(array.shape[1] for array in arrays)
-    normalized_grids = [normalize_score_grid_array(array[:rows, :cols]) for array in arrays]
-    weight_array = np.asarray(weights[:len(normalized_grids)], dtype=float)
-    weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
-    weight_array = np.maximum(weight_array, 0.0)
-    if weight_array.size != len(normalized_grids) or float(weight_array.sum()) <= 0.0:
-        weight_array = np.ones(len(normalized_grids), dtype=float)
-    weight_array = weight_array / float(weight_array.sum())
-    return normalized_grids, weight_array
-
-
 def monte_carlo_count_matrix_numpy(grid: np.ndarray, iterations: int, seed: int) -> np.ndarray:
     normalized = normalize_score_grid_array(grid)
     rng = np.random.default_rng(int(seed))
@@ -3336,30 +2953,6 @@ def monte_carlo_count_matrix_numpy(grid: np.ndarray, iterations: int, seed: int)
     indices = sampled_home.astype(int) * cols + sampled_away.astype(int)
     counts = np.bincount(indices, minlength=int(normalized.size))
     return counts.reshape(normalized.shape).astype(int)
-
-
-def monte_carlo_count_matrix_model_mixture_numpy(
-        grids: List[np.ndarray],
-        weights: np.ndarray,
-        iterations: int,
-        seed: int,
-) -> Tuple[np.ndarray, List[int]]:
-    rng = np.random.default_rng(int(seed))
-    iterations = int(iterations)
-    rows, cols = grids[0].shape
-    counts = np.zeros((rows, cols), dtype=int)
-    model_indices = rng.choice(len(grids), size=iterations, p=weights)
-    sample_counts: List[int] = []
-    for model_index, grid in enumerate(grids):
-        model_iterations = int(np.count_nonzero(model_indices == model_index))
-        sample_counts.append(model_iterations)
-        if model_iterations <= 0:
-            continue
-        sampled_home, sampled_away = sample_scores_from_grid(grid, rng, size=model_iterations)
-        flat_indices = sampled_home.astype(int) * cols + sampled_away.astype(int)
-        model_counts = np.bincount(flat_indices, minlength=int(rows * cols)).reshape((rows, cols))
-        counts += model_counts.astype(int)
-    return counts, sample_counts
 
 
 def monte_carlo_count_matrix_cupy(grid: np.ndarray, iterations: int, seed: int) -> np.ndarray:
@@ -3377,38 +2970,6 @@ def monte_carlo_count_matrix_cupy(grid: np.ndarray, iterations: int, seed: int) 
     return cp.asnumpy(counts.reshape(normalized.shape)).astype(int)
 
 
-def monte_carlo_count_matrix_model_mixture_cupy(
-        grids: List[np.ndarray],
-        weights: np.ndarray,
-        iterations: int,
-        seed: int,
-) -> Tuple[np.ndarray, List[int]]:
-    import cupy as cp  # type: ignore
-
-    iterations = int(iterations)
-    stacked = cp.asarray(np.stack(grids, axis=0), dtype=cp.float64)
-    model_count, rows, cols = stacked.shape
-    flat = stacked.reshape(model_count, rows * cols)
-    flat = flat / cp.maximum(cp.sum(flat, axis=1, keepdims=True), cp.float64(1e-12))
-    model_cdf = cp.cumsum(cp.asarray(weights, dtype=cp.float64))
-    model_cdf[-1] = 1.0
-    rng = cp.random.default_rng(int(seed))
-    model_draws = cp.searchsorted(model_cdf, rng.random(iterations).astype(cp.float64), side="right").astype(cp.int64)
-    counts = cp.zeros(int(rows * cols), dtype=cp.int64)
-    sample_counts: List[int] = []
-    for model_index in range(model_count):
-        model_iterations = int(cp.count_nonzero(model_draws == model_index).get())
-        sample_counts.append(model_iterations)
-        if model_iterations <= 0:
-            continue
-        cdf = cp.cumsum(flat[model_index])
-        cdf[-1] = 1.0
-        draws = rng.random(model_iterations).astype(cp.float64)
-        score_indices = cp.searchsorted(cdf, draws, side="right").astype(cp.int64)
-        counts += cp.bincount(score_indices, minlength=int(rows * cols))
-    return cp.asnumpy(counts.reshape((rows, cols))).astype(int), sample_counts
-
-
 def monte_carlo_count_matrix_torch(grid: np.ndarray, iterations: int, seed: int) -> np.ndarray:
     import torch  # type: ignore
 
@@ -3424,40 +2985,6 @@ def monte_carlo_count_matrix_torch(grid: np.ndarray, iterations: int, seed: int)
     indices = torch.searchsorted(cdf, draws, right=True).to(torch.int64)
     counts = torch.bincount(indices, minlength=int(flat.numel()))
     return counts.reshape(normalized.shape).detach().cpu().numpy().astype(int)
-
-
-def monte_carlo_count_matrix_model_mixture_torch(
-        grids: List[np.ndarray],
-        weights: np.ndarray,
-        iterations: int,
-        seed: int,
-) -> Tuple[np.ndarray, List[int]]:
-    import torch  # type: ignore
-
-    iterations = int(iterations)
-    device = torch.device("cuda")
-    stacked = torch.as_tensor(np.stack(grids, axis=0), dtype=torch.float64, device=device)
-    model_count, rows, cols = stacked.shape
-    flat = stacked.reshape(model_count, rows * cols)
-    flat = flat / torch.clamp(torch.sum(flat, dim=1, keepdim=True), min=1e-12)
-    weight_tensor = torch.as_tensor(weights, dtype=torch.float64, device=device)
-    weight_tensor = weight_tensor / torch.clamp(torch.sum(weight_tensor), min=1e-12)
-    generator = torch.Generator(device=device)
-    generator.manual_seed(int(seed))
-    model_draws = torch.multinomial(weight_tensor, iterations, replacement=True, generator=generator)
-    counts = torch.zeros(int(rows * cols), dtype=torch.int64, device=device)
-    sample_counts: List[int] = []
-    for model_index in range(model_count):
-        model_iterations = int(torch.count_nonzero(model_draws == model_index).detach().cpu().item())
-        sample_counts.append(model_iterations)
-        if model_iterations <= 0:
-            continue
-        cdf = torch.cumsum(flat[model_index], dim=0)
-        cdf[-1] = 1.0
-        draws = torch.rand(model_iterations, generator=generator, device=device, dtype=torch.float64)
-        score_indices = torch.searchsorted(cdf, draws, right=True).to(torch.int64)
-        counts += torch.bincount(score_indices, minlength=int(rows * cols))
-    return counts.reshape((rows, cols)).detach().cpu().numpy().astype(int), sample_counts
 
 
 def monte_carlo_consensus_payload_from_counts(
