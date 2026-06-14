@@ -1795,6 +1795,37 @@ h3 { font-size: 16px; }
   display: grid;
   gap: 8px;
 }
+.fixture-countdown {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.fixture-countdown span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  text-align: center;
+}
+.fixture-countdown b {
+  color: var(--green);
+  font-size: 18px;
+  line-height: 1;
+}
+.fixture-countdown small,
+.fixture-countdown-state {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+.fixture-countdown-state {
+  grid-column: 1 / -1;
+  padding: 5px;
+}
 .top-ranked-pick {
   background: #eef7f2;
 }
@@ -1848,8 +1879,60 @@ h3 { font-size: 16px; }
   color: var(--muted);
   font-weight: 800;
 }
+.reliability-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #eef7f2;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 900;
+}
+.reliability-badge.medium {
+  background: #f6f1e7;
+  color: var(--gold);
+}
+.reliability-badge.low {
+  background: #f7eded;
+  color: #9a3b3b;
+}
 .best-alternative-panel .client-main-pick {
   margin: 0;
+}
+.alternative-model-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.alternative-model-card summary {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+  padding: 11px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.alternative-model-card summary strong {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.alternative-model-card .client-main-pick,
+.alternative-model-card .client-bets-panel,
+.alternative-model-card .warning-list {
+  margin: 0 11px;
+}
+.alternative-model-card .warning-list {
+  margin-bottom: 11px;
 }
 .agreement-matrix {
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));

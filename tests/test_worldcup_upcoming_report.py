@@ -59,6 +59,7 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
 
     config = services.report_pipeline_config({}, services.ALTERNATIVES_BENCHMARK_PIPELINE_MODE)
     assert config["backtest_last_n"] == 7
+    assert config["backtest_scope"] == "worldcup_2026_confirmed_auto"
 
     ranked = services.rank_backtest_models([
         {
@@ -106,10 +107,46 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
 def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_consensus(tmp_path, monkeypatch):
     from src.web import mundial_services as services
 
+    class FakeModel:
+        max_goals = 10
+
+        def __init__(self, key="independent_poisson"):
+            self.key = key
+
+        def match_probabilities(self, home, away, max_goals=None):
+            return {
+                "home": 0.56,
+                "draw": 0.24,
+                "away": 0.20,
+                "over05": 0.9,
+                "under05": 0.1,
+                "over15": 0.7,
+                "under15": 0.3,
+                "over25": 0.45,
+                "under25": 0.55,
+                "over35": 0.2,
+                "under35": 0.8,
+                "lambda1": 1.4,
+                "lambda2": 0.9,
+                "modal_g1": 1,
+                "modal_g2": 0,
+            }
+
+        def score_model_metadata(self):
+            return {"key": self.key, "label": self.key, "available": True, "params": {}, "warnings": []}
+
+    class FakeWorldCupModel:
+        @classmethod
+        def from_history(cls, historical_df, teams, **kwargs):
+            return FakeModel()
+
     tournament = {
         "name": "World Cup 2026",
         "matches": [
-            {"num": 1, "date": "2026-06-11", "time": "19:00", "team1": "Argentina", "team2": "France", "group": "Group A", "ground": "Test"},
+            {"num": 1, "date": "2026-06-11", "time": "12:00 UTC+0", "team1": "Argentina", "team2": "France", "group": "Group A", "ground": "Test", "score": {"ft": [2, 1]}},
+            {"num": 2, "date": "2026-06-12", "time": "12:00 UTC+0", "team1": "Brazil", "team2": "England", "group": "Group A", "ground": "Test", "score": {"ft": [1, 1]}},
+            {"num": 3, "date": "2026-06-13", "time": "12:00 UTC+0", "team1": "France", "team2": "Brazil", "group": "Group A", "ground": "Test", "score": {"ft": [0, 1]}},
+            {"num": 4, "date": "2026-06-20", "time": "18:00 UTC+0", "team1": "Argentina", "team2": "England", "group": "Group A", "ground": "Test"},
         ],
     }
     history = pd.DataFrame([
@@ -130,16 +167,22 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
         ])
     ])
     upcoming = pd.DataFrame([{
-        "No.": 1,
-        "Fecha": "2026-06-11",
-        "Hora": "19:00",
+        "No.": 4,
+        "Fecha": "2026-06-20",
+        "Hora": "18:00 UTC+0",
         "Grupo": "Group A",
         "Equipo 1": "Argentina",
-        "Equipo 2": "France",
+        "Equipo 2": "England",
         "Sede": "Test",
+        "Finalizado": "No",
     }])
 
     monkeypatch.setattr(services, "REPORTS_ROOT", tmp_path)
+    monkeypatch.setattr(services, "BENCHMARK_SCORE_MODEL_SEQUENCE", ["independent_poisson", "dixon_coles_mle"])
+    monkeypatch.setattr(services, "WorldCupModel", FakeWorldCupModel)
+    monkeypatch.setattr(services, "build_score_model", lambda base_model, history_df, teams, config: FakeModel(config["score_model"]))
+    monkeypatch.setattr(services, "refresh_worldcup_2026_results", lambda tournament, refresh=False: {"source": "test-results", "warnings": []})
+    monkeypatch.setattr(services, "fixture_results_status", lambda fixture_df=None: {"source": "test-results"})
     monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: (tournament, "test:tournament"))
     monkeypatch.setattr(services, "load_historical_matches", lambda refresh=False: (history, "test:history"))
     monkeypatch.setattr(services, "upcoming_fixture_rows", lambda tournament, group_filter="": upcoming)
@@ -169,9 +212,16 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert result["summary"]["score_models"] == [item["model_key"] for item in result["model_backtests"]]
     assert set(result["summary"]["score_models"]) == set(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
     assert result["summary"]["baseline_model"]["key"] == "independent_poisson"
-    assert result["summary"]["backtest"]["evaluated_matches"] == 5
+    assert result["summary"]["backtest"]["evaluated_matches"] == 3
+    assert result["summary"]["backtest_auto_n"] == 3
+    assert result["summary"]["backtest_scope"] == "worldcup_2026_confirmed_auto"
+    assert result["summary"]["backtest_source"] == "test-results"
+    assert len(result["summary"]["backtest_confirmed_matches"]) == 3
+    assert "posteriores" in result["summary"]["anti_leakage"]
     assert len(result["fixture_reports"]) == 1
     fixture_report = result["fixture_reports"][0]
+    assert fixture_report["fixture"]["kickoff_iso"] == "2026-06-20T18:00:00+00:00"
+    assert fixture_report["fixture"]["countdown_state"] == "ready"
     assert [model["model_key"] for model in fixture_report["models"]] == result["summary"]["score_models"]
     assert fixture_report["baseline_poisson"]["model_key"] == "independent_poisson"
     assert "consensus" not in fixture_report
@@ -185,6 +235,110 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert result["table"]["total"] == len(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
     assert (tmp_path / "latest.json").exists()
     assert progress[-1]["stage"] == "complete"
+
+
+def test_alternatives_backtest_auto_unavailable_without_confirmed_2026_results(monkeypatch):
+    from src.web import mundial_services as services
+
+    history = pd.DataFrame([
+        {"Date": "2022-11-20", "Year": 2022, "Team 1": "Argentina", "Team 2": "France", "G1": 2, "G2": 1, "Round": "Group", "Group": "A"},
+        {"Date": "2022-11-21", "Year": 2022, "Team 1": "Brazil", "Team 2": "England", "G1": 1, "G2": 1, "Round": "Group", "Group": "A"},
+        {"Date": "2022-11-22", "Year": 2022, "Team 1": "France", "Team 2": "Brazil", "G1": 0, "G2": 1, "Round": "Group", "Group": "A"},
+        {"Date": "2022-11-23", "Year": 2022, "Team 1": "England", "Team 2": "Argentina", "G1": 0, "G2": 2, "Round": "Group", "Group": "A"},
+    ])
+    tournament = {
+        "matches": [
+            {"num": 1, "date": "2026-06-20", "time": "18:00 UTC+0", "team1": "Argentina", "team2": "England", "group": "Group A"},
+        ],
+    }
+    monkeypatch.setattr(services, "fixture_results_status", lambda fixture_df=None: {"source": "test-results"})
+
+    result = services.alternatives_backtest_report(
+        history_df=history,
+        tournament=tournament,
+        config=services.report_pipeline_config({}, services.ALTERNATIVES_BENCHMARK_PIPELINE_MODE),
+        model_sequence=["independent_poisson"],
+        start_time=0.0,
+        hardware={},
+    )
+
+    assert result["summary"]["available"] is False
+    assert result["summary"]["scope"] == "worldcup_2026_confirmed_auto"
+    assert result["summary"]["evaluated_matches"] == 0
+    assert result["summary"]["confirmed_matches"] == 0
+    assert "no hay partidos confirmados" in result["warnings"][0].lower()
+
+
+def test_alternatives_backtest_auto_uses_confirmed_2026_walk_forward_without_leakage(monkeypatch):
+    from src.web import mundial_services as services
+
+    train_snapshots = []
+
+    class FakeModel:
+        max_goals = 10
+
+        def __init__(self, train_df):
+            self.train_df = train_df
+
+        def match_probabilities(self, home, away, max_goals=None):
+            return {
+                "home": 0.6,
+                "draw": 0.2,
+                "away": 0.2,
+                "over05": 0.9,
+                "under05": 0.1,
+                "over15": 0.7,
+                "under15": 0.3,
+                "over25": 0.45,
+                "under25": 0.55,
+                "over35": 0.2,
+                "under35": 0.8,
+                "lambda1": 1.4,
+                "lambda2": 0.9,
+            }
+
+        def score_model_metadata(self):
+            return {"key": "independent_poisson", "label": "Poisson", "available": True, "params": {}, "warnings": []}
+
+    class FakeWorldCupModel:
+        @classmethod
+        def from_history(cls, historical_df, teams, **kwargs):
+            train_snapshots.append(historical_df.copy())
+            return FakeModel(historical_df.copy())
+
+    history = pd.DataFrame([
+        {"Date": "2022-11-20", "Year": 2022, "Team 1": "Argentina", "Team 2": "France", "G1": 2, "G2": 1, "Round": "Group", "Group": "A"},
+        {"Date": "2022-11-21", "Year": 2022, "Team 1": "Brazil", "Team 2": "England", "G1": 1, "G2": 1, "Round": "Group", "Group": "A"},
+    ])
+    tournament = {
+        "matches": [
+            {"num": 1, "date": "2026-06-11", "time": "12:00 UTC+0", "team1": "Argentina", "team2": "France", "group": "Group A", "score": {"ft": [2, 1]}},
+            {"num": 2, "date": "2026-06-12", "time": "12:00 UTC+0", "team1": "Brazil", "team2": "England", "group": "Group A", "score": {"ft": [1, 1]}},
+            {"num": 3, "date": "2026-06-13", "time": "12:00 UTC+0", "team1": "France", "team2": "Brazil", "group": "Group A", "score": {"ft": [0, 1]}},
+        ],
+    }
+    monkeypatch.setattr(services, "WorldCupModel", FakeWorldCupModel)
+    monkeypatch.setattr(services, "fixture_results_status", lambda fixture_df=None: {"source": "test-results"})
+
+    result = services.alternatives_backtest_report(
+        history_df=history,
+        tournament=tournament,
+        config=services.report_pipeline_config({}, services.ALTERNATIVES_BENCHMARK_PIPELINE_MODE),
+        model_sequence=["independent_poisson"],
+        start_time=0.0,
+        hardware={},
+    )
+
+    assert result["summary"]["available"] is True
+    assert result["summary"]["evaluated_matches"] == 3
+    assert result["summary"]["confirmed_matches"] == 3
+    assert [len(frame) for frame in train_snapshots] == [2, 3, 4]
+    assert train_snapshots[0][train_snapshots[0]["Year"].eq(2026)].empty
+    assert train_snapshots[1][train_snapshots[1]["Year"].eq(2026)]["Team 1"].tolist() == ["Argentina"]
+    assert train_snapshots[2][train_snapshots[2]["Year"].eq(2026)]["Team 1"].tolist() == ["Argentina", "Brazil"]
+    assert "France" not in train_snapshots[2][train_snapshots[2]["Year"].eq(2026)].tail(1)["Team 1"].tolist()
+    assert result["models"][0]["evaluated_matches"] == 3
+    assert result["models"][0]["rank"] == 1
 
 
 def test_consensus_rounding_signature_and_strength_levels():

@@ -123,7 +123,6 @@ function applyDefaultConfig(config) {
     "sim-max-goals": config.max_goals,
     "sim-poisson-recent-matches": config.poisson_recent_matches,
     "upcoming-poisson-recent-matches": config.poisson_recent_matches,
-    "upcoming-backtest-last-n": config.backtest_last_n || 7,
     "sim-score-model": config.score_model,
   };
   Object.entries(pairs).forEach(([id, value]) => {
@@ -297,50 +296,81 @@ function fillSimulationGroupFilter() {
 function renderHeroCountdown(targetIso, stateLabel, highlight) {
   const container = document.getElementById("hero-countdown");
   if (!container) return;
-  if (state.countdownTimer) {
-    window.clearInterval(state.countdownTimer);
-    state.countdownTimer = null;
-  }
   const matchLine = highlight && highlight.match ? highlight.match : "Horario por confirmar";
   const kickoffLine = [highlight && highlight.date, highlight && highlight.time, highlight && highlight.venue].filter(Boolean).join(" · ");
-  if (!targetIso) {
-    const label = stateLabel === "finished" ? "Finalizado" : "Sin horario";
-    container.innerHTML = dashboardCountdownHtml(label, matchLine, kickoffLine, null);
-    return;
-  }
-  const render = () => {
-    const diff = Date.parse(targetIso) - Date.now();
-    if (Number.isNaN(diff)) {
-      container.innerHTML = dashboardCountdownHtml("Sin horario", matchLine, kickoffLine, null);
-      return;
-    }
-    if (diff <= 0) {
-      container.innerHTML = dashboardCountdownHtml("En curso", matchLine, kickoffLine, null);
-      return;
-    }
-    const remaining = countdownParts(diff);
-    container.innerHTML = dashboardCountdownHtml("Próximo", matchLine, kickoffLine, remaining);
-  };
-  render();
-  state.countdownTimer = window.setInterval(render, 1000);
+  container.innerHTML = dashboardCountdownHtml(matchLine, kickoffLine, targetIso, stateLabel);
+  refreshCountdowns();
 }
 
-function dashboardCountdownHtml(label, matchLine, kickoffLine, remaining) {
-  const cells = remaining
-    ? [
-      countdownChip("Días", remaining.days),
-      countdownChip("Horas", remaining.hours),
-      countdownChip("Min", remaining.minutes),
-      countdownChip("Seg", remaining.seconds),
-    ].join("")
-    : `<div class="countdown-chip live"><span>Estado</span><strong>${escapeHtml(label)}</strong></div>`;
+function dashboardCountdownHtml(matchLine, kickoffLine, targetIso, stateLabel) {
   return `
     <div class="countdown-head">
-      <span>${escapeHtml(label)}</span>
+      <span data-countdown-label>Próximo</span>
       <strong id="hero-countdown-vs">${escapeHtml(matchLine || "Partido pendiente")}</strong>
       <small>${escapeHtml(kickoffLine || "Horario pendiente")}</small>
     </div>
-    <div class="hero-countdown">${cells}</div>`;
+    <div class="hero-countdown" data-countdown-mode="dashboard" data-countdown-target="${escapeAttr(targetIso || "")}" data-countdown-state="${escapeAttr(stateLabel || "")}"></div>`;
+}
+
+function fixtureCountdownHtml(fixture) {
+  const kickoff = fixture && fixture.kickoff_iso ? fixture.kickoff_iso : "";
+  const countdownState = fixture && fixture.countdown_state ? fixture.countdown_state : "";
+  return `<div class="fixture-countdown" data-countdown-mode="fixture" data-countdown-target="${escapeAttr(kickoff)}" data-countdown-state="${escapeAttr(countdownState)}"></div>`;
+}
+
+function refreshCountdowns() {
+  updateCountdownElements();
+  if (!state.countdownTimer) {
+    state.countdownTimer = window.setInterval(updateCountdownElements, 1000);
+  }
+}
+
+function updateCountdownElements() {
+  document.querySelectorAll("[data-countdown-target]").forEach((node) => {
+    updateCountdownElement(node);
+  });
+}
+
+function updateCountdownElement(node) {
+  const targetIso = node.dataset.countdownTarget || "";
+  const mode = node.dataset.countdownMode || "fixture";
+  const stateLabel = node.dataset.countdownState || "";
+  const target = targetIso ? Date.parse(targetIso) : NaN;
+  const status = countdownStatus(target, stateLabel);
+  const labelNode = mode === "dashboard" ? node.parentElement && node.parentElement.querySelector("[data-countdown-label]") : null;
+  if (labelNode) labelNode.textContent = status.label;
+  if (!status.remaining) {
+    node.innerHTML = mode === "dashboard"
+      ? `<div class="countdown-chip live"><span>Estado</span><strong>${escapeHtml(status.label)}</strong></div>`
+      : `<span class="fixture-countdown-state">${escapeHtml(status.label)}</span>`;
+    return;
+  }
+  if (mode === "dashboard") {
+    node.innerHTML = [
+      countdownChip("Días", status.remaining.days),
+      countdownChip("Horas", status.remaining.hours),
+      countdownChip("Min", status.remaining.minutes),
+      countdownChip("Seg", status.remaining.seconds),
+    ].join("");
+    return;
+  }
+  node.innerHTML = [
+    fixtureCountdownCell("Días", status.remaining.days),
+    fixtureCountdownCell("Horas", status.remaining.hours),
+    fixtureCountdownCell("Min", status.remaining.minutes),
+    fixtureCountdownCell("Seg", status.remaining.seconds),
+  ].join("");
+}
+
+function countdownStatus(target, stateLabel) {
+  if (stateLabel === "finished") return { label: "Finalizado", remaining: null };
+  if (Number.isNaN(target)) return { label: "Horario pendiente", remaining: null };
+  const diff = target - Date.now();
+  if (diff <= 0) {
+    if (stateLabel === "live" || Math.abs(diff) <= 3 * 60 * 60 * 1000) return { label: "En curso", remaining: null };
+    return { label: "Finalizado", remaining: null };
+  }
+  return { label: "Próximo", remaining: countdownParts(diff) };
 }
 
 function countdownParts(milliseconds) {
@@ -354,6 +384,10 @@ function countdownParts(milliseconds) {
 
 function countdownChip(label, value) {
   return `<div class="countdown-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function fixtureCountdownCell(label, value) {
+  return `<span><b>${escapeHtml(value)}</b><small>${escapeHtml(label)}</small></span>`;
 }
 
 function pad2(value) {
@@ -429,7 +463,6 @@ async function runUpcomingPredictions() {
       pipeline_mode: pipelineMode,
       limit,
       group,
-      backtest_last_n: currentBacktestLastN(),
       bayes_profile: (document.getElementById("upcoming-bayes-profile") || {}).value || "deep",
       sota_device: (document.getElementById("upcoming-sota-device") || {}).value || "auto",
       sota_calculation_mode: sotaCalculationMode,
@@ -482,6 +515,7 @@ function renderUpcomingReport(report) {
         ${fixtures.map((fixtureReport) => reportFixtureCardHtml(fixtureReport)).join("") || loadingHtml("Sin fixtures futuros")}
       </div>
     </details>`;
+  refreshCountdowns();
   renderTable("upcoming-predictions-table", report.table);
 }
 
@@ -492,20 +526,22 @@ function renderAlternativesBenchmarkReport(report) {
   const best = report.best_model || summary.best_model || {};
   const rankedModels = report.ranked_models || report.alternatives || [];
   const warnings = summary.warnings || [];
+  const backtestAutoN = summary.backtest_auto_n ?? (summary.backtest || {}).evaluated_matches ?? 0;
+  const resultSource = summary.backtest_source || summary.result_source || ((summary.results_refresh || {}).source) || "CSV local";
   document.getElementById("upcoming-summary").textContent =
-    `${summary.pipeline_label || "Benchmark alternativas"} - ${fixtures.length}/${summary.requested || 0} partidos - ${backtests.length} modelos - ranking ultimos ${summary.backtest_last_n || 7} - ${summary.report_id || report.report_id || ""}`;
+    `${summary.pipeline_label || "Benchmark alternativas"} - ${fixtures.length}/${summary.requested || 0} próximos - ${backtests.length} modelos - N automático ${backtestAutoN} - ${summary.report_id || report.report_id || ""}`;
   document.getElementById("upcoming-predictions").innerHTML = "";
   document.getElementById("upcoming-report").innerHTML = `
     <div class="report-summary-grid">
-      ${reportSummaryCard("Pipeline", summary.pipeline_label || summary.pipeline_mode || "-")}
       ${reportSummaryCard("Modelo #1", best.available ? (best.model_label || best.model_key || "-") : "-")}
-      ${reportSummaryCard("Modelos", rankedModels.length || backtests.length)}
-      ${reportSummaryCard("Backtest", `${(summary.backtest || {}).evaluated_matches || 0} partidos`)}
-      ${reportSummaryCard("Criterio", "Log-loss + marcador")}
-      ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
+      ${reportSummaryCard("N backtest automático", `${backtestAutoN} partidos`)}
+      ${reportSummaryCard("Partidos próximos", `${fixtures.length}/${summary.requested || 0}`)}
+      ${reportSummaryCard("Criterio", "Menor log-loss")}
+      ${reportSummaryCard("Fuente resultados", resultSource)}
     </div>
     ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
     ${alternativesBenchmarkHtml(report)}`;
+  refreshCountdowns();
   renderTable("upcoming-predictions-table", report.table);
 }
 
@@ -515,24 +551,25 @@ function alternativesBenchmarkHtml(report) {
   const rankedModels = report.ranked_models || report.alternatives || [];
   const backtests = report.model_backtests || [];
   const best = report.best_model || summary.best_model || {};
+  const backtestAutoN = summary.backtest_auto_n ?? (summary.backtest || {}).evaluated_matches ?? 0;
   return `<section class="client-report-shell">
     <header>
       <div>
-        <h3>Ranking de confiabilidad últimos ${escapeHtml(summary.backtest_last_n || 7)}</h3>
-        <small>Poisson y SOTA ordenados por log-loss; marcador exacto desempata primero</small>
+        <h3>Ranking de confiabilidad 2026</h3>
+        <small>N automático ${escapeHtml(backtestAutoN)} · walk-forward sin leakage · marcador exacto desempata primero</small>
       </div>
       <span>${escapeHtml(rankedModels.length || backtests.length)} modelo${(rankedModels.length || backtests.length) === 1 ? "" : "s"}</span>
     </header>
     ${bestAlternativeHtml(best)}
+    ${backtestTableHtml(backtests, summary.backtest || {})}
     <section class="report-panel">
       <header><strong>Predicciones futuras</strong><small>${escapeHtml(fixtures.length)} fixture${fixtures.length === 1 ? "" : "s"}</small></header>
       <div class="client-report-grid alternatives-fixture-grid">
         ${fixtures.map((fixtureReport) => alternativeFixtureCardHtml(fixtureReport, backtests)).join("") || loadingHtml("Sin fixtures futuros")}
       </div>
     </section>
-    ${backtestTableHtml(backtests, summary.backtest || {})}
     <section class="report-panel">
-      <header><strong>Modelos uno por uno</strong><small>Disponibilidad, métricas y advertencias</small></header>
+      <header><strong>Detalles por modelo</strong><small>Colapsables para revisar disponibilidad, métricas y advertencias</small></header>
       <div class="client-report-grid alternatives-model-grid">
         ${rankedModels.map((item) => alternativeBenchmarkCardHtml(item)).join("") || loadingHtml("Sin modelos")}
       </div>
@@ -553,7 +590,7 @@ function bestAlternativeHtml(best) {
     <div class="client-main-pick">
       <span>Score confiabilidad ${escapeHtml(formatNumber(item.reliability_score ?? 0))}</span>
       <strong>${escapeHtml(item.model_label || item.model_key || "")}</strong>
-      <small>Últimos ${escapeHtml(item.evaluated_matches || 0)}: ${escapeHtml(item.holdout_start || "")} a ${escapeHtml(item.holdout_end || "")}</small>
+      <small>N automático ${escapeHtml(item.evaluated_matches || 0)}: ${escapeHtml(item.holdout_start || "")} a ${escapeHtml(item.holdout_end || "")}</small>
     </div>
     <div class="technical-meta-row">
       <span>Log-loss ${escapeHtml(formatNumber(item.log_loss ?? "-"))}</span>
@@ -577,6 +614,7 @@ function alternativeFixtureCardHtml(report, backtests) {
       <span>${escapeHtml([fixture.date || "", fixture.time || ""].filter(Boolean).join(" · "))}</span>
       <strong>${escapeHtml(fixture.group || "")}</strong>
     </header>
+    ${fixtureCountdownHtml(fixture)}
     <div class="client-match-row">
       <div>${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
       <b>vs</b>
@@ -636,17 +674,19 @@ function backtestTableHtml(backtests, summary) {
   return `<section class="report-panel alternatives-backtest-panel">
     <header>
       <strong>Ranking de confiabilidad</strong>
-      <small>${escapeHtml((summary || {}).evaluated_matches || 0)} evaluados · ${escapeHtml((summary || {}).train_matches || 0)} entrenamiento · ${escapeHtml((summary || {}).holdout_start || "")} a ${escapeHtml((summary || {}).holdout_end || "")}</small>
+      <small>${escapeHtml((summary || {}).evaluated_matches || 0)} evaluados 2026 · ${escapeHtml((summary || {}).train_matches || 0)} históricos base · ${escapeHtml((summary || {}).source || "")}</small>
     </header>
     <div class="alternatives-backtest-table">
       <table>
         <thead><tr><th>Rank</th><th>Modelo</th><th>Conf.</th><th>Log-loss</th><th>Marcador</th><th>Brier</th><th>Pick</th><th>Score-log</th><th>Vs Poisson</th></tr></thead>
         <tbody>${rows.map((item) => {
           const vs = item.vs_poisson || {};
+          const reliability = Number(item.reliability_score || 0);
+          const badgeClass = reliability >= 75 ? "high" : reliability >= 45 ? "medium" : "low";
           return `<tr>
             <td>#${escapeHtml(item.rank || "-")}</td>
             <td>${escapeHtml(item.model_label || item.model_key || "")}</td>
-            <td>${escapeHtml(formatNumber(item.reliability_score ?? 0))}</td>
+            <td><span class="reliability-badge ${escapeAttr(badgeClass)}">${escapeHtml(formatNumber(reliability))}</span></td>
             <td>${escapeHtml(formatNumber(item.log_loss ?? "-"))}</td>
             <td>${escapeHtml(formatNumber(Number(item.score_accuracy || 0) * 100))}%</td>
             <td>${escapeHtml(formatNumber(item.brier ?? "-"))}</td>
@@ -668,18 +708,21 @@ function alternativeBenchmarkCardHtml(item) {
   const backtest = item.backtest || {};
   const vs = backtest.vs_poisson || {};
   const warnings = backtest.warnings || [];
-  return `<article class="client-fixture-card alternative-model-card">
-    <header>
-      <span>#${escapeHtml(backtest.rank || item.rank || "")} · ${escapeHtml(item.family || "")}</span>
-      <strong>${escapeHtml(formatNumber(backtest.reliability_score ?? 0))}</strong>
-    </header>
+  const reliability = Number(backtest.reliability_score || 0);
+  const badgeClass = reliability >= 75 ? "high" : reliability >= 45 ? "medium" : "low";
+  return `<details class="alternative-model-card">
+    <summary>
+      <span>#${escapeHtml(backtest.rank || item.rank || "")}</span>
+      <strong>${escapeHtml(item.model_name || item.key || "")}</strong>
+      <b class="reliability-badge ${escapeAttr(badgeClass)}">${escapeHtml(formatNumber(reliability))}</b>
+    </summary>
     <div class="client-main-pick">
       <span>Modelo</span>
       <strong>${escapeHtml(item.model_name || item.key || "")}</strong>
       <small>${escapeHtml(item.description || "")}</small>
     </div>
     <section class="client-bets-panel">
-      <header><strong>Backtest últimos ${escapeHtml(backtest.evaluated_matches || 0)}</strong><small>${escapeHtml(vs.beats_poisson ? "Mejora vs Poisson" : "Métricas")}</small></header>
+      <header><strong>Backtest automático ${escapeHtml(backtest.evaluated_matches || 0)}</strong><small>${escapeHtml(vs.beats_poisson ? "Mejora vs Poisson" : "Métricas")}</small></header>
       <div class="technical-meta-row">
         <span>Log-loss ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))}</span>
         <span>Marcador ${escapeHtml(formatNumber(Number(backtest.score_accuracy || 0) * 100))}%</span>
@@ -688,7 +731,7 @@ function alternativeBenchmarkCardHtml(item) {
       </div>
     </section>
     ${warnings.length ? `<div class="warning-list compact">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
-  </article>`;
+  </details>`;
 }
 
 function reportSummaryCard(label, value) {
@@ -738,6 +781,7 @@ function clientFixtureCardHtml(report) {
       <span>${escapeHtml([fixture.date || "", fixture.time || ""].filter(Boolean).join(" · "))}</span>
       <strong>${escapeHtml(fixture.group || "")}</strong>
     </header>
+    ${fixtureCountdownHtml(fixture)}
     <div class="client-match-row">
       <div>${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
       <b>vs</b>
@@ -967,6 +1011,7 @@ function reportFixtureCardHtml(report) {
   const warnings = report.warnings || [];
   return `<article class="upcoming-card report-fixture-card">
     <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
+    ${fixtureCountdownHtml(fixture)}
     <div class="upcoming-match">
       <div class="upcoming-team">${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
       <span>vs</span>
@@ -1700,14 +1745,6 @@ function currentMonteCarloSimulations() {
   const simulations = Math.min(100000, Math.max(100, Math.round(Number.isFinite(value) ? value : 5000)));
   if (input && String(input.value) !== String(simulations)) input.value = simulations;
   return simulations;
-}
-
-function currentBacktestLastN() {
-  const input = document.getElementById("upcoming-backtest-last-n");
-  const value = Number(input && input.value ? input.value : 7);
-  const count = Math.min(100, Math.max(5, Math.round(Number.isFinite(value) ? value : 7)));
-  if (input && String(input.value) !== String(count)) input.value = count;
-  return count;
 }
 
 function syncPoissonRecentInputs(source) {

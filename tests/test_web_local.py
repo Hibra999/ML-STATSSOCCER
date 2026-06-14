@@ -370,6 +370,13 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "renderUpcomingReport" in app_source
     assert "flagHtml(homeAsset)" in app_source
     assert "renderHeroCountdown" in app_source
+    assert "fixtureCountdownHtml" in app_source
+    assert "data-countdown-target" in app_source
+    assert "En curso" in app_source
+    assert "Horario pendiente" in app_source
+    assert "Backtest N" not in html_source
+    assert "upcoming-backtest-last-n" not in html_source
+    assert "upcoming-backtest-last-n" not in app_source
     assert "heroNextCardHtml" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" not in app_source
     assert "/api/worldcup/simulate" not in app_source

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -158,6 +159,205 @@ def fixture_results_status(fixture_df: Optional[pd.DataFrame] = None) -> Dict[st
         "confirmed_results": confirmed,
         "updated_at": latest_update,
     }
+
+
+def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = False) -> Dict[str, Any]:
+    """Refresh final 2026 World Cup scores from FotMob, preserving valid local rows."""
+
+    existing = load_worldcup_results_override()
+    status = fixture_results_status(tournament_fixtures_dataframe(tournament))
+    if not refresh:
+        return {
+            **status,
+            "provider": "local_csv",
+            "refresh_attempted": False,
+            "refresh_added": 0,
+            "warnings": [],
+        }
+
+    warnings: List[str] = []
+    fetched: List[Dict[str, Any]] = []
+    try:
+        from src.worldcup.fotmob_provider import (  # pylint: disable=import-outside-toplevel
+            FOTMOB_MATCHES_URL,
+            best_fotmob_match,
+            extract_fotmob_matches,
+            fotmob_get_json,
+            name_similarity,
+        )
+    except Exception as exc:
+        return {
+            **status,
+            "provider": "local_csv",
+            "refresh_attempted": True,
+            "refresh_added": 0,
+            "warnings": [f"FotMob no disponible: {exc.__class__.__name__}."],
+        }
+
+    fixture_df = tournament_fixtures_dataframe(tournament)
+    if fixture_df.empty:
+        return {
+            **status,
+            "provider": "local_csv",
+            "refresh_attempted": True,
+            "refresh_added": 0,
+            "warnings": ["No hay fixtures 2026 para refrescar resultados."],
+        }
+
+    working = fixture_df.copy()
+    working["_date"] = pd.to_datetime(working["Fecha"], errors="coerce")
+    today = pd.Timestamp(datetime.now(timezone.utc).date())
+    working = working[
+        working["_date"].notna()
+        & (working["_date"] <= today)
+        & working["Grupo"].astype(str).str.len().gt(0)
+        & working["Equipo 1"].astype(str).str.len().gt(1)
+        & working["Equipo 2"].astype(str).str.len().gt(1)
+        & ~working["Equipo 1"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
+        & ~working["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
+    ].copy()
+
+    events_by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for date_key in sorted({str(value.date()) for value in working["_date"].dropna()}):
+        try:
+            payload = fotmob_get_json(FOTMOB_MATCHES_URL, params={"date": date_key.replace("-", "")})
+            events_by_date[date_key] = extract_fotmob_matches(payload)
+        except Exception as exc:
+            warnings.append(f"FotMob {date_key}: {exc.__class__.__name__}.")
+            events_by_date[date_key] = []
+
+    for _, fixture in working.iterrows():
+        date_key = str(fixture["_date"].date())
+        home = clean_team_name(fixture.get("Equipo 1"))
+        away = clean_team_name(fixture.get("Equipo 2"))
+        best = best_fotmob_match(events_by_date.get(date_key, []), home, away, name_similarity)
+        if not best:
+            continue
+        event, confidence, reverse = best
+        if not _fotmob_event_is_final(event):
+            continue
+        score = _fotmob_event_score(event)
+        if score is None:
+            continue
+        home_goals, away_goals = score
+        if reverse:
+            home_goals, away_goals = away_goals, home_goals
+        fetched.append({
+            "date": date_key,
+            "home": home,
+            "away": away,
+            "home_goals": int(home_goals),
+            "away_goals": int(away_goals),
+            "status": "final",
+            "source": f"fotmob:{event.get('id') or event.get('matchId') or ''}:confidence={confidence:.2f}",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    merged_rows = _merge_result_override_rows(existing, fetched)
+    added = max(len(merged_rows) - len(existing), 0)
+    if fetched and merged_rows:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(merged_rows, columns=RESULT_OVERRIDE_COLUMNS).to_csv(WORLD_CUP_2026_RESULTS_FILE, index=False)
+
+    refreshed = fixture_results_status(tournament_fixtures_dataframe(tournament))
+    return {
+        **refreshed,
+        "provider": "fotmob+local_csv" if fetched else "local_csv",
+        "refresh_attempted": True,
+        "refresh_added": int(added),
+        "fotmob_final_rows": int(len(fetched)),
+        "warnings": warnings,
+    }
+
+
+def _merge_result_override_rows(existing: pd.DataFrame, fetched: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for _, row in existing.iterrows():
+        payload = {column: row.get(column, "") for column in RESULT_OVERRIDE_COLUMNS}
+        key = _worldcup_result_key(payload.get("date"), payload.get("home"), payload.get("away"))
+        if key[0] and key[1] and key[2]:
+            rows[key] = payload
+    for row in fetched:
+        key = _worldcup_result_key(row.get("date"), row.get("home"), row.get("away"))
+        if not all(key):
+            continue
+        existing_row = rows.get(key)
+        if existing_row and _result_override_row_is_valid(existing_row):
+            continue
+        rows[key] = {column: row.get(column, "") for column in RESULT_OVERRIDE_COLUMNS}
+    return list(rows.values())
+
+
+def _result_override_row_is_valid(row: Dict[str, Any]) -> bool:
+    if str(row.get("status", "")).strip().lower() not in {"final", "finished", "si", "sí"}:
+        return False
+    return pd.notna(pd.to_numeric(row.get("home_goals"), errors="coerce")) and pd.notna(pd.to_numeric(row.get("away_goals"), errors="coerce"))
+
+
+def _fotmob_event_is_final(event: Dict[str, Any]) -> bool:
+    status = event.get("status") if isinstance(event.get("status"), dict) else {}
+    candidates = [
+        event.get("status"),
+        event.get("statusStr"),
+        event.get("statusText"),
+        event.get("matchStatus"),
+        status.get("reason", {}).get("short") if isinstance(status.get("reason"), dict) else "",
+        status.get("reason", {}).get("long") if isinstance(status.get("reason"), dict) else "",
+        status.get("status"),
+        status.get("short"),
+        status.get("long"),
+    ]
+    if bool(event.get("finished") or event.get("isFinished") or status.get("finished")):
+        return True
+    final_states = {"finished", "full time", "full-time", "ft", "after penalties", "aet", "ended"}
+    return any(str(value or "").strip().lower() in final_states for value in candidates)
+
+
+def _fotmob_event_score(event: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    home = event.get("home") if isinstance(event.get("home"), dict) else {}
+    away = event.get("away") if isinstance(event.get("away"), dict) else {}
+    direct = _score_pair_from_values(home.get("score"), away.get("score"))
+    if direct is not None:
+        return direct
+    direct = _score_pair_from_values(event.get("homeScore"), event.get("awayScore"))
+    if direct is not None:
+        return direct
+    score = event.get("score")
+    if isinstance(score, dict):
+        direct = _score_pair_from_values(score.get("home"), score.get("away"))
+        if direct is not None:
+            return direct
+        direct = _score_pair_from_values(score.get("homeScore"), score.get("awayScore"))
+        if direct is not None:
+            return direct
+    if isinstance(score, (list, tuple)) and len(score) >= 2:
+        direct = _score_pair_from_values(score[0], score[1])
+        if direct is not None:
+            return direct
+    for key in ("scoreStr", "scoreString", "result", "status"):
+        value = event.get(key)
+        if isinstance(value, dict):
+            value = value.get("scoreStr") or value.get("score")
+        direct = _score_pair_from_text(value)
+        if direct is not None:
+            return direct
+    return None
+
+
+def _score_pair_from_values(home: Any, away: Any) -> Optional[Tuple[int, int]]:
+    try:
+        if home in (None, "") or away in (None, ""):
+            return None
+        return int(float(home)), int(float(away))
+    except (TypeError, ValueError):
+        return None
+
+
+def _score_pair_from_text(value: Any) -> Optional[Tuple[int, int]]:
+    match = re.search(r"(\d+)\s*[-:]\s*(\d+)", str(value or ""))
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def fallback_tournament_2026() -> Dict[str, Any]:
