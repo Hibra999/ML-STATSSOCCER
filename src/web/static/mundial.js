@@ -414,8 +414,8 @@ async function runUpcomingPredictions() {
   const group = document.getElementById("upcoming-group-filter").value || "";
   const pipelineMode = syncUpcomingPipelineControls();
   const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
-  const calculationLabel = pipelineMode === "ml_sota_poisson"
-    ? "ML + SOTA Poisson"
+  const calculationLabel = pipelineMode === "alternatives_benchmark"
+    ? "Benchmark alternativas"
     : sotaCalculationMode === "monte_carlo"
     ? `SOTA Monte Carlo mezcla N=${formatInteger(currentMonteCarloSimulations())}`
     : "Consenso exacto";
@@ -443,13 +443,17 @@ function syncUpcomingPipelineControls() {
   const select = document.getElementById("upcoming-pipeline-mode");
   const mode = (select && select.value) || "poisson_sota";
   const calculation = document.getElementById("upcoming-sota-calculation-mode");
-  if (calculation) calculation.disabled = mode === "ml_sota_poisson";
+  if (calculation) calculation.disabled = mode === "alternatives_benchmark";
   return mode;
 }
 
 function renderUpcomingReport(report) {
   state.lastUpcomingReport = report;
   const summary = report.summary || {};
+  if (summary.pipeline_mode === "alternatives_benchmark") {
+    renderAlternativesBenchmarkReport(report);
+    return;
+  }
   const fixtures = report.fixture_reports || [];
   const hardware = summary.hardware || {};
   const warnings = summary.warnings || [];
@@ -475,6 +479,76 @@ function renderUpcomingReport(report) {
       </div>
     </details>`;
   renderTable("upcoming-predictions-table", report.table);
+}
+
+function renderAlternativesBenchmarkReport(report) {
+  const summary = report.summary || {};
+  const alternatives = report.alternatives || [];
+  const warnings = summary.warnings || [];
+  document.getElementById("upcoming-summary").textContent =
+    `${summary.pipeline_label || "Benchmark alternativas"} - ${alternatives.length} alternativas - ${summary.evidence_policy || "papers_benchmarks"} - ${summary.report_id || report.report_id || ""}`;
+  document.getElementById("upcoming-predictions").innerHTML = "";
+  document.getElementById("upcoming-report").innerHTML = `
+    <div class="report-summary-grid">
+      ${reportSummaryCard("Pipeline", summary.pipeline_label || summary.pipeline_mode || "-")}
+      ${reportSummaryCard("Evidencia", summary.evidence_policy || "-")}
+      ${reportSummaryCard("Alternativas", alternatives.length)}
+      ${reportSummaryCard("Baseline", (summary.baseline_models || []).length ? `${(summary.baseline_models || []).length} modelos SOTA` : "-")}
+      ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
+    </div>
+    ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${alternativesBenchmarkHtml(alternatives, report.baseline_context || [])}`;
+  renderTable("upcoming-predictions-table", report.table);
+}
+
+function alternativesBenchmarkHtml(alternatives, baselineContext) {
+  const items = alternatives || [];
+  const baselines = baselineContext || [];
+  return `<section class="client-report-shell">
+    <header>
+      <div>
+        <h3>Alternativas reportadas</h3>
+        <small>Fuentes con benchmark, métrica y contexto declarado</small>
+      </div>
+      <span>${escapeHtml(items.length)} modelo${items.length === 1 ? "" : "s"}</span>
+    </header>
+    <div class="client-report-grid">
+      ${items.map((item) => alternativeBenchmarkCardHtml(item)).join("") || loadingHtml("Sin alternativas")}
+    </div>
+    ${baselines.length ? `<details class="technical-report-drawer">
+      <summary>Baselines y cautelas</summary>
+      <div class="upcoming-grid">
+        ${baselines.map((item) => `<article class="report-panel">
+          <header><strong>${escapeHtml(item.model_name || "")}</strong><small>${escapeHtml(item.source_title || "")}</small></header>
+          <p>${escapeHtml(item.note || "")}</p>
+          <a href="${escapeAttr(item.source_url || "#")}" target="_blank" rel="noopener">Fuente</a>
+        </article>`).join("")}
+      </div>
+    </details>` : ""}
+  </section>`;
+}
+
+function alternativeBenchmarkCardHtml(item) {
+  return `<article class="client-fixture-card">
+    <header>
+      <span>#${escapeHtml(item.rank || "")} · ${escapeHtml(item.family || "")}</span>
+      <strong>${escapeHtml(item.recommended_priority || "")}</strong>
+    </header>
+    <div class="client-main-pick">
+      <span>Modelo</span>
+      <strong>${escapeHtml(item.model_name || "")}</strong>
+      <small>${escapeHtml(item.implementation_cost || "")} · ${escapeHtml((item.reported_better_than || []).join(", "))}</small>
+    </div>
+    <section class="client-bets-panel">
+      <header><strong>Métrica reportada</strong><small>${escapeHtml(item.metric || "")}</small></header>
+      <p>${escapeHtml(item.reported_result || "")}</p>
+      <small>${escapeHtml(item.dataset_context || "")}</small>
+    </section>
+    <section class="client-score-panel">
+      <header><strong>Fuente</strong><small>${escapeHtml(item.source_title || "")}</small></header>
+      <a href="${escapeAttr(item.source_url || "#")}" target="_blank" rel="noopener">${escapeHtml(item.source_url || "")}</a>
+    </section>
+  </article>`;
 }
 
 function reportSummaryCard(label, value) {
@@ -541,28 +615,6 @@ function clientFixtureCardHtml(report) {
 }
 
 function clientPrimaryReportPayload(report) {
-  const ml = (report && report.ml_sota_poisson) || {};
-  if (ml.available) {
-    const probabilities = ml.calibrated_probabilities || {};
-    const outcome = ml.outcome || strongestOutcomeFromProbabilities(probabilities);
-    const outcomeProbability = Number(ml.outcome_probability ?? probabilities[outcome] ?? 0);
-    return {
-      mode: "ml_sota_poisson",
-      label: "ML + SOTA Poisson calibrado",
-      probabilities,
-      distribution: (report && report.consensus_score_distribution) || {},
-      stats: report.model_statistics || {},
-      pickConfidence: outcomeProbability,
-      consensus: {
-        ...(report.consensus || {}),
-        outcome,
-        outcome_label: ml.outcome_label || outcomeLabel(outcome),
-        outcome_share: outcomeProbability / 100,
-        strength: "ML calibrado",
-        totals: mlTotalsPayload(probabilities),
-      },
-    };
-  }
   const mc = (report && report.monte_carlo_consensus) || {};
   if (mc.available) {
     const probabilities = mc.probabilities || {};
@@ -595,25 +647,6 @@ function clientPrimaryReportPayload(report) {
     consensus,
     pickConfidence: null,
   };
-}
-
-function mlTotalsPayload(probabilities) {
-  const probs = probabilities || {};
-  const payload = {};
-  ["0.5", "1.5", "2.5", "3.5"].forEach((line) => {
-    const suffix = line.replace(".", "");
-    const over = Number(probs[`over${suffix}`] || 0);
-    const under = Number(probs[`under${suffix}`] || 0);
-    const pick = over >= under ? "over" : "under";
-    payload[line] = {
-      pick,
-      label: pick === "over" ? "Over" : "Under",
-      over,
-      under,
-      share: Math.max(over, under) / 100,
-    };
-  });
-  return payload;
 }
 
 function strongestOutcomeFromProbabilities(probabilities) {
@@ -650,7 +683,7 @@ function clientOutcomeChartHtml(stats, consensus, fixture, primary) {
     ${rows.map((item) => {
       const summary = outcomeStats[item.key] || {};
       const direct = Number(directProbabilities[item.key]);
-      const value = Number.isFinite(direct) && primary && ["monte_carlo", "ml_sota_poisson"].includes(primary.mode)
+      const value = Number.isFinite(direct) && primary && primary.mode === "monte_carlo"
         ? direct
         : Number.isFinite(Number(summary.avg)) ? Number(summary.avg) : (Number(outcomeCounts[item.key] || 0) / eligible) * 100;
       return `<div class="${escapeAttr(item.key === ((consensus || {}).outcome || "") ? "active" : "")}">
@@ -682,9 +715,6 @@ function clientBetCardsHtml(report, primary) {
 function clientBestBets(report, primary) {
   if (primary && primary.mode === "monte_carlo") {
     return clientMonteCarloBets(primary).slice(0, 5);
-  }
-  if (primary && primary.mode === "ml_sota_poisson") {
-    return clientProbabilityBets(primary, "probabilidad calibrada").slice(0, 5);
   }
   const fixture = report.fixture || {};
   const consensus = report.consensus || {};
@@ -723,31 +753,6 @@ function clientBestBets(report, primary) {
     });
   }
   return bets.sort((a, b) => (Number(b.agreement || 0) - Number(a.agreement || 0)) || (Number(b.probability || 0) - Number(a.probability || 0)));
-}
-
-function clientProbabilityBets(primary, detailLabel) {
-  const probabilities = primary.probabilities || {};
-  const consensus = primary.consensus || {};
-  const totals = consensus.totals || {};
-  const bets = [{
-    market: "1X2",
-    pick: consensus.outcome_label || "-",
-    probability: Number(primary.pickConfidence || 0),
-    agreement: Number(primary.pickConfidence || 0) / 100,
-    detail: detailLabel,
-  }];
-  Object.entries(totals).forEach(([line, item]) => {
-    const pick = item.pick || "";
-    const probability = pick === "over" ? Number(item.over || 0) : Number(item.under || 0);
-    bets.push({
-      market: `U/O ${line}`,
-      pick: item.label || "-",
-      probability,
-      agreement: probability / 100,
-      detail: detailLabel,
-    });
-  });
-  return bets.sort((a, b) => Number(b.probability || 0) - Number(a.probability || 0));
 }
 
 function clientMonteCarloBets(primary) {
@@ -834,41 +839,11 @@ function reportFixtureCardHtml(report) {
     <span class="consensus-badge ${escapeAttr(consensusClass)}">${escapeHtml(Math.round(Number(consensus.outcome_share || 0) * 100))}% 1X2 · ${escapeHtml(Math.round(Number(consensus.signature_share || 0) * 100))}% firma</span>
     ${reportTopModelsHtml(topModels)}
     ${reportOutcomeStatsHtml(stats, consensus, fixture)}
-    ${reportMlSotaHtml(report.ml_sota_poisson || {})}
     ${reportConsensusScoreHtml(scoreDistribution)}
     ${reportTotalsStatsHtml(stats, consensus)}
     ${allModelsDetailsHtml(models)}
     ${warnings.length ? `<div class="warning-list compact">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
   </article>`;
-}
-
-function reportMlSotaHtml(ml) {
-  if (!ml || !ml.available) return "";
-  const calibrated = ml.calibrated_probabilities || {};
-  const raw = ml.raw_probabilities || {};
-  const metrics = ml.metrics || {};
-  const resultMetrics = metrics.result || {};
-  const outcomes = [
-    ["1", "home"],
-    ["X", "draw"],
-    ["2", "away"],
-  ];
-  return `<section class="report-panel">
-    <header><strong>ML + SOTA Poisson</strong><small>${escapeHtml(ml.cache_status || "")} · ${escapeHtml((ml.artifact || {}).model_type || "")}</small></header>
-    <div class="outcome-list stat-outcomes">
-      ${outcomes.map(([label, key]) => `<div class="outcome-row ${escapeAttr(key === ml.outcome ? "active" : "")}">
-        <span>${escapeHtml(label)}</span>
-        <div><i style="width:${escapeAttr(clampPercent(calibrated[key] || 0))}%"></i></div>
-        <b>${escapeHtml(formatNumber(calibrated[key] || 0))}%</b>
-        <small>raw ${escapeHtml(formatNumber(raw[key] || 0))}%</small>
-      </div>`).join("")}
-    </div>
-    <div class="technical-meta-row">
-      <span>Brier ${escapeHtml(formatNumber(resultMetrics.brier ?? 0))}</span>
-      <span>Log-loss ${escapeHtml(formatNumber(resultMetrics.log_loss ?? 0))}</span>
-      <span>ECE ${escapeHtml(formatNumber(resultMetrics.ece ?? 0))}</span>
-    </div>
-  </section>`;
 }
 
 function reportTopModelsHtml(topModels) {
