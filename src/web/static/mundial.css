@@ -1919,11 +1919,53 @@ h3 { font-size: 16px; }
   color: var(--green);
 }
 .alternative-model-row small,
-.alternative-model-row .top-scores {
+.alternative-model-row .top-scores,
+.alternative-model-row .model-probability-strip {
   grid-column: 1 / -1;
 }
 .alternative-model-row.fallback {
   background: #fff8f0;
+}
+.model-probability-strip {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.model-outcome-probabilities {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.model-total-probabilities {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.model-probability-strip span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+.model-probability-strip b {
+  color: var(--ink);
+  font-size: 12px;
+}
+.model-probability-strip small {
+  min-width: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.model-probability-strip span.active {
+  border-color: #9ed1ba;
+  background: #eef7f2;
+}
+.model-probability-strip span.over,
+.model-probability-strip span.under {
+  border-color: #d7e6ef;
+  background: #f5f9fb;
 }
 .benchmark-bar-list {
   display: grid;
@@ -2743,8 +2785,12 @@ th {
   .report-summary-grid,
   .feature-bar,
   .recent15-columns,
+  .model-total-probabilities,
   .context-totals {
     grid-template-columns: 1fr;
+  }
+  .model-outcome-probabilities {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .top-model-row small {
     grid-column: auto;

@@ -692,18 +692,18 @@ function alternativeFixtureCardHtml(report, backtests) {
       <b>vs</b>
       <div>${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
-    ${topRankedFixturePickHtml(leader, backtestMap.get(leader.model_key) || leader.backtest || {})}
+    ${topRankedFixturePickHtml(leader, backtestMap.get(leader.model_key) || leader.backtest || {}, fixture)}
     <details class="models-drawer">
       <summary>Todos los modelos (${escapeHtml(models.length)})</summary>
       <div class="alternative-model-list">
-        ${models.map((model) => alternativeModelRowHtml(model, backtestMap.get(model.model_key) || {})).join("")}
+        ${models.map((model) => alternativeModelRowHtml(model, backtestMap.get(model.model_key) || {}, fixture)).join("")}
       </div>
     </details>
     ${contextualPoissonHtml(report.contextual_poisson || {}, fixture)}
   </article>`;
 }
 
-function topRankedFixturePickHtml(model, backtest) {
+function topRankedFixturePickHtml(model, backtest, fixture) {
   const item = model || {};
   if (!item.model_key) return "";
   const decision = item.decision || {};
@@ -722,13 +722,15 @@ function topRankedFixturePickHtml(model, backtest) {
       <strong>${escapeHtml(decision.label || "-")} · ${escapeHtml(decision.team || "")}${confidence !== "" ? ` · ${escapeHtml(formatNumber(confidence))}%` : ""}</strong>
       <small>Marcador #1 ${escapeHtml(item.top_score || "-")}${item.top_score_probability !== undefined ? ` · ${escapeHtml(formatNumber(item.top_score_probability))}%` : ""} · λ ${escapeHtml(expected.home ?? "-")}/${escapeHtml(expected.away ?? "-")}${backtest.reliability_score !== undefined ? ` · confiabilidad ${escapeHtml(formatNumber(backtest.reliability_score ?? 0))}` : ""}</small>
     </div>
+    ${modelOutcomeProbabilitiesHtml(probs, decision.outcome, fixture)}
+    ${modelOverUnderProbabilitiesHtml(probs, item.totals || {})}
     <div class="top-scores compact">
       ${topScores.slice(0, 3).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
     </div>
   </section>`;
 }
 
-function alternativeModelRowHtml(model, backtest) {
+function alternativeModelRowHtml(model, backtest, fixture) {
   const item = model || {};
   const decision = item.decision || {};
   const probs = item.probabilities || {};
@@ -742,11 +744,50 @@ function alternativeModelRowHtml(model, backtest) {
     <span>${escapeHtml(decision.label || "-")} ${escapeHtml(decision.team || "")}${confidence !== "" ? ` · ${escapeHtml(formatNumber(confidence))}%` : ""}</span>
     <span>${escapeHtml(item.top_score || "-")} · λ ${escapeHtml(expected.home ?? "-")}/${escapeHtml(expected.away ?? "-")}</span>
     <small>LL ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))} · RPS ${escapeHtml(formatNumber(backtest.rps ?? "-"))} · Marcador #1 ${escapeHtml(formatNumber(Number(backtest.score_accuracy || 0) * 100))}% · Top-3 ${escapeHtml(formatNumber(Number(backtest.top3_score_accuracy || 0) * 100))}% · ECE ${escapeHtml(formatNumber(backtest.expected_calibration_error ?? "-"))}${warnings.length ? ` · ${escapeHtml(warnings[0])}` : ""}</small>
+    ${modelOutcomeProbabilitiesHtml(probs, decision.outcome, fixture)}
+    ${modelOverUnderProbabilitiesHtml(probs, item.totals || {})}
     <div class="top-scores compact">
       ${topScores.slice(0, 3).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
     </div>
     ${featureContextDetailsHtml(item.feature_context)}
   </div>`;
+}
+
+function modelOutcomeProbabilitiesHtml(probabilities, activeOutcome, fixture) {
+  const probs = probabilities || {};
+  const labels = [
+    { key: "home", label: "1", team: (fixture || {}).home || "Local" },
+    { key: "draw", label: "X", team: "Empate" },
+    { key: "away", label: "2", team: (fixture || {}).away || "Visitante" },
+  ];
+  return `<div class="model-probability-strip model-outcome-probabilities" aria-label="Probabilidades 1X2 por modelo">
+    ${labels.map((item) => {
+      const value = probs[item.key];
+      const active = activeOutcome === item.key;
+      return `<span class="${escapeAttr(active ? "active" : "")}"><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.team)} · ${escapeHtml(formatProbability(value))}%</small></span>`;
+    }).join("")}
+  </div>`;
+}
+
+function modelOverUnderProbabilitiesHtml(probabilities, totals) {
+  const probs = probabilities || {};
+  const picks = totals || {};
+  return `<div class="model-probability-strip model-total-probabilities" aria-label="Over under por modelo">
+    ${goalMarketLines.map((line) => {
+      const lineKey = line.label.replace("U/O ", "");
+      const over = Number(probs[line.over]);
+      const under = Number(probs[line.under]);
+      const pick = picks[lineKey] || (over >= under ? "over" : "under");
+      const pickLabel = pick === "over" ? "Over" : "Under";
+      return `<span class="${escapeAttr(pick)}"><b>${escapeHtml(line.label)} · ${escapeHtml(pickLabel)}</b><small>Over ${escapeHtml(formatProbability(over))}% / Under ${escapeHtml(formatProbability(under))}%</small></span>`;
+    }).join("")}
+  </div>`;
+}
+
+function formatProbability(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return formatNumber(number);
 }
 
 function featureContextDetailsHtml(context) {

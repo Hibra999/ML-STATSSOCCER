@@ -1121,8 +1121,13 @@ def test_benchmark_feature_enhanced_model_works_without_optional_caches(monkeypa
     assert probabilities["feature_context"]["cutoff"] == "strictly_before_match"
 
 
-def test_worldcup_ui_uses_marcador_1_label():
-    assert "Marcador #1" in Path("src/web/static/mundial.js").read_text(encoding="utf-8")
+def test_worldcup_ui_keeps_fixture_prediction_probability_labels():
+    source = Path("src/web/static/mundial.js").read_text(encoding="utf-8")
+    assert "Marcador #1" in source
+    assert "modelOutcomeProbabilitiesHtml" in source
+    assert "Probabilidades 1X2 por modelo" in source
+    assert "modelOverUnderProbabilitiesHtml" in source
+    assert "Over ${escapeHtml(formatProbability(over))}%" in source
 
 
 def test_consensus_rounding_signature_and_strength_levels():
