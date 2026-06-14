@@ -1908,7 +1908,9 @@ def confirmed_worldcup_2026_backtest_rows(tournament: Dict[str, Any]) -> pd.Data
     has_time = working["_has_kickoff_time"].astype(bool)
     available_by_time = has_time & working["_kickoff"].notna() & (working["_kickoff"] <= now)
     available_by_date = ~has_time & working["_date"].notna() & (working["_date"] <= today)
-    working = working[working["_date"].notna() & (available_by_time | available_by_date)].copy()
+    verified_source = working.get("Fuente Resultado", pd.Series("", index=working.index)).astype(str).str.lower().str.startswith("verified:")
+    available_by_verified = verified_source & working["_date"].notna() & (working["_date"] <= today)
+    working = working[working["_date"].notna() & (available_by_time | available_by_date | available_by_verified)].copy()
     if working.empty:
         return pd.DataFrame(columns=["No.", "Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group", "Source"])
     working = working[working["_date"].notna()].sort_values(["_sort_time", "No."], kind="stable").reset_index(drop=True)

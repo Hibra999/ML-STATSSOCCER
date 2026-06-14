@@ -814,6 +814,7 @@ def test_worldcup_results_refresh_falls_back_to_csv_when_fotmob_fails(tmp_path, 
         raise RuntimeError("down")
 
     monkeypatch.setattr(fotmob_provider, "fotmob_get_json", fake_fotmob_get_json)
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", lambda working, warnings: [])
 
     refresh = worldcup_data.refresh_worldcup_2026_results(tournament, refresh=True)
     confirmed = services.confirmed_worldcup_2026_backtest_rows(tournament)
@@ -822,7 +823,9 @@ def test_worldcup_results_refresh_falls_back_to_csv_when_fotmob_fails(tmp_path, 
     assert refresh["provider"] == "local_csv"
     assert refresh["fotmob_final_rows"] == 0
     assert refresh["confirmed_results"] == 1
-    assert "backtest parcial por fuente no disponible" in refresh["warnings"]
+    assert "backtest parcial por fuente no disponible" not in refresh["warnings"]
+    assert any("FotMob 2026-06-14: RuntimeError." in item for item in refresh["provider_warnings"])
+    assert refresh["missing_result_fixtures"] == []
     assert confirmed.shape[0] == 1
     assert confirmed.iloc[0]["G2"] == 2
 
@@ -883,7 +886,7 @@ def test_worldcup_results_refresh_and_backtest_auto_use_nine_verified_finals(tmp
     from src.web import mundial_services as services
 
     worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
-    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 23, 30, tzinfo=timezone.utc))
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 20, 15, tzinfo=timezone.utc))
     pd.DataFrame(columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
     tournament = {
         "matches": [
@@ -898,18 +901,35 @@ def test_worldcup_results_refresh_and_backtest_auto_use_nine_verified_finals(tmp
             {"num": 17, "date": "2026-06-14", "time": "18:00 UTC-4", "team1": "Germany", "team2": "Curaçao", "group": "Group E"},
         ],
     }
-    monkeypatch.setattr(worldcup_data, "fetch_fotmob_worldcup_result_rows", lambda working, warnings: [])
-    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", lambda working, warnings: [])
+    def fake_fotmob_rows(working, warnings):
+        warnings.append("FotMob 2026-06-14: HTTPError.")
+        return []
+
+    def fake_sofascore_rows(working, warnings):
+        warnings.append("SofaScore 2026-06-14: TypeError.")
+        return []
+
+    monkeypatch.setattr(worldcup_data, "fetch_fotmob_worldcup_result_rows", fake_fotmob_rows)
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", fake_sofascore_rows)
 
     refresh = worldcup_data.refresh_worldcup_2026_results(tournament, refresh=True)
     confirmed = services.confirmed_worldcup_2026_backtest_rows(tournament)
 
     assert refresh["verified_final_rows"] == 9
     assert refresh["confirmed_results"] == 9
+    assert refresh["warnings"] == []
+    assert "FotMob 2026-06-14: HTTPError." in refresh["provider_warnings"]
+    assert "SofaScore 2026-06-14: TypeError." in refresh["provider_warnings"]
+    assert refresh["missing_result_fixtures"] == []
     assert confirmed.shape[0] == 9
     germany = confirmed[confirmed["Team 1"].eq("Germany") & confirmed["Team 2"].eq("Curaçao")].iloc[0]
     assert germany["G1"] == 7
     assert germany["G2"] == 1
+    stored = pd.read_csv(results_path)
+    assert stored.shape[0] == 9
+    stored_germany = stored[stored["home"].eq("Germany") & stored["away"].eq("Curaçao")].iloc[0]
+    assert int(stored_germany["home_goals"]) == 7
+    assert int(stored_germany["away_goals"]) == 1
 
     class FakeModel:
         max_goals = 10
@@ -996,7 +1016,7 @@ def test_verified_local_rows_wait_until_result_is_available(tmp_path, monkeypatc
     from src.web import mundial_services as services
 
     worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
-    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 13, 23, 0, tzinfo=timezone.utc))
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 13, 21, 30, tzinfo=timezone.utc))
     pd.DataFrame(columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
     tournament = {
         "matches": [
@@ -1175,7 +1195,9 @@ def test_worldcup_ui_keeps_fixture_prediction_probability_labels():
     assert "modelOutcomeProbabilitiesHtml" in source
     assert "Probabilidades 1X2 por modelo" in source
     assert "modelOverUnderProbabilitiesHtml" in source
-    assert "Over ${escapeHtml(formatProbability(over))}%" in source
+    assert "future-total-cards" in source
+    assert "O ${escapeHtml(formatProbability(over))}%" in source
+    assert "U ${escapeHtml(formatProbability(under))}%" in source
 
 
 def test_consensus_rounding_signature_and_strength_levels():

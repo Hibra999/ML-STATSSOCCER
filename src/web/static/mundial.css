@@ -1967,6 +1967,189 @@ h3 { font-size: 16px; }
   border-color: #d7e6ef;
   background: #f5f9fb;
 }
+.future-prediction-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #d4e3e1;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fbfdfc 0%, #f3f8f6 100%);
+}
+.future-prediction-panel > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: 12px;
+}
+.future-prediction-panel > header strong {
+  color: var(--ink);
+}
+.future-prediction-panel.unavailable {
+  background: #fff8f0;
+  border-color: #ead8bd;
+}
+.future-pick-ribbon {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #b9ddd1;
+  border-radius: 8px;
+  background: #e9f6f1;
+}
+.future-pick-ribbon span,
+.future-pick-ribbon small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.future-pick-ribbon strong {
+  color: var(--green);
+  font-size: 20px;
+  line-height: 1.12;
+  overflow-wrap: anywhere;
+}
+.future-outcome-bars {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.future-outcome-bars > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.future-outcome-bars > div.active {
+  border-color: #9ed1ba;
+  background: #eef7f2;
+}
+.future-outcome-bars span {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: #edf2f4;
+  color: var(--muted);
+  font-weight: 900;
+}
+.future-outcome-bars > div.active span {
+  background: var(--green);
+  color: #fff;
+}
+.future-outcome-bars strong {
+  color: var(--ink);
+  font-size: 18px;
+}
+.future-outcome-bars small {
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.future-outcome-bars i,
+.future-total-cards i {
+  display: flex;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e9eef1;
+}
+.future-outcome-bars i b {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+}
+.future-total-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.future-total-cards > div {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid #d7e6ef;
+  border-radius: 8px;
+  background: #f7fafb;
+}
+.future-total-cards > div.over {
+  border-color: #b9ddd1;
+  background: #f0f8f4;
+}
+.future-total-cards header {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+.future-total-cards header strong {
+  color: var(--ink);
+}
+.future-total-cards i b,
+.future-total-cards i em {
+  display: block;
+  height: 100%;
+}
+.future-total-cards i b {
+  background: var(--green);
+}
+.future-total-cards i em {
+  background: #8aa6b2;
+}
+.future-total-cards small {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.future-total-cards small b {
+  color: var(--ink);
+}
+.future-score-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 7px;
+}
+.future-score-strip span {
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.future-score-strip span.primary {
+  border-color: #b9ddd1;
+  background: #eef7f2;
+}
+.future-score-strip small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+.future-score-strip strong {
+  color: var(--ink);
+  font-size: 17px;
+}
+.future-score-strip b {
+  color: var(--green);
+  font-size: 12px;
+}
 .benchmark-bar-list {
   display: grid;
   gap: 8px;
@@ -2880,6 +3063,7 @@ th {
   .feature-bar,
   .recent15-columns,
   .model-total-probabilities,
+  .future-total-cards,
   .context-totals {
     grid-template-columns: 1fr;
   }
@@ -2893,6 +3077,9 @@ th {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .top-scores.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .future-score-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .match-team,

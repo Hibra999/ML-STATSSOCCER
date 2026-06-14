@@ -705,18 +705,26 @@ function topRankedFixturePickHtml(model, fixture) {
   const probs = item.probabilities || {};
   const topScores = item.top_scores || [];
   const decision = item.decision || {};
+  const activeOutcome = decision.outcome || strongestOutcomeFromProbabilities(probs);
+  const pickLabel = decision.label || outcomeLabel(activeOutcome) || "-";
+  const pickTeam = activeOutcome === "draw" ? "Empate" : activeOutcome === "home" ? (fixture || {}).home : activeOutcome === "away" ? (fixture || {}).away : "-";
+  const confidence = Math.max(Number(probs.home || 0), Number(probs.draw || 0), Number(probs.away || 0));
+  const topScore = topScores[0] || {};
   if (item.available === false) {
-    return `<section class="report-panel top-ranked-pick">
+    return `<section class="future-prediction-panel top-ranked-pick unavailable">
       <header><strong>Distribuciones</strong><small>${escapeHtml(item.reason || "Modelo no disponible para este fixture")}</small></header>
     </section>`;
   }
-  return `<section class="report-panel top-ranked-pick">
-    <header><strong>Distribución 1/X/2</strong><small>U/O 0.5-3.5 y marcadores probables</small></header>
-    ${modelOutcomeProbabilitiesHtml(probs, decision.outcome, fixture)}
-    ${modelOverUnderProbabilitiesHtml(probs, item.totals || {})}
-    <div class="top-scores compact">
-      ${topScores.slice(0, 5).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
+  return `<section class="future-prediction-panel top-ranked-pick">
+    <header><strong>Pronóstico visual</strong><small>${escapeHtml(item.model_label || item.model_key || "Modelo #1")}</small></header>
+    <div class="future-pick-ribbon">
+      <span>Pick 1X2</span>
+      <strong>${escapeHtml(pickLabel)} · ${escapeHtml(pickTeam || "-")}</strong>
+      <small>${escapeHtml(formatProbability(confidence))}% · marcador #1 ${escapeHtml(topScore.score || "-")}</small>
     </div>
+    ${modelOutcomeProbabilitiesHtml(probs, activeOutcome, fixture)}
+    ${modelOverUnderProbabilitiesHtml(probs, item.totals || {})}
+    ${futureTopScoresHtml(topScores)}
   </section>`;
 }
 
@@ -727,11 +735,16 @@ function modelOutcomeProbabilitiesHtml(probabilities, activeOutcome, fixture) {
     { key: "draw", label: "X", team: "Empate" },
     { key: "away", label: "2", team: (fixture || {}).away || "Visitante" },
   ];
-  return `<div class="model-probability-strip model-outcome-probabilities" aria-label="Probabilidades 1X2 por modelo">
+  return `<div class="future-outcome-bars model-outcome-probabilities" aria-label="Probabilidades 1X2 por modelo">
     ${labels.map((item) => {
       const value = probs[item.key];
       const active = activeOutcome === item.key;
-      return `<span class="${escapeAttr(active ? "active" : "")}"><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.team)} · ${escapeHtml(formatProbability(value))}%</small></span>`;
+      return `<div class="${escapeAttr(active ? "active" : "")}">
+        <span>${escapeHtml(item.label)}</span>
+        <strong>${escapeHtml(formatProbability(value))}%</strong>
+        <small>${escapeHtml(item.team)}</small>
+        <i><b style="width:${escapeAttr(clampPercent(value))}%"></b></i>
+      </div>`;
     }).join("")}
   </div>`;
 }
@@ -739,15 +752,29 @@ function modelOutcomeProbabilitiesHtml(probabilities, activeOutcome, fixture) {
 function modelOverUnderProbabilitiesHtml(probabilities, totals) {
   const probs = probabilities || {};
   const picks = totals || {};
-  return `<div class="model-probability-strip model-total-probabilities" aria-label="Over under por modelo">
+  return `<div class="future-total-cards model-total-probabilities" aria-label="Over under por modelo">
     ${goalMarketLines.map((line) => {
       const lineKey = line.label.replace("U/O ", "");
       const over = Number(probs[line.over]);
       const under = Number(probs[line.under]);
       const pick = picks[lineKey] || (over >= under ? "over" : "under");
       const pickLabel = pick === "over" ? "Over" : "Under";
-      return `<span class="${escapeAttr(pick)}"><b>${escapeHtml(line.label)} · ${escapeHtml(pickLabel)}</b><small>Over ${escapeHtml(formatProbability(over))}% / Under ${escapeHtml(formatProbability(under))}%</small></span>`;
+      const overWidth = clampPercent(over);
+      const underWidth = clampPercent(under);
+      return `<div class="${escapeAttr(pick)}">
+        <header><span>${escapeHtml(line.label)}</span><strong>${escapeHtml(pickLabel)}</strong></header>
+        <i><b style="width:${escapeAttr(overWidth)}%"></b><em style="width:${escapeAttr(underWidth)}%"></em></i>
+        <small><b>O ${escapeHtml(formatProbability(over))}%</b><b>U ${escapeHtml(formatProbability(under))}%</b></small>
+      </div>`;
     }).join("")}
+  </div>`;
+}
+
+function futureTopScoresHtml(topScores) {
+  const scores = topScores || [];
+  if (!scores.length) return "";
+  return `<div class="future-score-strip" aria-label="Marcadores más probables">
+    ${scores.slice(0, 5).map((score, index) => `<span class="${escapeAttr(index === 0 ? "primary" : "")}"><small>#${escapeHtml(index + 1)}</small><strong>${escapeHtml(score.score || "-")}</strong><b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
   </div>`;
 }
 

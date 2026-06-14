@@ -376,6 +376,11 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Backtest: predicción vs resultado" in app_source
     assert "backtestPredictionReviewHtml" in app_source
     assert "backtestMatchCardHtml" in app_source
+    assert "future-prediction-panel" in app_source
+    assert "future-pick-ribbon" in app_source
+    assert "future-outcome-bars" in app_source
+    assert "future-total-cards" in app_source
+    assert "future-score-strip" in app_source
     assert "U/O 2.5" in app_source
     assert "finalizados detectados" in app_source
     assert "upcoming-benchmark-tuning-enabled" in html_source
