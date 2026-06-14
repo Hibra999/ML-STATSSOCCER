@@ -1225,6 +1225,7 @@ def evaluate_score_model_walk_forward_2026(
 ) -> Dict[str, Any]:
     totals = empty_backtest_totals()
     sample_rows: List[Dict[str, Any]] = []
+    match_rows: List[Dict[str, Any]] = []
     warnings: List[str] = []
     model_available = True
     for fixture_index, (_, eval_row) in enumerate(confirmed_df.iterrows(), start=1):
@@ -1289,6 +1290,7 @@ def evaluate_score_model_walk_forward_2026(
         if not row_metrics:
             continue
         accumulate_backtest_totals(totals, row_metrics)
+        match_rows.append(row_metrics["sample"])
         if len(sample_rows) < 8:
             sample_rows.append(row_metrics["sample"])
         if not bool(metadata.get("available", True)):
@@ -1306,6 +1308,9 @@ def evaluate_score_model_walk_forward_2026(
         "score_log_loss": round(float(totals["score_log_loss"]) / evaluated, 6),
         "pick_accuracy": round(float(totals["pick_hits"]) / evaluated, 6),
         "score_accuracy": round(float(totals["score_hits"]) / evaluated, 6),
+        "over_under_accuracy": round(float(totals["over_under_hits"]) / max(int(totals["over_under_total"]), 1), 6),
+        "over_under_accuracy_by_line": over_under_accuracy_by_line(totals),
+        "matches": match_rows,
         "sample": sample_rows,
     }
 
@@ -1416,11 +1421,13 @@ def evaluate_score_model_backtest(
 ) -> Dict[str, Any]:
     totals = empty_backtest_totals()
     sample_rows: List[Dict[str, Any]] = []
+    match_rows: List[Dict[str, Any]] = []
     for _, row in holdout_df.iterrows():
         row_metrics = score_model_backtest_prediction(model, row, config)
         if not row_metrics:
             continue
         accumulate_backtest_totals(totals, row_metrics)
+        match_rows.append(row_metrics["sample"])
         if len(sample_rows) < 8:
             sample_rows.append(row_metrics["sample"])
     evaluated = max(int(totals["evaluated"]), 1)
@@ -1435,6 +1442,9 @@ def evaluate_score_model_backtest(
         "score_log_loss": round(float(totals["score_log_loss"]) / evaluated, 6),
         "pick_accuracy": round(float(totals["pick_hits"]) / evaluated, 6),
         "score_accuracy": round(float(totals["score_hits"]) / evaluated, 6),
+        "over_under_accuracy": round(float(totals["over_under_hits"]) / max(int(totals["over_under_total"]), 1), 6),
+        "over_under_accuracy_by_line": over_under_accuracy_by_line(totals),
+        "matches": match_rows,
         "sample": sample_rows,
     }
 
@@ -1446,6 +1456,9 @@ def empty_backtest_totals() -> Dict[str, Any]:
         "score_log_loss": 0.0,
         "pick_hits": 0,
         "score_hits": 0,
+        "over_under_hits": 0,
+        "over_under_total": 0,
+        "over_under_by_line": {f"{line:.1f}": {"hits": 0, "total": 0} for line in REPORT_TOTAL_GOAL_LINES},
         "evaluated": 0,
     }
 
@@ -1472,6 +1485,7 @@ def score_model_backtest_prediction(model: Any, row: pd.Series | Dict[str, Any],
         "away": float_or_zero(probabilities.get("away")),
     }
     pick = outcome_decision(outcome_probabilities)
+    total_goals = actual_home + actual_away
     grid = model_score_grid_for_fixture(
         model=model,
         home=str(fixture.get("Equipo 1", "")),
@@ -1484,21 +1498,34 @@ def score_model_backtest_prediction(model: Any, row: pd.Series | Dict[str, Any],
     modal_index = int(np.argmax(grid))
     modal_home, modal_away = np.unravel_index(modal_index, grid.shape)
     score_probability = score_grid_actual_probability(grid, actual_home, actual_away)
+    over_under_rows = backtest_over_under_rows(probabilities, total_goals)
     return {
         "log_loss": -math.log(max(outcome_probabilities.get(actual_outcome, 0.0), 1e-12)),
         "brier": multiclass_brier_score(outcome_probabilities, actual_outcome),
         "score_log_loss": -math.log(max(score_probability, 1e-12)),
         "pick_hit": 1 if pick == actual_outcome else 0,
         "score_hit": 1 if int(modal_home) == actual_home and int(modal_away) == actual_away else 0,
+        "over_under": over_under_rows,
         "sample": {
+            "fixture_id": str(row.get("No.", "")),
             "date": str(row.get("Date", "")),
             "match": f"{fixture.get('Equipo 1', '')} vs {fixture.get('Equipo 2', '')}",
             "actual_score": f"{actual_home}-{actual_away}",
+            "total_goals": int(total_goals),
             "pick": outcome_label(pick),
+            "pick_key": pick,
             "actual_pick": outcome_label(actual_outcome),
+            "actual_pick_key": actual_outcome,
+            "pick_hit": bool(pick == actual_outcome),
             "modal_score": f"{int(modal_home)}-{int(modal_away)}",
             "actual_probability": round(outcome_probabilities.get(actual_outcome, 0.0) * 100.0, 3),
             "score_probability": round(score_probability * 100.0, 3),
+            "probabilities": {
+                "home": round(outcome_probabilities["home"] * 100.0, 3),
+                "draw": round(outcome_probabilities["draw"] * 100.0, 3),
+                "away": round(outcome_probabilities["away"] * 100.0, 3),
+            },
+            "over_under": over_under_rows,
         },
     }
 
@@ -1509,7 +1536,44 @@ def accumulate_backtest_totals(totals: Dict[str, Any], row_metrics: Dict[str, An
     totals["score_log_loss"] += float_or_zero(row_metrics.get("score_log_loss"))
     totals["pick_hits"] += int(row_metrics.get("pick_hit") or 0)
     totals["score_hits"] += int(row_metrics.get("score_hit") or 0)
+    for item in row_metrics.get("over_under", []) or []:
+        line_key = str(item.get("line") or "")
+        totals["over_under_total"] += 1
+        totals["over_under_hits"] += 1 if item.get("hit") else 0
+        line_totals = totals["over_under_by_line"].setdefault(line_key, {"hits": 0, "total": 0})
+        line_totals["total"] += 1
+        line_totals["hits"] += 1 if item.get("hit") else 0
     totals["evaluated"] += 1
+
+
+def backtest_over_under_rows(probabilities: Dict[str, Any], total_goals: int) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for line in REPORT_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        over_probability = float_or_zero(probabilities.get(f"over{suffix}"))
+        under_probability = float_or_zero(probabilities.get(f"under{suffix}"))
+        predicted = "over" if over_probability >= under_probability else "under"
+        actual = "over" if int(total_goals) > float(line) else "under"
+        rows.append({
+            "line": f"{line:.1f}",
+            "prediction": predicted,
+            "prediction_label": "Over" if predicted == "over" else "Under",
+            "actual": actual,
+            "actual_label": "Over" if actual == "over" else "Under",
+            "hit": predicted == actual,
+            "over_probability": round(over_probability * 100.0, 3),
+            "under_probability": round(under_probability * 100.0, 3),
+            "confidence": round(max(over_probability, under_probability) * 100.0, 3),
+        })
+    return rows
+
+
+def over_under_accuracy_by_line(totals: Dict[str, Any]) -> Dict[str, float]:
+    output: Dict[str, float] = {}
+    for line, values in (totals.get("over_under_by_line") or {}).items():
+        total = max(int(values.get("total") or 0), 1)
+        output[str(line)] = round(float(values.get("hits") or 0) / total, 6)
+    return output
 
 
 def compare_backtest_to_baseline(metrics: Dict[str, Any], baseline: Dict[str, Any]) -> Dict[str, Any]:

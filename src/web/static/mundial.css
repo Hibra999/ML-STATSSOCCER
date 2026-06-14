@@ -1867,6 +1867,9 @@ h3 { font-size: 16px; }
   min-width: 980px;
   border-collapse: collapse;
 }
+.backtest-match-table table {
+  min-width: 1180px;
+}
 .alternatives-backtest-table th,
 .alternatives-backtest-table td {
   padding: 8px;
@@ -1878,6 +1881,27 @@ h3 { font-size: 16px; }
 .alternatives-backtest-table th {
   color: var(--muted);
   font-weight: 800;
+}
+.backtest-result-cell {
+  display: grid;
+  gap: 2px;
+  min-width: 92px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  background: #f7eded;
+  color: #9a3b3b;
+}
+.backtest-result-cell.hit {
+  background: #eef7f2;
+  color: var(--green);
+}
+.backtest-result-cell b {
+  font-size: 12px;
+}
+.backtest-result-cell small {
+  color: inherit;
+  font-size: 11px;
+  opacity: 0.82;
 }
 .reliability-badge {
   display: inline-flex;

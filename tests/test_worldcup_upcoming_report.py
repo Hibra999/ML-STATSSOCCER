@@ -230,6 +230,15 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert all("consensus_eligible" not in model and "signature" not in model for model in fixture_report["models"])
     assert len(result["model_backtests"]) == len(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
     assert [item["rank"] for item in result["model_backtests"]] == list(range(1, len(services.BENCHMARK_SCORE_MODEL_SEQUENCE) + 1))
+    assert all(len(item["matches"]) == 3 for item in result["model_backtests"])
+    assert all("over_under_accuracy" in item for item in result["model_backtests"])
+    first_backtest_row = result["model_backtests"][0]["matches"][0]
+    assert first_backtest_row["pick"] in {"1", "X", "2"}
+    assert first_backtest_row["actual_pick"] in {"1", "X", "2"}
+    assert isinstance(first_backtest_row["pick_hit"], bool)
+    assert [item["line"] for item in first_backtest_row["over_under"]] == ["0.5", "1.5", "2.5", "3.5"]
+    assert all(item["prediction_label"] in {"Over", "Under"} for item in first_backtest_row["over_under"])
+    assert all(item["actual_label"] in {"Over", "Under"} for item in first_backtest_row["over_under"])
     assert result["best_model"]["model_key"] == result["model_backtests"][0]["model_key"]
     assert result["best_model"]["model_key"] in services.BENCHMARK_SCORE_MODEL_SEQUENCE
     assert result["table"]["total"] == len(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
@@ -338,6 +347,11 @@ def test_alternatives_backtest_auto_uses_confirmed_2026_walk_forward_without_lea
     assert train_snapshots[2][train_snapshots[2]["Year"].eq(2026)]["Team 1"].tolist() == ["Argentina", "Brazil"]
     assert "France" not in train_snapshots[2][train_snapshots[2]["Year"].eq(2026)].tail(1)["Team 1"].tolist()
     assert result["models"][0]["evaluated_matches"] == 3
+    assert result["models"][0]["over_under_accuracy"] == 0.833333
+    assert result["models"][0]["over_under_accuracy_by_line"]["0.5"] == 1.0
+    assert len(result["models"][0]["matches"]) == 3
+    assert result["models"][0]["matches"][0]["pick_hit"] is True
+    assert result["models"][0]["matches"][0]["over_under"][0]["hit"] is True
     assert result["models"][0]["rank"] == 1
 
 

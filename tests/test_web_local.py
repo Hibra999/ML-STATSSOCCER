@@ -374,6 +374,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "data-countdown-target" in app_source
     assert "En curso" in app_source
     assert "Horario pendiente" in app_source
+    assert "Backtest: predicción vs resultado" in app_source
+    assert "backtestPredictionReviewHtml" in app_source
+    assert "U/O 2.5" in app_source
     assert "Backtest N" not in html_source
     assert "upcoming-backtest-last-n" not in html_source
     assert "upcoming-backtest-last-n" not in app_source
