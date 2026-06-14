@@ -98,6 +98,8 @@ REPORT_SCORE_MATRIX_GOALS = 6
 REPORT_MAX_ITERATIONS = 100_000
 REPORT_DOWNLOAD_KINDS = {"predictions", "backtest"}
 REPORT_DOWNLOAD_FORMATS = {"html", "csv"}
+OUTCOME_KEYS = ("home", "draw", "away")
+CALIBRATION_BIN_COUNT = 10
 DEFAULT_CONFIG = {
     "iterations": 5000,
     "seed": 2026,
@@ -983,7 +985,7 @@ def alternatives_benchmark_report(
     fixture_reports = rank_fixture_report_models(fixture_reports, ranked_model_keys)
     for fixture_report, fixture in zip(fixture_reports, fixture_records):
         fixture_report["baseline_poisson"] = poisson_baseline_report_for_fixture(base_model, fixture, config)
-        fixture_report["ensemble"] = backtest_weighted_ensemble_report(fixture_report, backtest_by_key)
+        fixture_report["primary_model"] = primary_model_for_fixture(fixture_report, best_model, backtest_by_key)
         strip_consensus_fields_from_alternative_report(fixture_report)
         fixture_report["warnings"] = fixture_report_warnings(fixture_report)
     ranked_models = benchmark_models_with_backtests(backtests)
@@ -1044,6 +1046,7 @@ def alternatives_benchmark_report(
         "config": config,
         "best_model": best_model,
         "backtest": backtest_summary,
+        "feature_research": worldcup_feature_research_summary(),
     }
     report = persist_upcoming_report({
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1051,6 +1054,7 @@ def alternatives_benchmark_report(
         "alternatives": alternatives,
         "ranked_models": ranked_models,
         "baseline_context": sota_baseline_context(),
+        "feature_research": summary["feature_research"],
         "baseline": summary["baseline_model"],
         "fixture_reports": fixture_reports,
         "model_backtests": backtests,
@@ -1464,20 +1468,13 @@ def evaluate_score_model_walk_forward_2026(
         if not bool(metadata.get("available", True)):
             model_available = False
             warnings.extend(str(item) for item in metadata.get("warnings", []) if str(item))
-    evaluated = max(int(totals["evaluated"]), 1)
     return {
         "model_key": str(model_key),
         "model_label": score_model_display_label(model_key),
         "available": bool(model_available) and totals["evaluated"] > 0,
         "warnings": unique_strings(warnings),
         "evaluated_matches": int(totals["evaluated"]),
-        "log_loss": round(float(totals["log_loss"]) / evaluated, 6),
-        "brier": round(float(totals["brier"]) / evaluated, 6),
-        "score_log_loss": round(float(totals["score_log_loss"]) / evaluated, 6),
-        "pick_accuracy": round(float(totals["pick_hits"]) / evaluated, 6),
-        "score_accuracy": round(float(totals["score_hits"]) / evaluated, 6),
-        "over_under_accuracy": round(float(totals["over_under_hits"]) / max(int(totals["over_under_total"]), 1), 6),
-        "over_under_accuracy_by_line": over_under_accuracy_by_line(totals),
+        **backtest_metric_summary(totals),
         "matches": match_rows,
         "sample": sample_rows,
     }
@@ -1490,10 +1487,11 @@ def rank_backtest_models(models: List[Dict[str, Any]], summary: Dict[str, Any]) 
         key=lambda pair: (
             0 if pair[1].get("available") else 1,
             float_or_zero(pair[1].get("log_loss")) if pair[1].get("available") else float("inf"),
-            -float_or_zero(pair[1].get("score_accuracy")),
+            float_or_zero(pair[1].get("rps")) if pair[1].get("available") else float("inf"),
+            float_or_zero(pair[1].get("expected_calibration_error")) if pair[1].get("available") else float("inf"),
             float_or_zero(pair[1].get("brier")) if pair[1].get("available") else float("inf"),
-            -float_or_zero(pair[1].get("pick_accuracy")),
-            float_or_zero(pair[1].get("score_log_loss")) if pair[1].get("available") else float("inf"),
+            -float_or_zero(pair[1].get("top3_score_accuracy")),
+            float_or_zero(pair[1].get("ou25_log_loss")) if pair[1].get("available") else float("inf"),
             pair[0],
         ),
     )
@@ -1505,8 +1503,8 @@ def rank_backtest_models(models: List[Dict[str, Any]], summary: Dict[str, Any]) 
         payload["reliability_score"] = round(100.0 * (total - rank + 1) / total, 2) if payload.get("available") else 0.0
         payload["ranking_metric"] = "log_loss"
         payload["ranking_reason"] = (
-            "Ordenado por menor log-loss; desempates: mayor acierto de marcador exacto, "
-            "menor Brier, mayor acierto 1X2 y menor score-log-loss."
+            "Ordenado por menor log-loss; desempates: menor RPS, menor ECE, menor Brier, "
+            "mayor top-3 marcador y menor log-loss U/O 2.5."
         )
         payload["holdout_start"] = summary.get("holdout_start", "")
         payload["holdout_end"] = summary.get("holdout_end", "")
@@ -1527,112 +1525,38 @@ def rank_fixture_report_models(fixture_reports: List[Dict[str, Any]], ranked_mod
     return output
 
 
-def backtest_weighted_ensemble_report(fixture_report: Dict[str, Any], backtest_by_key: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    candidates: List[Dict[str, Any]] = []
-    raw_weights: List[float] = []
-    for model in fixture_report.get("models", []) or []:
-        key = str(model.get("model_key") or "")
-        backtest = backtest_by_key.get(key, {})
-        if not model.get("available") or model.get("fallback") or not backtest.get("available"):
-            continue
-        distribution = model.get("score_distribution") or {}
-        matrix = distribution.get("score_matrix")
-        if not matrix:
-            continue
-        grid = normalize_score_grid_array(np.asarray(matrix, dtype=float) / 100.0)
-        weight = backtest_model_weight(backtest)
-        if weight <= 0.0:
-            continue
-        candidates.append({
-            "model": model,
-            "backtest": backtest,
-            "grid": grid,
-            "weight": weight,
-        })
-        raw_weights.append(weight)
-    if not candidates:
+def primary_model_for_fixture(
+        fixture_report: Dict[str, Any],
+        best_model: Dict[str, Any],
+        backtest_by_key: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    best_key = str(best_model.get("model_key") or "")
+    if not best_key or not best_model.get("available"):
         return {
             "available": False,
-            "model_key": "backtest_weighted_ensemble",
-            "model_label": "Ensemble ponderado",
-            "reason": "Sin modelos disponibles con backtest valido para ponderar.",
-            "weights": [],
+            "model_key": best_key,
+            "model_label": best_model.get("model_label", ""),
+            "reason": best_model.get("reason", "Sin modelo #1 disponible para este fixture."),
+            "selection_policy": "Solo se publica el modelo #1 cuando existe backtest valido.",
         }
-    total_weight = max(float(sum(raw_weights)), 1e-12)
-    normalized_weights = [weight / total_weight for weight in raw_weights]
-    rows = min(item["grid"].shape[0] for item in candidates)
-    cols = min(item["grid"].shape[1] for item in candidates)
-    stacked = np.stack([item["grid"][:rows, :cols] for item in candidates], axis=0)
-    weight_array = np.asarray(normalized_weights, dtype=float).reshape((-1, 1, 1))
-    ensemble_grid = normalize_score_grid_array(np.sum(stacked * weight_array, axis=0))
-    lambda_home_values: List[float] = []
-    lambda_away_values: List[float] = []
-    for item in candidates:
-        distribution = (item["model"].get("score_distribution") or {})
-        lambdas = distribution.get("lambdas") or item["model"].get("expected_goals") or {}
-        lambda_home_values.append(float_or_zero(lambdas.get("home")))
-        lambda_away_values.append(float_or_zero(lambdas.get("away")))
-    lambda_home = float(np.average(lambda_home_values, weights=normalized_weights)) if lambda_home_values else 0.0
-    lambda_away = float(np.average(lambda_away_values, weights=normalized_weights)) if lambda_away_values else 0.0
-    distribution = score_distribution_payload(ensemble_grid, lambda_home=lambda_home, lambda_away=lambda_away)
-    probabilities = distribution.get("probabilities") or {}
-    outcome = outcome_decision(probabilities)
-    totals = total_decisions(probabilities)
-    fixture = fixture_report.get("fixture", {})
-    top_scores = distribution.get("top_scores", [])
-    top_score = str((top_scores[0] or {}).get("score") or "") if top_scores else ""
-    weights = []
-    for item, weight in zip(candidates, normalized_weights):
-        backtest = item["backtest"]
-        weights.append({
-            "model_key": item["model"].get("model_key", ""),
-            "model_label": item["model"].get("model_label", ""),
-            "weight": round(float(weight), 6),
-            "rank": backtest.get("rank", ""),
-            "log_loss": backtest.get("log_loss", ""),
-            "brier": backtest.get("brier", ""),
-            "pick_accuracy": backtest.get("pick_accuracy", ""),
-            "score_accuracy": backtest.get("score_accuracy", ""),
-        })
+    for model in fixture_report.get("models", []) or []:
+        if str(model.get("model_key") or "") != best_key:
+            continue
+        backtest = backtest_by_key.get(best_key, {})
+        primary = dict(model)
+        primary["primary"] = True
+        primary["rank"] = backtest.get("rank", best_model.get("rank", 1))
+        primary["backtest"] = backtest
+        primary["selection_policy"] = "Prediccion principal tomada solo del modelo #1 del backtesting; no se pondera con otros modelos."
+        return primary
     return {
-        "available": True,
-        "model_key": "backtest_weighted_ensemble",
-        "model_label": "Ensemble ponderado por backtest",
-        "source": "Matriz ponderada por desempeno walk-forward 2026",
-        "model_count": len(candidates),
-        "decision": {
-            "outcome": outcome,
-            "label": outcome_label(outcome),
-            "team": outcome_team(outcome, fixture),
-        },
-        "totals": totals,
-        "probabilities": probabilities,
-        "expected_goals": {
-            "home": round(lambda_home, 3),
-            "away": round(lambda_away, 3),
-            "rounded_home": round_half_up_int(lambda_home),
-            "rounded_away": round_half_up_int(lambda_away),
-        },
-        "top_score": top_score,
-        "modal_score": top_score,
-        "score_distribution": distribution,
-        "top_scores": top_scores,
-        "heatmap": distribution.get("heatmap", {}),
-        "weights": weights,
+        "available": False,
+        "model_key": best_key,
+        "model_label": best_model.get("model_label", best_key),
+        "reason": "El modelo #1 del backtesting no genero prediccion para este fixture.",
+        "selection_policy": "Sin fallback silencioso: si el modelo #1 no esta disponible, la prediccion principal queda no disponible.",
+        "backtest": backtest_by_key.get(best_key, best_model),
     }
-
-
-def backtest_model_weight(backtest: Dict[str, Any]) -> float:
-    if not backtest.get("available"):
-        return 0.0
-    log_loss = max(float_or_zero(backtest.get("log_loss")), 0.05)
-    brier = max(float_or_zero(backtest.get("brier")), 0.05)
-    pick_accuracy = float_or_zero(backtest.get("pick_accuracy"))
-    score_accuracy = float_or_zero(backtest.get("score_accuracy"))
-    vs_poisson = backtest.get("vs_poisson") or {}
-    metric_wins = float_or_zero(vs_poisson.get("metric_wins")) / max(float_or_zero(vs_poisson.get("metric_total")), 1.0)
-    raw = (1.0 / log_loss) * (1.0 / math.sqrt(brier)) * (0.5 + pick_accuracy) * (0.5 + score_accuracy) * (1.0 + metric_wins)
-    return float(max(raw, 0.0))
 
 
 def benchmark_models_with_backtests(backtests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1706,20 +1630,13 @@ def evaluate_score_model_backtest(
         match_rows.append(row_metrics["sample"])
         if len(sample_rows) < 8:
             sample_rows.append(row_metrics["sample"])
-    evaluated = max(int(totals["evaluated"]), 1)
     return {
         "model_key": str(model_key),
         "model_label": str(metadata.get("label") or score_model_display_label(model_key)),
         "available": bool(metadata.get("available", True)) and totals["evaluated"] > 0,
         "warnings": [str(item) for item in metadata.get("warnings", []) if str(item)],
         "evaluated_matches": int(totals["evaluated"]),
-        "log_loss": round(float(totals["log_loss"]) / evaluated, 6),
-        "brier": round(float(totals["brier"]) / evaluated, 6),
-        "score_log_loss": round(float(totals["score_log_loss"]) / evaluated, 6),
-        "pick_accuracy": round(float(totals["pick_hits"]) / evaluated, 6),
-        "score_accuracy": round(float(totals["score_hits"]) / evaluated, 6),
-        "over_under_accuracy": round(float(totals["over_under_hits"]) / max(int(totals["over_under_total"]), 1), 6),
-        "over_under_accuracy_by_line": over_under_accuracy_by_line(totals),
+        **backtest_metric_summary(totals),
         "matches": match_rows,
         "sample": sample_rows,
     }
@@ -1730,13 +1647,166 @@ def empty_backtest_totals() -> Dict[str, Any]:
         "log_loss": 0.0,
         "brier": 0.0,
         "score_log_loss": 0.0,
+        "rps": 0.0,
+        "entropy": 0.0,
+        "sharpness": 0.0,
         "pick_hits": 0,
         "score_hits": 0,
+        "top3_score_hits": 0,
+        "top5_score_hits": 0,
+        "home_goals_abs_error": 0.0,
+        "away_goals_abs_error": 0.0,
+        "total_goals_abs_error": 0.0,
+        "margin_abs_error": 0.0,
+        "home_goals_squared_error": 0.0,
+        "away_goals_squared_error": 0.0,
+        "total_goals_squared_error": 0.0,
+        "margin_squared_error": 0.0,
         "over_under_hits": 0,
         "over_under_total": 0,
-        "over_under_by_line": {f"{line:.1f}": {"hits": 0, "total": 0} for line in REPORT_TOTAL_GOAL_LINES},
+        "over_under_by_line": {
+            f"{line:.1f}": {"hits": 0, "total": 0, "log_loss": 0.0, "brier": 0.0}
+            for line in REPORT_TOTAL_GOAL_LINES
+        },
+        "calibration_bins": [
+            {"count": 0, "confidence_sum": 0.0, "correct_sum": 0.0}
+            for _ in range(CALIBRATION_BIN_COUNT)
+        ],
+        "confusion_matrix": {
+            actual: {predicted: 0 for predicted in OUTCOME_KEYS}
+            for actual in OUTCOME_KEYS
+        },
         "evaluated": 0,
     }
+
+
+def backtest_metric_summary(totals: Dict[str, Any]) -> Dict[str, Any]:
+    evaluated = max(int(totals.get("evaluated") or 0), 1)
+    calibration = calibration_metrics(totals)
+    class_metrics = classification_metrics(totals)
+    over_under_metrics = over_under_metrics_by_line(totals)
+    ou25 = over_under_metrics.get("2.5", {})
+    return {
+        "log_loss": round(float(totals["log_loss"]) / evaluated, 6),
+        "brier": round(float(totals["brier"]) / evaluated, 6),
+        "score_log_loss": round(float(totals["score_log_loss"]) / evaluated, 6),
+        "rps": round(float(totals["rps"]) / evaluated, 6),
+        "entropy": round(float(totals["entropy"]) / evaluated, 6),
+        "sharpness": round(float(totals["sharpness"]) / evaluated, 6),
+        "expected_calibration_error": calibration["expected_calibration_error"],
+        "max_calibration_error": calibration["max_calibration_error"],
+        "calibration_bins": calibration["bins"],
+        "pick_accuracy": round(float(totals["pick_hits"]) / evaluated, 6),
+        "score_accuracy": round(float(totals["score_hits"]) / evaluated, 6),
+        "top3_score_accuracy": round(float(totals["top3_score_hits"]) / evaluated, 6),
+        "top5_score_accuracy": round(float(totals["top5_score_hits"]) / evaluated, 6),
+        "home_goals_mae": round(float(totals["home_goals_abs_error"]) / evaluated, 6),
+        "away_goals_mae": round(float(totals["away_goals_abs_error"]) / evaluated, 6),
+        "total_goals_mae": round(float(totals["total_goals_abs_error"]) / evaluated, 6),
+        "margin_mae": round(float(totals["margin_abs_error"]) / evaluated, 6),
+        "home_goals_rmse": round(math.sqrt(float(totals["home_goals_squared_error"]) / evaluated), 6),
+        "away_goals_rmse": round(math.sqrt(float(totals["away_goals_squared_error"]) / evaluated), 6),
+        "total_goals_rmse": round(math.sqrt(float(totals["total_goals_squared_error"]) / evaluated), 6),
+        "margin_rmse": round(math.sqrt(float(totals["margin_squared_error"]) / evaluated), 6),
+        "over_under_accuracy": round(float(totals["over_under_hits"]) / max(int(totals["over_under_total"]), 1), 6),
+        "over_under_accuracy_by_line": over_under_accuracy_by_line(totals),
+        "over_under_metrics_by_line": over_under_metrics,
+        "ou25_log_loss": ou25.get("log_loss", 0.0),
+        "ou25_brier": ou25.get("brier", 0.0),
+        "confusion_matrix": totals.get("confusion_matrix", {}),
+        "class_metrics": class_metrics["by_class"],
+        "macro_f1": class_metrics["macro_f1"],
+        "balanced_accuracy": class_metrics["balanced_accuracy"],
+    }
+
+
+def calibration_metrics(totals: Dict[str, Any]) -> Dict[str, Any]:
+    bins = []
+    total = max(int(totals.get("evaluated") or 0), 1)
+    ece = 0.0
+    mce = 0.0
+    for index, item in enumerate(totals.get("calibration_bins") or []):
+        count = int(item.get("count") or 0)
+        confidence = float(item.get("confidence_sum") or 0.0) / count if count else 0.0
+        accuracy = float(item.get("correct_sum") or 0.0) / count if count else 0.0
+        gap = abs(accuracy - confidence) if count else 0.0
+        ece += (count / total) * gap
+        mce = max(mce, gap)
+        bins.append({
+            "bin": index + 1,
+            "min_confidence": round(index / CALIBRATION_BIN_COUNT, 3),
+            "max_confidence": round((index + 1) / CALIBRATION_BIN_COUNT, 3),
+            "count": count,
+            "confidence": round(confidence, 6),
+            "accuracy": round(accuracy, 6),
+            "gap": round(gap, 6),
+        })
+    return {
+        "expected_calibration_error": round(ece, 6),
+        "max_calibration_error": round(mce, 6),
+        "bins": bins,
+    }
+
+
+def classification_metrics(totals: Dict[str, Any]) -> Dict[str, Any]:
+    matrix = totals.get("confusion_matrix") or {}
+    by_class: Dict[str, Dict[str, float]] = {}
+    f1_values: List[float] = []
+    recall_values: List[float] = []
+    for key in OUTCOME_KEYS:
+        true_positive = float((matrix.get(key) or {}).get(key) or 0)
+        predicted_total = float(sum((matrix.get(actual) or {}).get(key) or 0 for actual in OUTCOME_KEYS))
+        actual_total = float(sum((matrix.get(key) or {}).get(predicted) or 0 for predicted in OUTCOME_KEYS))
+        precision = true_positive / predicted_total if predicted_total > 0 else 0.0
+        recall = true_positive / actual_total if actual_total > 0 else 0.0
+        f1 = (2.0 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+        by_class[key] = {
+            "precision": round(precision, 6),
+            "recall": round(recall, 6),
+            "f1": round(f1, 6),
+            "support": int(actual_total),
+        }
+        if actual_total > 0:
+            recall_values.append(recall)
+        f1_values.append(f1)
+    return {
+        "by_class": by_class,
+        "macro_f1": round(float(np.mean(f1_values)) if f1_values else 0.0, 6),
+        "balanced_accuracy": round(float(np.mean(recall_values)) if recall_values else 0.0, 6),
+    }
+
+
+def ranked_probability_score(probabilities: Dict[str, float], actual: str) -> float:
+    predicted = np.asarray([float_or_zero(probabilities.get(key)) for key in OUTCOME_KEYS], dtype=float)
+    total = float(predicted.sum())
+    predicted = predicted / total if total > 0 else np.ones(len(OUTCOME_KEYS), dtype=float) / len(OUTCOME_KEYS)
+    observed = np.asarray([1.0 if key == actual else 0.0 for key in OUTCOME_KEYS], dtype=float)
+    return float(np.sum(np.square(np.cumsum(predicted) - np.cumsum(observed))) / max(len(OUTCOME_KEYS) - 1, 1))
+
+
+def probability_entropy(probabilities: Dict[str, float]) -> float:
+    values = np.asarray([max(float_or_zero(probabilities.get(key)), 1e-12) for key in OUTCOME_KEYS], dtype=float)
+    values = values / max(float(values.sum()), 1e-12)
+    return float(-np.sum(values * np.log(values)))
+
+
+def expected_score_from_grid(grid: np.ndarray) -> Tuple[float, float, float, float]:
+    grid = normalize_score_grid_array(grid)
+    goals = np.arange(grid.shape[0], dtype=float)
+    home_goals, away_goals = np.meshgrid(goals, goals, indexing="ij")
+    expected_home = float(np.sum(grid * home_goals))
+    expected_away = float(np.sum(grid * away_goals))
+    return expected_home, expected_away, expected_home + expected_away, expected_home - expected_away
+
+
+def score_rank_from_grid(grid: np.ndarray, home_goals: int, away_goals: int) -> int:
+    grid = normalize_score_grid_array(grid)
+    home = min(max(int(home_goals), 0), grid.shape[0] - 1)
+    away = min(max(int(away_goals), 0), grid.shape[1] - 1)
+    flat_index = int(np.ravel_multi_index((home, away), grid.shape))
+    ranking = np.argsort(grid.ravel())[::-1]
+    matches = np.where(ranking == flat_index)[0]
+    return int(matches[0] + 1) if matches.size else int(grid.size)
 
 
 def score_model_backtest_prediction(model: Any, row: pd.Series | Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any] | None:
@@ -1774,13 +1844,38 @@ def score_model_backtest_prediction(model: Any, row: pd.Series | Dict[str, Any],
     modal_index = int(np.argmax(grid))
     modal_home, modal_away = np.unravel_index(modal_index, grid.shape)
     score_probability = score_grid_actual_probability(grid, actual_home, actual_away)
+    actual_score_rank = score_rank_from_grid(grid, actual_home, actual_away)
+    expected_home, expected_away, expected_total, expected_margin = expected_score_from_grid(grid)
+    actual_total = float(actual_home + actual_away)
+    actual_margin = float(actual_home - actual_away)
     over_under_rows = backtest_over_under_rows(probabilities, total_goals)
+    confidence = max(outcome_probabilities.values()) if outcome_probabilities else 0.0
     return {
         "log_loss": -math.log(max(outcome_probabilities.get(actual_outcome, 0.0), 1e-12)),
         "brier": multiclass_brier_score(outcome_probabilities, actual_outcome),
         "score_log_loss": -math.log(max(score_probability, 1e-12)),
+        "rps": ranked_probability_score(outcome_probabilities, actual_outcome),
+        "entropy": probability_entropy(outcome_probabilities),
+        "sharpness": confidence,
         "pick_hit": 1 if pick == actual_outcome else 0,
         "score_hit": 1 if int(modal_home) == actual_home and int(modal_away) == actual_away else 0,
+        "top3_score_hit": 1 if actual_score_rank <= 3 else 0,
+        "top5_score_hit": 1 if actual_score_rank <= 5 else 0,
+        "expected_home_goals": expected_home,
+        "expected_away_goals": expected_away,
+        "expected_total_goals": expected_total,
+        "expected_margin": expected_margin,
+        "home_goals_abs_error": abs(expected_home - float(actual_home)),
+        "away_goals_abs_error": abs(expected_away - float(actual_away)),
+        "total_goals_abs_error": abs(expected_total - actual_total),
+        "margin_abs_error": abs(expected_margin - actual_margin),
+        "home_goals_squared_error": (expected_home - float(actual_home)) ** 2,
+        "away_goals_squared_error": (expected_away - float(actual_away)) ** 2,
+        "total_goals_squared_error": (expected_total - actual_total) ** 2,
+        "margin_squared_error": (expected_margin - actual_margin) ** 2,
+        "actual_outcome": actual_outcome,
+        "predicted_outcome": pick,
+        "confidence": confidence,
         "over_under": over_under_rows,
         "sample": {
             "fixture_id": str(row.get("No.", "")),
@@ -1794,6 +1889,12 @@ def score_model_backtest_prediction(model: Any, row: pd.Series | Dict[str, Any],
             "actual_pick_key": actual_outcome,
             "pick_hit": bool(pick == actual_outcome),
             "modal_score": f"{int(modal_home)}-{int(modal_away)}",
+            "expected_score": f"{expected_home:.2f}-{expected_away:.2f}",
+            "actual_score_rank": actual_score_rank,
+            "top3_score_hit": bool(actual_score_rank <= 3),
+            "top5_score_hit": bool(actual_score_rank <= 5),
+            "rps": round(ranked_probability_score(outcome_probabilities, actual_outcome), 6),
+            "confidence": round(confidence * 100.0, 3),
             "actual_probability": round(outcome_probabilities.get(actual_outcome, 0.0) * 100.0, 3),
             "score_probability": round(score_probability * 100.0, 3),
             "probabilities": {
@@ -1810,15 +1911,45 @@ def accumulate_backtest_totals(totals: Dict[str, Any], row_metrics: Dict[str, An
     totals["log_loss"] += float_or_zero(row_metrics.get("log_loss"))
     totals["brier"] += float_or_zero(row_metrics.get("brier"))
     totals["score_log_loss"] += float_or_zero(row_metrics.get("score_log_loss"))
+    totals["rps"] += float_or_zero(row_metrics.get("rps"))
+    totals["entropy"] += float_or_zero(row_metrics.get("entropy"))
+    totals["sharpness"] += float_or_zero(row_metrics.get("sharpness"))
     totals["pick_hits"] += int(row_metrics.get("pick_hit") or 0)
     totals["score_hits"] += int(row_metrics.get("score_hit") or 0)
+    totals["top3_score_hits"] += int(row_metrics.get("top3_score_hit") or 0)
+    totals["top5_score_hits"] += int(row_metrics.get("top5_score_hit") or 0)
+    for key in (
+            "home_goals_abs_error",
+            "away_goals_abs_error",
+            "total_goals_abs_error",
+            "margin_abs_error",
+            "home_goals_squared_error",
+            "away_goals_squared_error",
+            "total_goals_squared_error",
+            "margin_squared_error",
+    ):
+        totals[key] += float_or_zero(row_metrics.get(key))
+    actual = str(row_metrics.get("actual_outcome") or "")
+    predicted = str(row_metrics.get("predicted_outcome") or "")
+    if actual in OUTCOME_KEYS and predicted in OUTCOME_KEYS:
+        totals["confusion_matrix"].setdefault(actual, {key: 0 for key in OUTCOME_KEYS})
+        totals["confusion_matrix"][actual][predicted] = int(totals["confusion_matrix"][actual].get(predicted) or 0) + 1
+    confidence = float(np.clip(float_or_zero(row_metrics.get("confidence")), 0.0, 1.0))
+    bin_index = min(int(confidence * CALIBRATION_BIN_COUNT), CALIBRATION_BIN_COUNT - 1)
+    calibration_bins = totals.get("calibration_bins") or []
+    if 0 <= bin_index < len(calibration_bins):
+        calibration_bins[bin_index]["count"] += 1
+        calibration_bins[bin_index]["confidence_sum"] += confidence
+        calibration_bins[bin_index]["correct_sum"] += 1.0 if row_metrics.get("pick_hit") else 0.0
     for item in row_metrics.get("over_under", []) or []:
         line_key = str(item.get("line") or "")
         totals["over_under_total"] += 1
         totals["over_under_hits"] += 1 if item.get("hit") else 0
-        line_totals = totals["over_under_by_line"].setdefault(line_key, {"hits": 0, "total": 0})
+        line_totals = totals["over_under_by_line"].setdefault(line_key, {"hits": 0, "total": 0, "log_loss": 0.0, "brier": 0.0})
         line_totals["total"] += 1
         line_totals["hits"] += 1 if item.get("hit") else 0
+        line_totals["log_loss"] += float_or_zero(item.get("log_loss"))
+        line_totals["brier"] += float_or_zero(item.get("brier"))
     totals["evaluated"] += 1
 
 
@@ -1830,6 +1961,8 @@ def backtest_over_under_rows(probabilities: Dict[str, Any], total_goals: int) ->
         under_probability = float_or_zero(probabilities.get(f"under{suffix}"))
         predicted = "over" if over_probability >= under_probability else "under"
         actual = "over" if int(total_goals) > float(line) else "under"
+        actual_probability = over_probability if actual == "over" else under_probability
+        actual_over = 1.0 if actual == "over" else 0.0
         rows.append({
             "line": f"{line:.1f}",
             "prediction": predicted,
@@ -1839,6 +1972,9 @@ def backtest_over_under_rows(probabilities: Dict[str, Any], total_goals: int) ->
             "hit": predicted == actual,
             "over_probability": round(over_probability * 100.0, 3),
             "under_probability": round(under_probability * 100.0, 3),
+            "actual_probability": round(actual_probability * 100.0, 3),
+            "log_loss": round(-math.log(max(actual_probability, 1e-12)), 6),
+            "brier": round((over_probability - actual_over) ** 2, 6),
             "confidence": round(max(over_probability, under_probability) * 100.0, 3),
         })
     return rows
@@ -1852,13 +1988,35 @@ def over_under_accuracy_by_line(totals: Dict[str, Any]) -> Dict[str, float]:
     return output
 
 
+def over_under_metrics_by_line(totals: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+    output: Dict[str, Dict[str, float]] = {}
+    for line, values in (totals.get("over_under_by_line") or {}).items():
+        total = max(int(values.get("total") or 0), 1)
+        output[str(line)] = {
+            "accuracy": round(float(values.get("hits") or 0) / total, 6),
+            "log_loss": round(float(values.get("log_loss") or 0.0) / total, 6),
+            "brier": round(float(values.get("brier") or 0.0) / total, 6),
+            "total": int(values.get("total") or 0),
+        }
+    return output
+
+
 def compare_backtest_to_baseline(metrics: Dict[str, Any], baseline: Dict[str, Any]) -> Dict[str, Any]:
     log_loss_delta = round(float_or_zero(metrics.get("log_loss")) - float_or_zero(baseline.get("log_loss")), 6)
     brier_delta = round(float_or_zero(metrics.get("brier")) - float_or_zero(baseline.get("brier")), 6)
+    rps_delta = round(float_or_zero(metrics.get("rps")) - float_or_zero(baseline.get("rps")), 6)
     pick_delta = round(float_or_zero(metrics.get("pick_accuracy")) - float_or_zero(baseline.get("pick_accuracy")), 6)
-    score_delta = round(float_or_zero(metrics.get("score_accuracy")) - float_or_zero(baseline.get("score_accuracy")), 6)
-    wins = int(log_loss_delta < 0.0) + int(brier_delta < 0.0) + int(pick_delta > 0.0) + int(score_delta > 0.0)
-    beats = wins >= 3 or (log_loss_delta < 0.0 and brier_delta < 0.0 and (pick_delta > 0.0 or score_delta > 0.0))
+    top3_delta = round(float_or_zero(metrics.get("top3_score_accuracy")) - float_or_zero(baseline.get("top3_score_accuracy")), 6)
+    ou25_delta = round(float_or_zero(metrics.get("ou25_log_loss")) - float_or_zero(baseline.get("ou25_log_loss")), 6)
+    wins = (
+        int(log_loss_delta < 0.0)
+        + int(brier_delta < 0.0)
+        + int(rps_delta < 0.0)
+        + int(pick_delta > 0.0)
+        + int(top3_delta > 0.0)
+        + int(ou25_delta < 0.0)
+    )
+    beats = wins >= 4 or (log_loss_delta < 0.0 and rps_delta < 0.0 and (brier_delta < 0.0 or pick_delta > 0.0 or top3_delta > 0.0))
     return {
         **metrics,
         "baseline_model_key": DEFAULT_SCORE_MODEL,
@@ -1866,23 +2024,35 @@ def compare_backtest_to_baseline(metrics: Dict[str, Any], baseline: Dict[str, An
         "vs_poisson": {
             "log_loss_delta": log_loss_delta,
             "brier_delta": brier_delta,
+            "rps_delta": rps_delta,
             "pick_accuracy_delta": pick_delta,
-            "score_accuracy_delta": score_delta,
+            "top3_score_accuracy_delta": top3_delta,
+            "ou25_log_loss_delta": ou25_delta,
             "metric_wins": wins,
-            "metric_total": 4,
+            "metric_total": 6,
             "beats_poisson": bool(beats),
-            "summary": backtest_delta_summary(log_loss_delta, brier_delta, pick_delta, score_delta, wins),
+            "summary": backtest_delta_summary(log_loss_delta, brier_delta, rps_delta, pick_delta, top3_delta, ou25_delta, wins),
         },
     }
 
 
-def backtest_delta_summary(log_loss_delta: float, brier_delta: float, pick_delta: float, score_delta: float, wins: int) -> str:
+def backtest_delta_summary(
+        log_loss_delta: float,
+        brier_delta: float,
+        rps_delta: float,
+        pick_delta: float,
+        top3_delta: float,
+        ou25_delta: float,
+        wins: int,
+) -> str:
     return (
-        f"{wins}/4 metricas; "
+        f"{wins}/6 metricas; "
         f"LL {format_signed_metric(log_loss_delta)}; "
+        f"RPS {format_signed_metric(rps_delta)}; "
         f"Brier {format_signed_metric(brier_delta)}; "
         f"pick {format_signed_pp(pick_delta)}; "
-        f"score {format_signed_pp(score_delta)}"
+        f"top3 {format_signed_pp(top3_delta)}; "
+        f"U/O2.5 {format_signed_metric(ou25_delta)}"
     )
 
 
@@ -1895,7 +2065,7 @@ def best_alternative_from_backtests(backtests: List[Dict[str, Any]]) -> Dict[str
         return {"available": False, "reason": "Sin modelos evaluables en backtest."}
     winner = dict(sorted(candidates, key=lambda item: int(item.get("rank") or 9999))[0])
     winner["available"] = True
-    winner["selection_policy"] = "Menor log-loss; desempates por marcador exacto, Brier, pick 1X2 y score-log-loss."
+    winner["selection_policy"] = "Modelo #1 del backtesting walk-forward: menor log-loss; desempates por RPS, ECE, Brier, top-3 marcador y U/O 2.5. Sin ponderar otros modelos."
     return winner
 
 
@@ -1910,6 +2080,65 @@ def alternatives_with_backtests(alternatives: List[Dict[str, Any]], backtest_by_
     return output
 
 
+def worldcup_feature_research_summary() -> Dict[str, Any]:
+    feature_store_files = sorted(FEATURE_STORE_ROOT.glob("*.json")) if FEATURE_STORE_ROOT.exists() else []
+    market_root = PROJECT_ROOT / "storage" / "worldcup" / "market"
+    xg_root = PROJECT_ROOT / "storage" / "worldcup" / "xg"
+    api_root = PROJECT_ROOT / "storage" / "worldcup" / "api_football"
+    lineup_root = PROJECT_ROOT / "storage" / "worldcup" / "lineups"
+    families = [
+        {
+            "key": "dynamic_team_strength",
+            "label": "Ratings dinamicos y forma reciente",
+            "status": "active",
+            "features": ["Elo/ataque/defensa", "ventanas 3/5/10/15", "oponente ajustado", "recencia"],
+            "impact": "Mejora lambdas base y reduce dependencia de promedios historicos largos.",
+        },
+        {
+            "key": "market_odds",
+            "label": "Cuotas de mercado",
+            "status": "cached" if market_root.exists() and any(market_root.glob("*.csv")) else "optional",
+            "features": ["1X2 no-vig", "U/O 2.5 no-vig", "movimiento de linea", "benchmark vs mercado"],
+            "impact": "Las cuotas suelen ser un baseline muy fuerte; se usan como feature solo si existen antes del partido.",
+        },
+        {
+            "key": "xg_xga",
+            "label": "xG/xGA y tiros",
+            "status": "cached" if xg_root.exists() and any(xg_root.glob("*.csv")) else "optional",
+            "features": ["xG rolling", "xGA rolling", "diferencial xG", "tiros y tiros al arco"],
+            "impact": "Ajusta la calidad de ocasiones, no solo goles observados.",
+        },
+        {
+            "key": "lineups_players",
+            "label": "Alineaciones, lesiones y jugadores",
+            "status": "cached" if lineup_root.exists() and any(lineup_root.glob("*.json")) else "optional",
+            "features": ["XI confirmado/probable", "ratings por jugador", "minutos", "bajas"],
+            "impact": "Permite multiplicadores de lambda cuando hay XI confiable antes del kickoff.",
+        },
+        {
+            "key": "api_football_context",
+            "label": "API-Football contextual",
+            "status": "cached" if api_root.exists() and any(api_root.glob("*.json")) else "optional",
+            "features": ["estadisticas recientes", "odds", "lineups", "injuries"],
+            "impact": "Fuente opcional; el reporte no debe depender de red ni credenciales para funcionar.",
+        },
+    ]
+    active = [item["key"] for item in families if item["status"] in {"active", "cached"}]
+    return {
+        "anti_leakage": "Toda feature debe calcularse con corte temporal anterior al partido evaluado.",
+        "recommendation": "Primero usar ratings/form + cuotas/xG/XI cacheados; despues comparar contra mercado y Poisson por walk-forward.",
+        "feature_store_files": [str(path) for path in feature_store_files[:8]],
+        "active_or_cached_families": active,
+        "families": families,
+        "research_basis": [
+            "Dixon-Coles: correccion de baja anotacion y decaimiento temporal.",
+            "Elo/pi-ratings: fuerza dinamica por seleccion.",
+            "Market odds: baseline externo fuerte para calibracion.",
+            "xG/VAEP: calidad de ocasiones y contribucion de jugadores cuando hay eventos.",
+        ],
+    }
+
+
 def alternatives_benchmark_table_rows(
         fixture_reports: List[Dict[str, Any]],
         backtest_by_key: Dict[str, Dict[str, Any]],
@@ -1917,74 +2146,43 @@ def alternatives_benchmark_table_rows(
     rows: List[Dict[str, Any]] = []
     for report in fixture_reports:
         fixture = report.get("fixture", {})
-        ensemble = report.get("ensemble") or {}
-        if ensemble.get("available"):
-            decision = ensemble.get("decision") or {}
-            probs = ensemble.get("probabilities") or {}
-            expected = ensemble.get("expected_goals") or {}
-            top_scores = ", ".join(
-                f"{score.get('score', '')} {format_metric(score.get('probability', ''))}%"
-                for score in (ensemble.get("top_scores") or [])[:3]
-            )
-            pick_key = str(decision.get("outcome") or "")
-            rows.append({
-                "No.": fixture.get("id", ""),
-                "Fecha": fixture.get("date", ""),
-                "Grupo": fixture.get("group", ""),
-                "Partido": fixture.get("label", ""),
-                "Rank": "Ensemble",
-                "Modelo": ensemble.get("model_label", ""),
-                "Disponible": "Si",
-                "Pick": f"{decision.get('label', '')} {decision.get('team', '')}".strip(),
-                "Marcador": ensemble.get("top_score", ""),
-                "Top scores": top_scores,
-                "Probabilidad": probs.get(pick_key, ""),
-                "1 %": probs.get("home", ""),
-                "X %": probs.get("draw", ""),
-                "2 %": probs.get("away", ""),
-                "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
-                "Log-loss": "",
-                "Brier": "",
-                "Pick accuracy": "",
-                "Score exacto": "",
-                "Confiabilidad": "",
-                "Backtest vs Poisson": f"{ensemble.get('model_count', 0)} modelos ponderados",
-                "Warnings": "",
-            })
-        for model in report.get("models", []):
-            decision = model.get("decision") or {}
-            probs = model.get("probabilities") or {}
-            expected = model.get("expected_goals") or {}
-            backtest = backtest_by_key.get(str(model.get("model_key") or ""), {})
-            top_scores = ", ".join(
-                f"{score.get('score', '')} {format_metric(score.get('probability', ''))}%"
-                for score in (model.get("top_scores") or [])[:3]
-            )
-            pick_key = str(decision.get("outcome") or "")
-            rows.append({
-                "No.": fixture.get("id", ""),
-                "Fecha": fixture.get("date", ""),
-                "Grupo": fixture.get("group", ""),
-                "Partido": fixture.get("label", ""),
-                "Rank": backtest.get("rank", ""),
-                "Modelo": model.get("model_label", ""),
-                "Disponible": "Si" if model.get("available") else "No",
-                "Pick": f"{decision.get('label', '')} {decision.get('team', '')}".strip(),
-                "Marcador": model.get("top_score", ""),
-                "Top scores": top_scores,
-                "Probabilidad": probs.get(pick_key, ""),
-                "1 %": probs.get("home", ""),
-                "X %": probs.get("draw", ""),
-                "2 %": probs.get("away", ""),
-                "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
-                "Log-loss": backtest.get("log_loss", ""),
-                "Brier": backtest.get("brier", ""),
-                "Pick accuracy": backtest.get("pick_accuracy", ""),
-                "Score exacto": backtest.get("score_accuracy", ""),
-                "Confiabilidad": backtest.get("reliability_score", ""),
-                "Backtest vs Poisson": (backtest.get("vs_poisson") or {}).get("summary", ""),
-                "Warnings": " | ".join(model.get("warnings", [])),
-            })
+        model = report.get("primary_model") or {}
+        decision = model.get("decision") or {}
+        probs = model.get("probabilities") or {}
+        expected = model.get("expected_goals") or {}
+        backtest = backtest_by_key.get(str(model.get("model_key") or ""), model.get("backtest") or {})
+        top_scores = ", ".join(
+            f"{score.get('score', '')} {format_metric(score.get('probability', ''))}%"
+            for score in (model.get("top_scores") or [])[:3]
+        )
+        pick_key = str(decision.get("outcome") or "")
+        rows.append({
+            "No.": fixture.get("id", ""),
+            "Fecha": fixture.get("date", ""),
+            "Grupo": fixture.get("group", ""),
+            "Partido": fixture.get("label", ""),
+            "Rank": backtest.get("rank", model.get("rank", "")),
+            "Modelo": model.get("model_label", ""),
+            "Disponible": "Si" if model.get("available") else "No",
+            "Pick": f"{decision.get('label', '')} {decision.get('team', '')}".strip(),
+            "Marcador": model.get("top_score", ""),
+            "Top scores": top_scores,
+            "Probabilidad": probs.get(pick_key, ""),
+            "1 %": probs.get("home", ""),
+            "X %": probs.get("draw", ""),
+            "2 %": probs.get("away", ""),
+            "xG": f"{expected.get('home', '')}-{expected.get('away', '')}",
+            "Log-loss": backtest.get("log_loss", ""),
+            "RPS": backtest.get("rps", ""),
+            "ECE": backtest.get("expected_calibration_error", ""),
+            "Brier": backtest.get("brier", ""),
+            "Pick accuracy": backtest.get("pick_accuracy", ""),
+            "Top-3 marcador": backtest.get("top3_score_accuracy", ""),
+            "U/O 2.5 log-loss": backtest.get("ou25_log_loss", ""),
+            "Confiabilidad": backtest.get("reliability_score", ""),
+            "Backtest vs Poisson": (backtest.get("vs_poisson") or {}).get("summary", ""),
+            "Warnings": " | ".join(model.get("warnings", [])) or model.get("reason", ""),
+        })
     return rows
 
 
@@ -3767,21 +3965,22 @@ def predictions_report_html_body(report: Dict[str, Any]) -> str:
 
 def prediction_fixture_report_card_html(report: Dict[str, Any]) -> str:
     fixture = report.get("fixture") or {}
-    primary = report.get("ensemble") or {}
+    primary = report.get("primary_model") or {}
     if not primary.get("available"):
         monte_carlo = report.get("monte_carlo_consensus") or {}
         distribution = monte_carlo if monte_carlo.get("available") else report.get("consensus_score_distribution") or {}
         consensus = report.get("consensus") or {}
-        primary = {
-            "available": True,
-            "model_label": "Consenso",
-            "decision": {
-                "label": consensus.get("outcome_label", ""),
-                "team": outcome_team(consensus.get("outcome"), fixture),
-            },
-            "probabilities": distribution.get("probabilities") or {},
-            "top_scores": distribution.get("top_scores") or [],
-        }
+        if distribution or consensus:
+            primary = {
+                "available": True,
+                "model_label": "Consenso",
+                "decision": {
+                    "label": consensus.get("outcome_label", ""),
+                    "team": outcome_team(consensus.get("outcome"), fixture),
+                },
+                "probabilities": distribution.get("probabilities") or {},
+                "top_scores": distribution.get("top_scores") or [],
+            }
     decision = primary.get("decision") or {}
     probabilities = primary.get("probabilities") or {}
     top_scores = primary.get("top_scores") or []
@@ -3823,10 +4022,13 @@ def backtest_model_report_card_html(model: Dict[str, Any]) -> str:
         <header><span>#{escape_report_html(model.get("rank", ""))}</span><strong>{escape_report_html(model.get("model_label", ""))}</strong></header>
         <div class="metric-bars">
           {metric_bar_html("Log-loss", format_metric(model.get("log_loss", "")), inverse_metric_percent(model.get("log_loss"), 1.6))}
+          {metric_bar_html("RPS", format_metric(model.get("rps", "")), inverse_metric_percent(model.get("rps"), 0.75))}
+          {metric_bar_html("ECE", format_metric(model.get("expected_calibration_error", "")), inverse_metric_percent(model.get("expected_calibration_error"), 0.35))}
           {metric_bar_html("Pick %", f"{format_metric(float_or_zero(model.get('pick_accuracy')) * 100)}%", float_or_zero(model.get("pick_accuracy")) * 100)}
-          {metric_bar_html("Marcador %", f"{format_metric(float_or_zero(model.get('score_accuracy')) * 100)}%", float_or_zero(model.get("score_accuracy")) * 100)}
+          {metric_bar_html("Top-3 marcador", f"{format_metric(float_or_zero(model.get('top3_score_accuracy')) * 100)}%", float_or_zero(model.get("top3_score_accuracy")) * 100)}
           {metric_bar_html("Brier", format_metric(model.get("brier", "")), inverse_metric_percent(model.get("brier"), 0.75))}
-          {metric_bar_html("Vs Poisson", f"{escape_report_html(vs.get('metric_wins', 0))}/4", float_or_zero(vs.get("metric_wins")) * 25)}
+          {metric_bar_html("U/O 2.5 LL", format_metric(model.get("ou25_log_loss", "")), inverse_metric_percent(model.get("ou25_log_loss"), 1.2))}
+          {metric_bar_html("Vs Poisson", f"{escape_report_html(vs.get('metric_wins', 0))}/{escape_report_html(vs.get('metric_total', 6))}", float_or_zero(vs.get("metric_wins")) * (100.0 / max(float_or_zero(vs.get("metric_total")), 1.0)))}
         </div>
         <p>{escape_report_html(vs.get("summary", ""))}</p>
       </article>
@@ -3843,7 +4045,11 @@ def backtest_csv_text(report: Dict[str, Any]) -> str:
         writer.writerow([row.get(column, "") for column in metrics.get("columns", [])])
     writer.writerow([])
     writer.writerow(["Detalle partidos"])
-    match_columns = ["Rank", "Modelo", "Fecha", "Partido", "Resultado", "Pick", "Pick real", "Acierto", "Marcador modal", "Prob. real", "Prob. marcador"]
+    match_columns = [
+        "Rank", "Modelo", "Fecha", "Partido", "Resultado", "Pick", "Pick real", "Acierto",
+        "Marcador modal", "Esperado", "Top-3 marcador", "Top-5 marcador", "RPS",
+        "Confianza", "Prob. real", "Prob. marcador",
+    ]
     writer.writerow(match_columns)
     for model in report.get("model_backtests") or []:
         for row in model.get("matches") or []:
@@ -3857,6 +4063,11 @@ def backtest_csv_text(report: Dict[str, Any]) -> str:
                 row.get("actual_pick", ""),
                 "Si" if row.get("pick_hit") else "No",
                 row.get("modal_score", ""),
+                row.get("expected_score", ""),
+                "Si" if row.get("top3_score_hit") else "No",
+                "Si" if row.get("top5_score_hit") else "No",
+                row.get("rps", ""),
+                row.get("confidence", ""),
                 row.get("actual_probability", ""),
                 row.get("score_probability", ""),
             ])
@@ -3864,7 +4075,12 @@ def backtest_csv_text(report: Dict[str, Any]) -> str:
 
 
 def backtest_metrics_table(report: Dict[str, Any]) -> Dict[str, Any]:
-    columns = ["Rank", "Modelo", "Disponible", "Evaluados", "Log-loss", "Brier", "Pick %", "Marcador %", "U/O %", "Score-log", "Vs Poisson", "Warnings"]
+    columns = [
+        "Rank", "Modelo", "Disponible", "Evaluados", "Log-loss", "RPS", "ECE", "MCE", "Brier",
+        "Pick %", "Top-3 marcador %", "Top-5 marcador %", "U/O 2.5 LL", "U/O 2.5 Brier",
+        "U/O %", "Score-log", "Goles MAE", "Total goles MAE", "Margen MAE", "Macro F1",
+        "Balanced acc", "Vs Poisson", "Warnings",
+    ]
     rows = []
     for item in report.get("model_backtests") or []:
         vs = item.get("vs_poisson") or {}
@@ -3874,11 +4090,22 @@ def backtest_metrics_table(report: Dict[str, Any]) -> Dict[str, Any]:
             "Disponible": "Si" if item.get("available") else "No",
             "Evaluados": item.get("evaluated_matches", ""),
             "Log-loss": item.get("log_loss", ""),
+            "RPS": item.get("rps", ""),
+            "ECE": item.get("expected_calibration_error", ""),
+            "MCE": item.get("max_calibration_error", ""),
             "Brier": item.get("brier", ""),
             "Pick %": round(float_or_zero(item.get("pick_accuracy")) * 100.0, 3),
-            "Marcador %": round(float_or_zero(item.get("score_accuracy")) * 100.0, 3),
+            "Top-3 marcador %": round(float_or_zero(item.get("top3_score_accuracy")) * 100.0, 3),
+            "Top-5 marcador %": round(float_or_zero(item.get("top5_score_accuracy")) * 100.0, 3),
+            "U/O 2.5 LL": item.get("ou25_log_loss", ""),
+            "U/O 2.5 Brier": item.get("ou25_brier", ""),
             "U/O %": round(float_or_zero(item.get("over_under_accuracy")) * 100.0, 3),
             "Score-log": item.get("score_log_loss", ""),
+            "Goles MAE": f"{format_metric(item.get('home_goals_mae', ''))}/{format_metric(item.get('away_goals_mae', ''))}",
+            "Total goles MAE": item.get("total_goals_mae", ""),
+            "Margen MAE": item.get("margin_mae", ""),
+            "Macro F1": item.get("macro_f1", ""),
+            "Balanced acc": item.get("balanced_accuracy", ""),
             "Vs Poisson": vs.get("summary", ""),
             "Warnings": " | ".join(item.get("warnings", [])),
         })

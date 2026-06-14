@@ -109,8 +109,12 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
             "available": True,
             "evaluated_matches": 7,
             "log_loss": 1.0,
+            "rps": 0.30,
+            "expected_calibration_error": 0.10,
             "brier": 0.22,
             "pick_accuracy": 0.4,
+            "top3_score_accuracy": 0.3,
+            "ou25_log_loss": 0.7,
             "score_accuracy": 0.1,
             "score_log_loss": 3.0,
         },
@@ -120,8 +124,12 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
             "available": True,
             "evaluated_matches": 7,
             "log_loss": 1.0,
+            "rps": 0.20,
+            "expected_calibration_error": 0.12,
             "brier": 0.30,
             "pick_accuracy": 0.3,
+            "top3_score_accuracy": 0.2,
+            "ou25_log_loss": 0.8,
             "score_accuracy": 0.2,
             "score_log_loss": 4.0,
         },
@@ -131,8 +139,12 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
             "available": True,
             "evaluated_matches": 7,
             "log_loss": 0.9,
+            "rps": 0.40,
+            "expected_calibration_error": 0.20,
             "brier": 0.40,
             "pick_accuracy": 0.2,
+            "top3_score_accuracy": 0.1,
+            "ou25_log_loss": 1.0,
             "score_accuracy": 0.0,
             "score_log_loss": 5.0,
         },
@@ -142,6 +154,7 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
     assert [item["rank"] for item in ranked] == [1, 2, 3]
     assert ranked[0]["reliability_score"] > ranked[1]["reliability_score"] > ranked[2]["reliability_score"]
     assert all(item["ranking_metric"] == "log_loss" for item in ranked)
+    assert "RPS" in ranked[0]["ranking_reason"]
     assert all(item["holdout_start"] == "2022-12-09" for item in ranked)
 
 
@@ -289,17 +302,27 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert [item["rank"] for item in result["model_backtests"]] == list(range(1, len(services.BENCHMARK_SCORE_MODEL_SEQUENCE) + 1))
     assert all(len(item["matches"]) == 3 for item in result["model_backtests"])
     assert all("over_under_accuracy" in item for item in result["model_backtests"])
+    assert all("rps" in item for item in result["model_backtests"])
+    assert all("expected_calibration_error" in item for item in result["model_backtests"])
+    assert all("top3_score_accuracy" in item for item in result["model_backtests"])
+    assert all("ou25_log_loss" in item for item in result["model_backtests"])
     first_backtest_row = result["model_backtests"][0]["matches"][0]
     assert first_backtest_row["pick"] in {"1", "X", "2"}
     assert first_backtest_row["actual_pick"] in {"1", "X", "2"}
     assert isinstance(first_backtest_row["pick_hit"], bool)
+    assert isinstance(first_backtest_row["top3_score_hit"], bool)
+    assert "rps" in first_backtest_row
     assert [item["line"] for item in first_backtest_row["over_under"]] == ["0.5", "1.5", "2.5", "3.5"]
     assert all(item["prediction_label"] in {"Over", "Under"} for item in first_backtest_row["over_under"])
     assert all(item["actual_label"] in {"Over", "Under"} for item in first_backtest_row["over_under"])
+    assert all("log_loss" in item and "brier" in item for item in first_backtest_row["over_under"])
     assert result["best_model"]["model_key"] == result["model_backtests"][0]["model_key"]
     assert result["best_model"]["model_key"] in services.BENCHMARK_SCORE_MODEL_SEQUENCE
-    assert result["fixture_reports"][0]["ensemble"]["available"] is True
-    assert result["table"]["total"] == len(services.BENCHMARK_SCORE_MODEL_SEQUENCE) + 1
+    assert "ensemble" not in result["fixture_reports"][0]
+    assert result["fixture_reports"][0]["primary_model"]["available"] is True
+    assert result["fixture_reports"][0]["primary_model"]["model_key"] == result["best_model"]["model_key"]
+    assert result["table"]["total"] == len(result["fixture_reports"])
+    assert result["summary"]["feature_research"]["families"]
     assert result["downloads"]["predictions_html"].endswith("kind=predictions&format=html")
     assert result["downloads"]["predictions_csv"].endswith("kind=predictions&format=csv")
     assert result["downloads"]["backtest_html"].endswith("kind=backtest&format=html")

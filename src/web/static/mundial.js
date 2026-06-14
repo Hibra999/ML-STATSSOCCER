@@ -573,6 +573,7 @@ function alternativesBenchmarkHtml(report) {
       <span>${escapeHtml(rankedModels.length || backtests.length)} modelo${(rankedModels.length || backtests.length) === 1 ? "" : "s"}</span>
     </header>
     ${bestAlternativeHtml(best)}
+    ${featureResearchHtml(summary.feature_research || report.feature_research || {})}
     ${benchmarkTuningHtml(tuning)}
     ${backtestTableHtml(backtests, summary.backtest || {})}
     ${backtestPredictionReviewHtml(backtests)}
@@ -608,12 +609,41 @@ function bestAlternativeHtml(best) {
     </div>
     <div class="technical-meta-row">
       <span>Log-loss ${escapeHtml(formatNumber(item.log_loss ?? "-"))}</span>
+      <span>RPS ${escapeHtml(formatNumber(item.rps ?? "-"))}</span>
+      <span>ECE ${escapeHtml(formatNumber(item.expected_calibration_error ?? "-"))}</span>
       <span>Score-log ${escapeHtml(formatNumber(item.score_log_loss ?? "-"))}</span>
       <span>Brier ${escapeHtml(formatNumber(item.brier ?? "-"))}</span>
       <span>Pick ${escapeHtml(formatNumber(Number(item.pick_accuracy || 0) * 100))}%</span>
-      <span>Marcador ${escapeHtml(formatNumber(Number(item.score_accuracy || 0) * 100))}%</span>
+      <span>Top-3 marcador ${escapeHtml(formatNumber(Number(item.top3_score_accuracy || 0) * 100))}%</span>
+      <span>U/O2.5 LL ${escapeHtml(formatNumber(item.ou25_log_loss ?? "-"))}</span>
     </div>
   </section>`;
+}
+
+function featureResearchHtml(featureResearch) {
+  const item = featureResearch || {};
+  const families = item.families || [];
+  if (!families.length) return "";
+  const active = item.active_or_cached_families || [];
+  return `<details class="report-panel feature-research-panel">
+    <summary><strong>Features para mejorar modelos</strong><small>${escapeHtml(active.length)} familias activas/cacheadas · sin leakage temporal</small></summary>
+    <div class="technical-meta-row">
+      <span>${escapeHtml(item.anti_leakage || "Corte temporal antes del partido")}</span>
+      <span>${escapeHtml(item.recommendation || "")}</span>
+    </div>
+    <div class="client-report-grid alternatives-model-grid">
+      ${families.map((family) => `<article class="benchmark-metric-card">
+        <header>
+          <span>${escapeHtml(family.status || "")}</span>
+          <strong>${escapeHtml(family.label || family.key || "")}</strong>
+        </header>
+        <small>${escapeHtml(family.impact || "")}</small>
+        <div class="technical-meta-row compact">
+          ${(family.features || []).slice(0, 4).map((feature) => `<span>${escapeHtml(feature)}</span>`).join("")}
+        </div>
+      </article>`).join("")}
+    </div>
+  </details>`;
 }
 
 function benchmarkTuningHtml(tuning) {
@@ -638,8 +668,7 @@ function alternativeFixtureCardHtml(report, backtests) {
   const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
   const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
   const backtestMap = modelBacktestByKey(backtests);
-  const ensemble = report.ensemble || {};
-  const leader = ensemble.available ? ensemble : (models[0] || {});
+  const leader = report.primary_model || {};
   return `<article class="client-fixture-card alternative-fixture-card">
     <header>
       <span>${escapeHtml([fixture.date || "", fixture.time || ""].filter(Boolean).join(" · "))}</span>
@@ -651,7 +680,7 @@ function alternativeFixtureCardHtml(report, backtests) {
       <b>vs</b>
       <div>${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
-    ${topRankedFixturePickHtml(leader, backtestMap.get(leader.model_key) || {})}
+    ${topRankedFixturePickHtml(leader, backtestMap.get(leader.model_key) || leader.backtest || {})}
     <details class="models-drawer">
       <summary>Todos los modelos (${escapeHtml(models.length)})</summary>
       <div class="alternative-model-list">
@@ -670,10 +699,10 @@ function topRankedFixturePickHtml(model, backtest) {
   const expected = item.expected_goals || {};
   const topScores = item.top_scores || [];
   const confidence = probs[decision.outcome] ?? "";
-  const rankLabel = backtest.rank ? `#${backtest.rank}` : item.model_key === "backtest_weighted_ensemble" ? "Ensemble" : "#1";
-  const detail = item.model_key === "backtest_weighted_ensemble"
-    ? `${escapeHtml(item.model_count || 0)} modelos ponderados por backtest`
-    : "Modelo más confiable del ranking";
+  const rankLabel = backtest.rank || item.rank ? `#${backtest.rank || item.rank}` : "#1";
+  const detail = item.available === false
+    ? escapeHtml(item.reason || "Modelo #1 no disponible para este fixture")
+    : "Prediccion solo del modelo #1 del backtesting";
   return `<section class="report-panel top-ranked-pick">
     <header><strong>${escapeHtml(rankLabel)} ${escapeHtml(item.model_label || item.model_key || "")}</strong><small>${detail}</small></header>
     <div class="client-main-pick">
@@ -700,7 +729,7 @@ function alternativeModelRowHtml(model, backtest) {
     <b>${escapeHtml(formatNumber(backtest.reliability_score ?? 0))}</b>
     <span>${escapeHtml(decision.label || "-")} ${escapeHtml(decision.team || "")}${confidence !== "" ? ` · ${escapeHtml(formatNumber(confidence))}%` : ""}</span>
     <span>${escapeHtml(item.top_score || "-")} · λ ${escapeHtml(expected.home ?? "-")}/${escapeHtml(expected.away ?? "-")}</span>
-    <small>LL ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))} · Marcador ${escapeHtml(formatNumber(Number(backtest.score_accuracy || 0) * 100))}% · Brier ${escapeHtml(formatNumber(backtest.brier ?? "-"))}${warnings.length ? ` · ${escapeHtml(warnings[0])}` : ""}</small>
+    <small>LL ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))} · RPS ${escapeHtml(formatNumber(backtest.rps ?? "-"))} · Top-3 ${escapeHtml(formatNumber(Number(backtest.top3_score_accuracy || 0) * 100))}% · ECE ${escapeHtml(formatNumber(backtest.expected_calibration_error ?? "-"))}${warnings.length ? ` · ${escapeHtml(warnings[0])}` : ""}</small>
     <div class="top-scores compact">
       ${topScores.slice(0, 3).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
     </div>
@@ -732,10 +761,13 @@ function benchmarkMetricCardHtml(item) {
     </header>
     <div class="metric-bar-grid">
       ${compactMetricBarHtml("Log-loss", formatNumber(item.log_loss ?? "-"), inverseMetricPercent(item.log_loss, 1.6))}
+      ${compactMetricBarHtml("RPS", formatNumber(item.rps ?? "-"), inverseMetricPercent(item.rps, 0.75))}
+      ${compactMetricBarHtml("ECE", formatNumber(item.expected_calibration_error ?? "-"), inverseMetricPercent(item.expected_calibration_error, 0.35))}
       ${compactMetricBarHtml("Pick %", `${formatNumber(Number(item.pick_accuracy || 0) * 100)}%`, Number(item.pick_accuracy || 0) * 100)}
-      ${compactMetricBarHtml("Marcador %", `${formatNumber(Number(item.score_accuracy || 0) * 100)}%`, Number(item.score_accuracy || 0) * 100)}
+      ${compactMetricBarHtml("Top-3 marcador", `${formatNumber(Number(item.top3_score_accuracy || 0) * 100)}%`, Number(item.top3_score_accuracy || 0) * 100)}
       ${compactMetricBarHtml("Brier", formatNumber(item.brier ?? "-"), inverseMetricPercent(item.brier, 0.75))}
-      ${compactMetricBarHtml("Vs Poisson", `${escapeHtml(vs.metric_wins ?? 0)}/4`, Number(vs.metric_wins || 0) * 25)}
+      ${compactMetricBarHtml("U/O 2.5 LL", formatNumber(item.ou25_log_loss ?? "-"), inverseMetricPercent(item.ou25_log_loss, 1.2))}
+      ${compactMetricBarHtml("Vs Poisson", `${escapeHtml(vs.metric_wins ?? 0)}/${escapeHtml(vs.metric_total ?? 6)}`, Number(vs.metric_wins || 0) * (100 / Math.max(Number(vs.metric_total || 6), 1)))}
     </div>
     <small>${escapeHtml(vs.summary || "")}</small>
   </article>`;
@@ -826,10 +858,12 @@ function alternativeBenchmarkCardHtml(item) {
       <header><strong>Backtest automático ${escapeHtml(backtest.evaluated_matches || 0)}</strong><small>${escapeHtml(vs.beats_poisson ? "Mejora vs Poisson" : "Métricas")}</small></header>
       <div class="technical-meta-row">
         <span>Log-loss ${escapeHtml(formatNumber(backtest.log_loss ?? "-"))}</span>
-        <span>Marcador ${escapeHtml(formatNumber(Number(backtest.score_accuracy || 0) * 100))}%</span>
+        <span>RPS ${escapeHtml(formatNumber(backtest.rps ?? "-"))}</span>
+        <span>ECE ${escapeHtml(formatNumber(backtest.expected_calibration_error ?? "-"))}</span>
+        <span>Top-3 ${escapeHtml(formatNumber(Number(backtest.top3_score_accuracy || 0) * 100))}%</span>
         <span>Brier ${escapeHtml(formatNumber(backtest.brier ?? "-"))}</span>
         <span>Pick ${escapeHtml(formatNumber(Number(backtest.pick_accuracy || 0) * 100))}%</span>
-        <span>U/O ${escapeHtml(formatNumber(Number(backtest.over_under_accuracy || 0) * 100))}%</span>
+        <span>U/O2.5 LL ${escapeHtml(formatNumber(backtest.ou25_log_loss ?? "-"))}</span>
       </div>
     </section>
     ${backtestMatchTableHtml(backtest)}
