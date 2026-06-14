@@ -449,8 +449,9 @@ async function runUpcomingPredictions() {
   const group = document.getElementById("upcoming-group-filter").value || "";
   const pipelineMode = syncUpcomingPipelineControls();
   const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
+  const benchmarkTuningEnabled = pipelineMode === "alternatives_benchmark" && Boolean((document.getElementById("upcoming-benchmark-tuning-enabled") || {}).checked);
   const calculationLabel = pipelineMode === "alternatives_benchmark"
-    ? "Benchmark alternativas"
+    ? `Benchmark alternativas${benchmarkTuningEnabled ? " + Optuna" : ""}`
     : sotaCalculationMode === "monte_carlo"
     ? `SOTA Monte Carlo mezcla N=${formatInteger(currentMonteCarloSimulations())}`
     : "Consenso exacto";
@@ -466,6 +467,9 @@ async function runUpcomingPredictions() {
       bayes_profile: (document.getElementById("upcoming-bayes-profile") || {}).value || "deep",
       sota_device: (document.getElementById("upcoming-sota-device") || {}).value || "auto",
       sota_calculation_mode: sotaCalculationMode,
+      benchmark_tuning_enabled: benchmarkTuningEnabled,
+      benchmark_tuning_trials: Number((document.getElementById("upcoming-benchmark-tuning-trials") || {}).value || 20),
+      benchmark_tuning_sampler: (document.getElementById("upcoming-benchmark-tuning-sampler") || {}).value || "tpe",
     }));
     trackWorldcupJob(job, "upcoming-report");
   } catch (error) {
@@ -481,6 +485,8 @@ function syncUpcomingPipelineControls() {
   if (calculation) calculation.disabled = mode === "alternatives_benchmark";
   const sotaControls = document.getElementById("upcoming-sota-controls");
   if (sotaControls) sotaControls.classList.toggle("hidden", mode === "alternatives_benchmark");
+  const benchmarkControls = document.getElementById("upcoming-benchmark-controls");
+  if (benchmarkControls) benchmarkControls.classList.toggle("hidden", mode !== "alternatives_benchmark");
   return mode;
 }
 
@@ -526,18 +532,20 @@ function renderAlternativesBenchmarkReport(report) {
   const best = report.best_model || summary.best_model || {};
   const rankedModels = report.ranked_models || report.alternatives || [];
   const warnings = summary.warnings || [];
+  const tuning = summary.benchmark_tuning || {};
   const backtestAutoN = summary.backtest_auto_n ?? (summary.backtest || {}).evaluated_matches ?? 0;
   const resultSource = summary.backtest_source || summary.result_source || ((summary.results_refresh || {}).source) || "CSV local";
   document.getElementById("upcoming-summary").textContent =
-    `${summary.pipeline_label || "Benchmark alternativas"} - ${fixtures.length}/${summary.requested || 0} próximos - ${backtests.length} modelos - N automático ${backtestAutoN} - ${summary.report_id || report.report_id || ""}`;
+    `${summary.pipeline_label || "Benchmark alternativas"} - ${fixtures.length}/${summary.requested || 0} próximos - ${backtests.length} modelos - ${backtestAutoN} finalizados detectados - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()} - ${summary.report_id || report.report_id || ""}`;
   document.getElementById("upcoming-predictions").innerHTML = "";
   document.getElementById("upcoming-report").innerHTML = `
     <div class="report-summary-grid">
       ${reportSummaryCard("Modelo #1", best.available ? (best.model_label || best.model_key || "-") : "-")}
-      ${reportSummaryCard("N backtest automático", `${backtestAutoN} partidos`)}
+      ${reportSummaryCard("Finalizados detectados", `${backtestAutoN} partidos`)}
       ${reportSummaryCard("Partidos próximos", `${fixtures.length}/${summary.requested || 0}`)}
       ${reportSummaryCard("Criterio", "Menor log-loss")}
       ${reportSummaryCard("Fuente resultados", resultSource)}
+      ${tuning.enabled ? reportSummaryCard("Optuna N", tuning.available ? `${tuning.best_poisson_recent_matches} ultimos` : "No disponible") : ""}
     </div>
     ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
     ${alternativesBenchmarkHtml(report)}`;
@@ -552,15 +560,18 @@ function alternativesBenchmarkHtml(report) {
   const backtests = report.model_backtests || [];
   const best = report.best_model || summary.best_model || {};
   const backtestAutoN = summary.backtest_auto_n ?? (summary.backtest || {}).evaluated_matches ?? 0;
+  const tuning = summary.benchmark_tuning || {};
+  const tuningLabel = tuning.enabled && tuning.available ? ` · Optuna N=${tuning.best_poisson_recent_matches}` : "";
   return `<section class="client-report-shell">
     <header>
       <div>
         <h3>Ranking de confiabilidad 2026</h3>
-        <small>N automático ${escapeHtml(backtestAutoN)} · walk-forward sin leakage · marcador exacto desempata primero</small>
+        <small>${escapeHtml(backtestAutoN)} partidos finalizados detectados · walk-forward sin leakage · marcador exacto desempata primero${escapeHtml(tuningLabel)}</small>
       </div>
       <span>${escapeHtml(rankedModels.length || backtests.length)} modelo${(rankedModels.length || backtests.length) === 1 ? "" : "s"}</span>
     </header>
     ${bestAlternativeHtml(best)}
+    ${benchmarkTuningHtml(tuning)}
     ${backtestTableHtml(backtests, summary.backtest || {})}
     ${backtestPredictionReviewHtml(backtests)}
     <section class="report-panel">
@@ -591,7 +602,7 @@ function bestAlternativeHtml(best) {
     <div class="client-main-pick">
       <span>Score confiabilidad ${escapeHtml(formatNumber(item.reliability_score ?? 0))}</span>
       <strong>${escapeHtml(item.model_label || item.model_key || "")}</strong>
-      <small>N automático ${escapeHtml(item.evaluated_matches || 0)}: ${escapeHtml(item.holdout_start || "")} a ${escapeHtml(item.holdout_end || "")}</small>
+      <small>${escapeHtml(item.evaluated_matches || 0)} finalizados detectados: ${escapeHtml(item.holdout_start || "")} a ${escapeHtml(item.holdout_end || "")}</small>
     </div>
     <div class="technical-meta-row">
       <span>Log-loss ${escapeHtml(formatNumber(item.log_loss ?? "-"))}</span>
@@ -600,6 +611,22 @@ function bestAlternativeHtml(best) {
       <span>Pick ${escapeHtml(formatNumber(Number(item.pick_accuracy || 0) * 100))}%</span>
       <span>Marcador ${escapeHtml(formatNumber(Number(item.score_accuracy || 0) * 100))}%</span>
     </div>
+  </section>`;
+}
+
+function benchmarkTuningHtml(tuning) {
+  const item = tuning || {};
+  if (!item.enabled) return "";
+  const warnings = item.warnings || [];
+  return `<section class="report-panel">
+    <header><strong>Optuna N ultimos</strong><small>${escapeHtml(item.sampler || "tpe")} · ${escapeHtml(item.objective || "mean_log_loss")}</small></header>
+    <div class="technical-meta-row">
+      <span>N ${escapeHtml(item.available ? item.best_poisson_recent_matches : "-")}</span>
+      <span>Trials ${escapeHtml(item.n_trials || 0)}</span>
+      <span>Log-loss ${escapeHtml(item.best_value !== null && item.best_value !== undefined ? formatNumber(item.best_value) : "-")}</span>
+      <span>${escapeHtml(item.available ? "Aplicado" : "No disponible")}</span>
+    </div>
+    ${warnings.length ? `<div class="warning-list">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
   </section>`;
 }
 

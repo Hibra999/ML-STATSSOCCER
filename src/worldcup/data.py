@@ -24,6 +24,89 @@ PLAYERS_LOCAL_FILE = Path("storage") / "worldcup" / "players_2026.csv"
 PLAYERS_CACHE_FILE = CACHE_ROOT / "players_2026.csv"
 WIKIPEDIA_SQUADS_URL = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup_squads"
 RESULT_OVERRIDE_COLUMNS = ["date", "home", "away", "home_goals", "away_goals", "status", "source", "updated_at"]
+RESULT_REFRESH_PARTIAL_WARNING = "backtest parcial por fuente no disponible"
+VERIFIED_WORLD_CUP_2026_RESULTS: List[Dict[str, Any]] = [
+    {
+        "date": "2026-06-11",
+        "home": "Mexico",
+        "away": "South Africa",
+        "home_goals": 2,
+        "away_goals": 0,
+        "status": "final",
+        "source": "verified:user-table",
+        "available_after_utc": "2026-06-12T00:00:00+00:00",
+    },
+    {
+        "date": "2026-06-11",
+        "home": "South Korea",
+        "away": "Czech Republic",
+        "home_goals": 2,
+        "away_goals": 1,
+        "status": "final",
+        "source": "verified:user-table",
+        "available_after_utc": "2026-06-12T00:00:00+00:00",
+    },
+    {
+        "date": "2026-06-12",
+        "home": "Canada",
+        "away": "Bosnia & Herzegovina",
+        "home_goals": 1,
+        "away_goals": 1,
+        "status": "final",
+        "source": "verified:user-table",
+        "available_after_utc": "2026-06-13T00:00:00+00:00",
+    },
+    {
+        "date": "2026-06-12",
+        "home": "USA",
+        "away": "Paraguay",
+        "home_goals": 4,
+        "away_goals": 1,
+        "status": "final",
+        "source": "verified:user-table",
+        "available_after_utc": "2026-06-13T00:00:00+00:00",
+    },
+    {
+        "date": "2026-06-13",
+        "home": "Qatar",
+        "away": "Switzerland",
+        "home_goals": 1,
+        "away_goals": 1,
+        "status": "final",
+        "source": "verified:user-table",
+        "available_after_utc": "2026-06-14T00:00:00+00:00",
+    },
+    {
+        "date": "2026-06-13",
+        "home": "Brazil",
+        "away": "Morocco",
+        "home_goals": 1,
+        "away_goals": 1,
+        "status": "final",
+        "source": "verified:user-table",
+        "available_after_utc": "2026-06-14T00:07:00+00:00",
+    },
+    {
+        "date": "2026-06-13",
+        "home": "Haiti",
+        "away": "Scotland",
+        "home_goals": 1,
+        "away_goals": 2,
+        "status": "final",
+        "source": "verified:user-table",
+        "available_after_utc": "2026-06-14T03:03:00+00:00",
+    },
+    {
+        "date": "2026-06-13",
+        "home": "Australia",
+        "away": "Turkey",
+        "home_goals": 2,
+        "away_goals": 0,
+        "status": "final",
+        "source": "verified:user-table",
+        "available_after_utc": "2026-06-14T00:00:00+00:00",
+    },
+]
 
 FALLBACK_2026_GROUPS: Dict[str, List[str]] = {
     "Group A": ["Mexico", "South Africa", "South Korea", "Czech Republic"],
@@ -162,7 +245,7 @@ def fixture_results_status(fixture_df: Optional[pd.DataFrame] = None) -> Dict[st
 
 
 def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = False) -> Dict[str, Any]:
-    """Refresh final 2026 World Cup scores from FotMob, preserving valid local rows."""
+    """Refresh final 2026 World Cup scores, preserving valid local rows."""
 
     existing = load_worldcup_results_override()
     status = fixture_results_status(tournament_fixtures_dataframe(tournament))
@@ -172,28 +255,15 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
             "provider": "local_csv",
             "refresh_attempted": False,
             "refresh_added": 0,
+            "refresh_updated": 0,
+            "fotmob_final_rows": 0,
+            "sofascore_final_rows": 0,
+            "verified_final_rows": 0,
+            "conflicts": [],
             "warnings": [],
         }
 
     warnings: List[str] = []
-    fetched: List[Dict[str, Any]] = []
-    try:
-        from src.worldcup.fotmob_provider import (  # pylint: disable=import-outside-toplevel
-            FOTMOB_MATCHES_URL,
-            best_fotmob_match,
-            extract_fotmob_matches,
-            fotmob_get_json,
-            name_similarity,
-        )
-    except Exception as exc:
-        return {
-            **status,
-            "provider": "local_csv",
-            "refresh_attempted": True,
-            "refresh_added": 0,
-            "warnings": [f"FotMob no disponible: {exc.__class__.__name__}."],
-        }
-
     fixture_df = tournament_fixtures_dataframe(tournament)
     if fixture_df.empty:
         return {
@@ -201,13 +271,59 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
             "provider": "local_csv",
             "refresh_attempted": True,
             "refresh_added": 0,
+            "refresh_updated": 0,
+            "fotmob_final_rows": 0,
+            "sofascore_final_rows": 0,
+            "verified_final_rows": 0,
+            "conflicts": [],
             "warnings": ["No hay fixtures 2026 para refrescar resultados."],
         }
 
+    working = finalizable_worldcup_2026_fixtures(fixture_df)
+    fotmob_rows = fetch_fotmob_worldcup_result_rows(working, warnings)
+    sofascore_rows = fetch_sofascore_worldcup_result_rows(working, warnings)
+    verified_rows = verified_worldcup_2026_result_rows(working)
+    fetched = [*fotmob_rows, *sofascore_rows, *verified_rows]
+
+    merge = _merge_result_override_rows(existing, fetched)
+    merged_rows = merge["rows"]
+    added = int(merge["added"])
+    updated = int(merge["updated"])
+    if fetched and merged_rows:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(merged_rows, columns=RESULT_OVERRIDE_COLUMNS).to_csv(WORLD_CUP_2026_RESULTS_FILE, index=False)
+
+    if warnings:
+        warnings.append(RESULT_REFRESH_PARTIAL_WARNING)
+
+    refreshed = fixture_results_status(tournament_fixtures_dataframe(tournament))
+    provider_parts = []
+    if fotmob_rows:
+        provider_parts.append("fotmob")
+    if sofascore_rows:
+        provider_parts.append("sofascore")
+    if verified_rows:
+        provider_parts.append("verified")
+    provider_parts.append("local_csv")
+    return {
+        **refreshed,
+        "provider": "+".join(provider_parts),
+        "refresh_attempted": True,
+        "refresh_added": int(added),
+        "refresh_updated": int(updated),
+        "fotmob_final_rows": int(len(fotmob_rows)),
+        "sofascore_final_rows": int(len(sofascore_rows)),
+        "verified_final_rows": int(len(verified_rows)),
+        "conflicts": merge["conflicts"],
+        "warnings": list(dict.fromkeys(warnings)),
+    }
+
+
+def finalizable_worldcup_2026_fixtures(fixture_df: pd.DataFrame) -> pd.DataFrame:
     working = fixture_df.copy()
     working["_date"] = pd.to_datetime(working["Fecha"], errors="coerce")
     today = pd.Timestamp(datetime.now(timezone.utc).date())
-    working = working[
+    return working[
         working["_date"].notna()
         & (working["_date"] <= today)
         & working["Grupo"].astype(str).str.len().gt(0)
@@ -217,6 +333,21 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
         & ~working["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
     ].copy()
 
+
+def fetch_fotmob_worldcup_result_rows(working: pd.DataFrame, warnings: List[str]) -> List[Dict[str, Any]]:
+    try:
+        from src.worldcup.fotmob_provider import (  # pylint: disable=import-outside-toplevel
+            FOTMOB_MATCHES_URL,
+            best_fotmob_match,
+            extract_fotmob_matches,
+            fotmob_get_json,
+            name_similarity,
+        )
+    except Exception as exc:
+        warnings.append(f"FotMob no disponible: {exc.__class__.__name__}.")
+        return []
+
+    fetched: List[Dict[str, Any]] = []
     events_by_date: Dict[str, List[Dict[str, Any]]] = {}
     for date_key in sorted({str(value.date()) for value in working["_date"].dropna()}):
         try:
@@ -225,6 +356,8 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
         except Exception as exc:
             warnings.append(f"FotMob {date_key}: {exc.__class__.__name__}.")
             events_by_date[date_key] = []
+        if not events_by_date[date_key]:
+            warnings.append(f"FotMob {date_key}: sin eventos para fixtures vencidos.")
 
     for _, fixture in working.iterrows():
         date_key = str(fixture["_date"].date())
@@ -242,50 +375,192 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
         home_goals, away_goals = score
         if reverse:
             home_goals, away_goals = away_goals, home_goals
-        fetched.append({
-            "date": date_key,
-            "home": home,
-            "away": away,
-            "home_goals": int(home_goals),
-            "away_goals": int(away_goals),
-            "status": "final",
-            "source": f"fotmob:{event.get('id') or event.get('matchId') or ''}:confidence={confidence:.2f}",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
+        fetched.append(result_override_payload(
+            date_key=date_key,
+            home=home,
+            away=away,
+            home_goals=home_goals,
+            away_goals=away_goals,
+            source=f"fotmob:{event.get('id') or event.get('matchId') or ''}:confidence={confidence:.2f}",
+        ))
+    return fetched
 
-    merged_rows = _merge_result_override_rows(existing, fetched)
-    added = max(len(merged_rows) - len(existing), 0)
-    if fetched and merged_rows:
-        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(merged_rows, columns=RESULT_OVERRIDE_COLUMNS).to_csv(WORLD_CUP_2026_RESULTS_FILE, index=False)
 
-    refreshed = fixture_results_status(tournament_fixtures_dataframe(tournament))
+def fetch_sofascore_worldcup_result_rows(working: pd.DataFrame, warnings: List[str]) -> List[Dict[str, Any]]:
+    try:
+        from src.worldcup.lanus_provider import (  # pylint: disable=import-outside-toplevel
+            best_event_match,
+            import_lanusstats,
+        )
+    except Exception as exc:
+        warnings.append(f"SofaScore no disponible: {exc.__class__.__name__}.")
+        return []
+
+    try:
+        lanus = import_lanusstats()
+    except Exception as exc:
+        warnings.append(f"SofaScore no disponible: {exc.__class__.__name__}.")
+        return []
+
+    fetched: List[Dict[str, Any]] = []
+    events_by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for date_key in sorted({str(value.date()) for value in working["_date"].dropna()}):
+        sofascore = lanus.SofaScore()
+        try:
+            payload = sofascore.sofascore_request(f"api/v1/sport/football/scheduled-events/{date_key}")
+            events = payload.get("events", []) if isinstance(payload, dict) else []
+            events_by_date[date_key] = [event for event in events if isinstance(event, dict)]
+        except Exception as exc:
+            warnings.append(f"SofaScore {date_key}: {exc.__class__.__name__}.")
+            events_by_date[date_key] = []
+        finally:
+            close = getattr(sofascore, "close", None)
+            if callable(close):
+                close()
+        if not events_by_date[date_key]:
+            warnings.append(f"SofaScore {date_key}: sin eventos para fixtures vencidos.")
+
+    for _, fixture in working.iterrows():
+        date_key = str(fixture["_date"].date())
+        home = clean_team_name(fixture.get("Equipo 1"))
+        away = clean_team_name(fixture.get("Equipo 2"))
+        best = best_event_match(events_by_date.get(date_key, []), home, away)
+        if not best:
+            continue
+        event, confidence, reverse = best
+        if not _sofascore_event_is_final(event):
+            continue
+        score = _sofascore_event_score(event)
+        if score is None:
+            continue
+        home_goals, away_goals = score
+        if reverse:
+            home_goals, away_goals = away_goals, home_goals
+        fetched.append(result_override_payload(
+            date_key=date_key,
+            home=home,
+            away=away,
+            home_goals=home_goals,
+            away_goals=away_goals,
+            source=f"sofascore:{event.get('id') or ''}:confidence={confidence:.2f}",
+        ))
+    return fetched
+
+
+def verified_worldcup_2026_result_rows(working: pd.DataFrame) -> List[Dict[str, Any]]:
+    fixture_keys = {
+        _worldcup_result_key(row.get("Fecha"), row.get("Equipo 1"), row.get("Equipo 2"))
+        for _, row in working.iterrows()
+    }
+    now = pd.Timestamp(datetime.now(timezone.utc))
+    rows: List[Dict[str, Any]] = []
+    for row in VERIFIED_WORLD_CUP_2026_RESULTS:
+        available_after = pd.to_datetime(row.get("available_after_utc"), utc=True, errors="coerce")
+        if pd.notna(available_after) and available_after > now:
+            continue
+        key = _worldcup_result_key(row.get("date"), row.get("home"), row.get("away"))
+        if key not in fixture_keys:
+            continue
+        rows.append(result_override_payload(
+            date_key=str(row.get("date", ""))[:10],
+            home=clean_team_name(row.get("home")),
+            away=clean_team_name(row.get("away")),
+            home_goals=row.get("home_goals"),
+            away_goals=row.get("away_goals"),
+            source=str(row.get("source") or "verified"),
+        ))
+    return rows
+
+
+def result_override_payload(date_key: str, home: Any, away: Any, home_goals: Any, away_goals: Any, source: str) -> Dict[str, Any]:
     return {
-        **refreshed,
-        "provider": "fotmob+local_csv" if fetched else "local_csv",
-        "refresh_attempted": True,
-        "refresh_added": int(added),
-        "fotmob_final_rows": int(len(fetched)),
-        "warnings": warnings,
+        "date": date_key,
+        "home": clean_team_name(home),
+        "away": clean_team_name(away),
+        "home_goals": int(home_goals),
+        "away_goals": int(away_goals),
+        "status": "final",
+        "source": source,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
-def _merge_result_override_rows(existing: pd.DataFrame, fetched: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _merge_result_override_rows(existing: pd.DataFrame, fetched: List[Dict[str, Any]]) -> Dict[str, Any]:
     rows: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    original_keys = set()
     for _, row in existing.iterrows():
         payload = {column: row.get(column, "") for column in RESULT_OVERRIDE_COLUMNS}
         key = _worldcup_result_key(payload.get("date"), payload.get("home"), payload.get("away"))
         if key[0] and key[1] and key[2]:
             rows[key] = payload
+            original_keys.add(key)
+    added = 0
+    updated = 0
+    conflicts: List[Dict[str, Any]] = []
     for row in fetched:
         key = _worldcup_result_key(row.get("date"), row.get("home"), row.get("away"))
         if not all(key):
             continue
-        existing_row = rows.get(key)
-        if existing_row and _result_override_row_is_valid(existing_row):
+        incoming = {column: row.get(column, "") for column in RESULT_OVERRIDE_COLUMNS}
+        if not _result_override_row_is_valid(incoming):
             continue
-        rows[key] = {column: row.get(column, "") for column in RESULT_OVERRIDE_COLUMNS}
-    return list(rows.values())
+        existing_row = rows.get(key)
+        if not existing_row or not _result_override_row_is_valid(existing_row):
+            rows[key] = incoming
+            added += int(key not in original_keys)
+            updated += int(key in original_keys)
+            continue
+        existing_score = _result_score_pair(existing_row)
+        incoming_score = _result_score_pair(incoming)
+        existing_priority = _result_source_priority(existing_row.get("source"))
+        incoming_priority = _result_source_priority(incoming.get("source"))
+        score_conflict = existing_score != incoming_score
+        should_replace = incoming_priority > existing_priority or (
+            incoming_priority == existing_priority
+            and score_conflict
+            and str(incoming.get("updated_at") or "") >= str(existing_row.get("updated_at") or "")
+        )
+        if score_conflict:
+            conflicts.append({
+                "date": key[0],
+                "home": existing_row.get("home", incoming.get("home", "")),
+                "away": existing_row.get("away", incoming.get("away", "")),
+                "existing_score": f"{int(existing_score[0])}-{int(existing_score[1])}" if existing_score else "",
+                "incoming_score": f"{int(incoming_score[0])}-{int(incoming_score[1])}" if incoming_score else "",
+                "existing_source": str(existing_row.get("source") or ""),
+                "incoming_source": str(incoming.get("source") or ""),
+                "resolved_source": str(incoming.get("source") if should_replace else existing_row.get("source") or ""),
+            })
+        if should_replace or (incoming_priority > existing_priority and not score_conflict):
+            if incoming != existing_row:
+                updated += 1
+            rows[key] = incoming
+    ordered = sorted(
+        rows.values(),
+        key=lambda item: (
+            str(item.get("date") or ""),
+            clean_team_name(item.get("home")),
+            clean_team_name(item.get("away")),
+        ),
+    )
+    return {"rows": ordered, "added": added, "updated": updated, "conflicts": conflicts}
+
+
+def _result_score_pair(row: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    return _score_pair_from_values(row.get("home_goals"), row.get("away_goals"))
+
+
+def _result_source_priority(source: Any) -> int:
+    text = str(source or "").strip().lower()
+    if text.startswith("fotmob:") or text.startswith("sofascore:"):
+        return 40
+    if text.startswith("verified:"):
+        return 30
+    if text.startswith("guardian:"):
+        return 20
+    if text in {"manual", "guardian", "local_csv", "csv"}:
+        return 10
+    return 5
 
 
 def _result_override_row_is_valid(row: Dict[str, Any]) -> bool:
@@ -342,6 +617,43 @@ def _fotmob_event_score(event: Dict[str, Any]) -> Optional[Tuple[int, int]]:
         if direct is not None:
             return direct
     return None
+
+
+def _sofascore_event_is_final(event: Dict[str, Any]) -> bool:
+    status = event.get("status") if isinstance(event.get("status"), dict) else {}
+    candidates = [
+        status.get("type"),
+        status.get("description"),
+        status.get("short"),
+        status.get("status"),
+        event.get("status"),
+        event.get("statusDescription"),
+        event.get("statusText"),
+    ]
+    code = pd.to_numeric(status.get("code"), errors="coerce")
+    if pd.notna(code) and int(code) in {100, 110, 120}:
+        return True
+    final_states = {"finished", "ended", "after penalties", "after extra time", "ft", "aet", "ap"}
+    return any(str(value or "").strip().lower() in final_states for value in candidates)
+
+
+def _sofascore_event_score(event: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    direct = _score_pair_from_values(
+        _sofascore_score_value(event.get("homeScore")),
+        _sofascore_score_value(event.get("awayScore")),
+    )
+    if direct is not None:
+        return direct
+    return _score_pair_from_values(event.get("home_score"), event.get("away_score"))
+
+
+def _sofascore_score_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        for key in ("current", "display", "normaltime", "period2", "period1"):
+            if value.get(key) not in (None, ""):
+                return value.get(key)
+        return None
+    return value
 
 
 def _score_pair_from_values(home: Any, away: Any) -> Optional[Tuple[int, int]]:

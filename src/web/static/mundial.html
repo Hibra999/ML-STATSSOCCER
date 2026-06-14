@@ -96,6 +96,11 @@
           <label>Bayes<select id="upcoming-bayes-profile"><option value="deep">Deep</option><option value="light">Light</option></select></label>
           <label>CUDA<select id="upcoming-sota-device"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
         </div>
+        <div id="upcoming-benchmark-controls" class="inline-control-row hidden">
+          <label class="check"><input id="upcoming-benchmark-tuning-enabled" type="checkbox"> Optuna N</label>
+          <label>Trials<input id="upcoming-benchmark-tuning-trials" type="number" min="1" max="100" step="1" value="20"></label>
+          <label>Sampler<select id="upcoming-benchmark-tuning-sampler"><option value="tpe">TPE</option><option value="random">Random</option></select></label>
+        </div>
         <button id="upcoming-predict-btn" class="primary" type="button">Generar reporte</button>
       </div>
       <div class="control-grid compact-controls upcoming-advanced-controls">

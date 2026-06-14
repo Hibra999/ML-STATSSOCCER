@@ -1,3 +1,9 @@
 date,home,away,home_goals,away_goals,status,source,updated_at
-2026-06-11,Mexico,South Africa,2,0,final,guardian,2026-06-12T00:30:00Z
-2026-06-11,South Korea,Czech Republic,2,1,final,guardian,2026-06-12T00:30:00Z
+2026-06-11,Mexico,South Africa,2,0,final,verified:user-table,2026-06-14T00:00:00+00:00
+2026-06-11,South Korea,Czech Republic,2,1,final,verified:user-table,2026-06-14T00:00:00+00:00
+2026-06-12,Canada,Bosnia & Herzegovina,1,1,final,verified:user-table,2026-06-14T00:00:00+00:00
+2026-06-12,USA,Paraguay,4,1,final,verified:user-table,2026-06-14T00:00:00+00:00
+2026-06-13,Qatar,Switzerland,1,1,final,verified:user-table,2026-06-14T00:00:00+00:00
+2026-06-13,Brazil,Morocco,1,1,final,verified:user-table,2026-06-14T00:00:00+00:00
+2026-06-13,Haiti,Scotland,1,2,final,verified:user-table,2026-06-14T00:00:00+00:00
+2026-06-13,Australia,Turkey,2,0,final,verified:user-table,2026-06-14T00:00:00+00:00

@@ -188,6 +188,15 @@ class RecentPoissonWorldCupModel:
         return team2, team1, goals1, goals2
 
 
+def apply_recent_context_model(model: Any, config: Dict[str, Any]) -> Any:
+    if isinstance(model, RecentPoissonWorldCupModel):
+        return model
+    return RecentPoissonWorldCupModel(
+        base_model=model,
+        recent_match_limit=int(config.get("poisson_recent_matches") or DEFAULT_CONFIG["poisson_recent_matches"]),
+    )
+
+
 def _match_before_date(match: Dict[str, Any] | None) -> Any:
     if not isinstance(match, dict):
         return None
@@ -907,8 +916,24 @@ def alternatives_benchmark_report(
         progress_callback=None,
 ) -> Dict[str, Any]:
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
-    results_refresh = refresh_worldcup_2026_results(tournament, refresh=bool(config.get("refresh", False)))
+    results_refresh = refresh_worldcup_2026_results(tournament, refresh=True)
     history_df, history_source = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    model_sequence = list(BENCHMARK_SCORE_MODEL_SEQUENCE)
+    tuning_summary = tune_benchmark_poisson_recent_matches(
+        history_df=history_df,
+        tournament=tournament,
+        config=config,
+        model_sequence=model_sequence,
+        start_time=start_time,
+        hardware=hardware,
+        progress_callback=progress_callback,
+    )
+    if tuning_summary.get("best_poisson_recent_matches"):
+        config = {
+            **config,
+            "poisson_recent_matches": int(tuning_summary["best_poisson_recent_matches"]),
+            "benchmark_tuning": tuning_summary,
+        }
     group_map = groups_from_tournament(tournament)
     team_names = [team for group_teams in group_map.values() for team in group_teams]
     base_model = WorldCupModel.from_history(
@@ -923,7 +948,6 @@ def alternatives_benchmark_report(
     group_filter = str(payload.get("group") or "").strip()
     fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter).head(limit).copy()
     fixture_records = [fixture for _, fixture in fixture_df.iterrows()]
-    model_sequence = list(BENCHMARK_SCORE_MODEL_SEQUENCE)
     fixture_reports = upcoming_sota_fixture_reports(
         tournament=tournament,
         base_model=base_model,
@@ -961,7 +985,13 @@ def alternatives_benchmark_report(
     warnings = unique_strings([
         *hardware.get("warnings", []),
         *results_refresh.get("warnings", []),
+        *tuning_summary.get("warnings", []),
         *backtest.get("warnings", []),
+        *[
+            f"Conflicto resultado {item.get('date', '')} {item.get('home', '')} vs {item.get('away', '')}: "
+            f"{item.get('existing_score', '')} -> {item.get('incoming_score', '')} ({item.get('resolved_source', '')})"
+            for item in results_refresh.get("conflicts", [])
+        ],
         *[
             warning
             for report in fixture_reports
@@ -981,6 +1011,7 @@ def alternatives_benchmark_report(
         "results_refresh": results_refresh,
         "history_source": history_source,
         "poisson_recent_matches": config["poisson_recent_matches"],
+        "benchmark_tuning": tuning_summary,
         "backtest_last_n": int(config["backtest_last_n"]),
         "backtest_auto_n": int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0),
         "backtest_scope": backtest_summary.get("scope", config.get("backtest_scope", "")),
@@ -1036,8 +1067,9 @@ def alternatives_benchmark_report(
 
 
 def poisson_baseline_report_for_fixture(base_model: WorldCupModel, fixture: pd.Series, config: Dict[str, Any]) -> Dict[str, Any]:
-    metadata = score_model_metadata(base_model)
-    probabilities = model_probabilities_for_fixture(base_model, fixture, config)
+    prediction_model = apply_recent_context_model(base_model, config)
+    metadata = score_model_metadata(prediction_model)
+    probabilities = model_probabilities_for_fixture(prediction_model, fixture, config)
     report = score_prediction_model_report(
         model_key=DEFAULT_SCORE_MODEL,
         metadata=metadata,
@@ -1046,7 +1078,7 @@ def poisson_baseline_report_for_fixture(base_model: WorldCupModel, fixture: pd.S
         config=config,
         already_percent=False,
     )
-    score_distribution = score_distribution_for_fixture(base_model, fixture, probabilities, config)
+    score_distribution = score_distribution_for_fixture(prediction_model, fixture, probabilities, config)
     report["score_distribution"] = score_distribution
     report["top_scores"] = score_distribution.get("top_scores", [])
     report["heatmap"] = score_distribution.get("heatmap", {})
@@ -1059,6 +1091,129 @@ def strip_consensus_fields_from_alternative_report(fixture_report: Dict[str, Any
         if isinstance(model, dict):
             model.pop("consensus_eligible", None)
             model.pop("signature", None)
+
+
+def tune_benchmark_poisson_recent_matches(
+        history_df: pd.DataFrame,
+        tournament: Dict[str, Any],
+        config: Dict[str, Any],
+        model_sequence: List[str],
+        start_time: float,
+        hardware: Dict[str, Any],
+        progress_callback=None,
+) -> Dict[str, Any]:
+    enabled = bool(config.get("benchmark_tuning_enabled", False))
+    current_n = int(config.get("poisson_recent_matches") or DEFAULT_CONFIG["poisson_recent_matches"])
+    summary: Dict[str, Any] = {
+        "enabled": enabled,
+        "available": False,
+        "best_poisson_recent_matches": current_n,
+        "best_value": None,
+        "n_trials": int(config.get("benchmark_tuning_trials") or 0),
+        "sampler": str(config.get("benchmark_tuning_sampler") or "tpe"),
+        "objective": "mean_log_loss",
+        "trials": [],
+        "warnings": [],
+    }
+    if not enabled:
+        return summary
+    if history_df is None or history_df.empty:
+        summary["warnings"] = ["Optuna benchmark no disponible: historico vacio."]
+        return summary
+    required = {"Date", "Team 1", "Team 2", "G1", "G2"}
+    if not required.issubset(history_df.columns):
+        summary["warnings"] = ["Optuna benchmark no disponible: columnas historicas incompletas."]
+        return summary
+    confirmed_df = confirmed_worldcup_2026_backtest_rows(tournament)
+    if confirmed_df.empty:
+        summary["warnings"] = ["Optuna benchmark no disponible: no hay partidos 2026 finalizados."]
+        return summary
+    try:
+        import optuna  # type: ignore  # pylint: disable=import-outside-toplevel
+    except Exception as exc:
+        summary["warnings"] = [f"Optuna benchmark no disponible: {exc.__class__.__name__}."]
+        return summary
+
+    working = history_df.copy()
+    working["_date"] = pd.to_datetime(working["Date"], errors="coerce")
+    working = working[working["_date"].notna()].sort_values("_date", kind="stable").reset_index(drop=True)
+    historical_train_df = working.drop(columns=["_date"]).copy()
+    n_trials = int(_clamp_int(config.get("benchmark_tuning_trials", 20), 1, 100))
+    summary["n_trials"] = n_trials
+    sampler_name = str(config.get("benchmark_tuning_sampler") or "tpe")
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=benchmark_optuna_sampler(optuna, sampler_name, int(config.get("seed") or DEFAULT_CONFIG["seed"])),
+    )
+
+    def objective(trial) -> float:
+        recent_n = int(trial.suggest_int("poisson_recent_matches", 3, 50))
+        trial_config = {**config, "poisson_recent_matches": recent_n, "benchmark_tuning_enabled": False}
+        losses: List[float] = []
+        for model_index, model_key in enumerate(model_sequence, start=1):
+            metrics = evaluate_score_model_walk_forward_2026(
+                model_key=model_key,
+                history_df=historical_train_df,
+                confirmed_df=confirmed_df,
+                tournament=tournament,
+                config=trial_config,
+                start_time=start_time,
+                hardware=hardware,
+                model_index=model_index,
+                model_total=max(len(model_sequence), 1),
+                progress_callback=None,
+            )
+            if metrics.get("available"):
+                losses.append(float(metrics.get("log_loss") or 0.0))
+        trial.set_user_attr("available_models", len(losses))
+        if not losses:
+            return 1_000_000.0
+        return float(np.mean(losses))
+
+    def on_trial_complete(study, trial) -> None:
+        value = float(trial.value) if trial.value is not None else None
+        row = {
+            "number": int(trial.number),
+            "poisson_recent_matches": int(trial.params.get("poisson_recent_matches", current_n)),
+            "value": round(value, 6) if value is not None else None,
+            "state": str(getattr(trial.state, "name", trial.state)),
+            "available_models": int(trial.user_attrs.get("available_models") or 0),
+        }
+        summary["trials"].append(row)
+        emit_report_progress(
+            progress_callback,
+            stage="benchmark_tuning",
+            start_time=start_time,
+            model_index=min(int(trial.number) + 1, n_trials),
+            model_total=n_trials,
+            model_key="optuna",
+            fixture_index=1,
+            fixture_total=1,
+            hardware=hardware,
+            message=(
+                f"Optuna Poisson ultimos: trial {int(trial.number) + 1}/{n_trials}, "
+                f"N={row['poisson_recent_matches']}, log-loss={row['value']}"
+            ),
+        )
+
+    try:
+        study.optimize(objective, n_trials=n_trials, callbacks=[on_trial_complete], show_progress_bar=False)
+    except Exception as exc:
+        summary["warnings"] = [f"Optuna benchmark interrumpido: {exc.__class__.__name__}: {exc}"]
+        return summary
+
+    if study.best_trial is not None:
+        summary["available"] = True
+        summary["best_poisson_recent_matches"] = int(study.best_trial.params.get("poisson_recent_matches", current_n))
+        summary["best_value"] = round(float(study.best_value), 6)
+    return summary
+
+
+def benchmark_optuna_sampler(optuna, name: str, seed: int):
+    key = str(name or "tpe").strip().lower().replace("_", "-")
+    if key == "random":
+        return optuna.samplers.RandomSampler(seed=seed)
+    return optuna.samplers.TPESampler(seed=seed)
 
 
 def alternatives_backtest_report(
@@ -1179,6 +1334,10 @@ def confirmed_worldcup_2026_backtest_rows(tournament: Dict[str, Any]) -> pd.Data
     if working.empty:
         return pd.DataFrame(columns=["No.", "Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group", "Source"])
     working = attach_fixture_schedule(working)
+    today = pd.Timestamp(_now_utc().date())
+    working = working[working["_date"].notna() & (working["_date"] <= today)].copy()
+    if working.empty:
+        return pd.DataFrame(columns=["No.", "Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group", "Source"])
     working = working[working["_date"].notna()].sort_values(["_sort_time", "No."], kind="stable").reset_index(drop=True)
     rows = []
     for _, fixture in working.iterrows():
@@ -1286,7 +1445,8 @@ def evaluate_score_model_walk_forward_2026(
                     "params": {},
                     "warnings": [warning],
                 }
-        row_metrics = score_model_backtest_prediction(model, eval_row, config)
+        prediction_model = apply_recent_context_model(model, config)
+        row_metrics = score_model_backtest_prediction(prediction_model, eval_row, config)
         if not row_metrics:
             continue
         accumulate_backtest_totals(totals, row_metrics)
@@ -1790,6 +1950,7 @@ def upcoming_sota_fixture_reports(
                 "params": {},
                 "warnings": [f"{exc.__class__.__name__}: {exc}; se usa Poisson independiente."],
             }
+        score_model = apply_recent_context_model(score_model, config)
         for fixture_index, fixture in enumerate(fixtures, start=1):
             emit_report_progress(
                 progress_callback,
@@ -1870,6 +2031,14 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
         config["stat_model_refit"] = False
     if pipeline_mode == ALTERNATIVES_BENCHMARK_PIPELINE_MODE:
         config["sota_calculation_mode"] = "exact"
+        config["benchmark_tuning_enabled"] = bool(payload.get("benchmark_tuning_enabled", payload.get("tuning_enabled", False)))
+        config["benchmark_tuning_trials"] = int(_clamp_int(payload.get("benchmark_tuning_trials", payload.get("n_trials", 20)), 1, 100))
+        sampler = str(payload.get("benchmark_tuning_sampler", payload.get("optuna_sampler", "tpe")) or "tpe").strip().lower()
+        config["benchmark_tuning_sampler"] = sampler if sampler in {"tpe", "random"} else "tpe"
+    else:
+        config["benchmark_tuning_enabled"] = False
+        config["benchmark_tuning_trials"] = 0
+        config["benchmark_tuning_sampler"] = "tpe"
     return config
 
 

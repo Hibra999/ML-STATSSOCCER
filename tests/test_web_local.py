@@ -377,6 +377,10 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Backtest: predicción vs resultado" in app_source
     assert "backtestPredictionReviewHtml" in app_source
     assert "U/O 2.5" in app_source
+    assert "finalizados detectados" in app_source
+    assert "upcoming-benchmark-tuning-enabled" in html_source
+    assert "benchmark_tuning_enabled" in app_source
+    assert "Optuna N" in app_source
     assert "Backtest N" not in html_source
     assert "upcoming-backtest-last-n" not in html_source
     assert "upcoming-backtest-last-n" not in app_source
