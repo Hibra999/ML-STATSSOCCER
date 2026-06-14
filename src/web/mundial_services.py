@@ -2125,10 +2125,42 @@ def worldcup_feature_research_summary() -> Dict[str, Any]:
         "active_or_cached_families": active,
         "families": families,
         "research_basis": [
-            "Dixon-Coles: correccion de baja anotacion y decaimiento temporal.",
-            "Elo/pi-ratings: fuerza dinamica por seleccion.",
-            "Market odds: baseline externo fuerte para calibracion.",
-            "xG/VAEP: calidad de ocasiones y contribucion de jugadores cuando hay eventos.",
+            {
+                "title": "Dixon-Coles 1997",
+                "url": "https://doi.org/10.1111/1467-9876.00065",
+                "finding": "Corrige marcadores bajos y usa decaimiento temporal.",
+                "apply": "Mantener Dixon-Coles como candidato estadistico activo.",
+            },
+            {
+                "title": "Pi-ratings / Elo dinamico",
+                "url": "https://doi.org/10.1007/s10994-012-5285-8",
+                "finding": "Ratings locales/visitantes capturan fuerza cambiante por equipo.",
+                "apply": "Seguir agregando forma, ratings y ajuste por rival con corte temporal.",
+            },
+            {
+                "title": "Market odds as benchmark",
+                "url": "https://arxiv.org/abs/2604.17194",
+                "finding": "Cuotas no-vig son un baseline fuerte y revelan sesgo favorito-longshot.",
+                "apply": "Usar odds cacheadas como feature y como comparador, no como dato en vivo obligatorio.",
+            },
+            {
+                "title": "xG+ team signal",
+                "url": "https://arxiv.org/abs/2512.00203",
+                "finding": "Modelar probabilidad de tiro + calidad mejora senal de equipo.",
+                "apply": "Priorizar xG/xGA rolling y volumen/calidad de tiros cuando exista fuente historica.",
+            },
+            {
+                "title": "VAEP / socceraction",
+                "url": "https://github.com/ML-KULeuven/socceraction",
+                "finding": "Valora acciones con contexto mediante SPADL, VAEP y xT.",
+                "apply": "Agregar features de jugadores/acciones solo si vienen cacheadas antes del partido.",
+            },
+            {
+                "title": "footBayes dinamico",
+                "url": "https://github.com/LeoEgidi/footBayes",
+                "finding": "Modelos bayesianos dinamicos mejoran fuerza ataque/defensa cuando hay historia suficiente.",
+                "apply": "Dejar Bayes como linea futura evaluada por benchmark antes de activarla.",
+            },
         ],
     }
 
