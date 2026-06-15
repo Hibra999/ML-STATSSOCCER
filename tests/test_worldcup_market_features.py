@@ -130,6 +130,81 @@ def test_qualifier_features_exclude_future_matches_from_match_row():
     assert x.iloc[0].get("qualifier_matches_home", 0.0) == 0.0
 
 
+def test_xg_lightgbm_features_are_asof_and_missing_safe(tmp_path, monkeypatch):
+    monkeypatch.setattr(training, "FEATURE_STORE_ROOT", tmp_path / "features")
+    model = WorldCupModel.from_history(pd.DataFrame(), teams=["Mexico", "Canada"])
+    rows = training.sanitize_match_rows(pd.DataFrame([
+        {
+            "Date": "2026-06-10",
+            "Home": "Mexico",
+            "Away": "Canada",
+            "Label": "H",
+            "HG": 1,
+            "AG": 0,
+            "Source": "fixture",
+        },
+    ]))
+    qualifier_rows = normalize_market_frame(pd.DataFrame([
+        {
+            "Date": "2026-06-09",
+            "Year": 2026,
+            "Home": "Mexico",
+            "Away": "Canada",
+            "HG": 2,
+            "AG": 1,
+            "is_qualifier": True,
+            "market_source": "football-data:qualifier",
+            "home_xg": 1.8,
+            "away_xg": 0.7,
+            "home_shots": 12,
+            "away_shots": 6,
+            "home_shots_on_target": 5,
+            "away_shots_on_target": 2,
+        },
+        {
+            "Date": "2026-06-11",
+            "Year": 2026,
+            "Home": "Mexico",
+            "Away": "Canada",
+            "HG": 6,
+            "AG": 0,
+            "is_qualifier": True,
+            "market_source": "football-data:qualifier",
+            "home_xg": 9.9,
+            "away_xg": 0.1,
+            "home_shots": 99,
+            "away_shots": 1,
+        },
+    ]))
+
+    x, _, _ = training.build_training_matrix(
+        rows,
+        base_model=model,
+        qualifier_rows=qualifier_rows,
+        team_features=pd.DataFrame(),
+        target="result",
+        feature_profile=training.FEATURE_PROFILE_BALANCED,
+    )
+    missing_x, _, _ = training.build_training_matrix(
+        rows,
+        base_model=model,
+        qualifier_rows=pd.DataFrame(),
+        team_features=pd.DataFrame(),
+        target="result",
+        feature_profile=training.FEATURE_PROFILE_BALANCED,
+    )
+
+    assert x.iloc[0]["qualifier_xg_available"] == pytest.approx(1.0)
+    assert x.iloc[0]["xg_available"] == pytest.approx(1.0)
+    assert x.iloc[0]["xg_diff_recent15"] == pytest.approx(1.1)
+    assert x.iloc[0]["xg_total_recent15"] == pytest.approx(2.5)
+    assert x.iloc[0]["shots_quality_ratio"] == pytest.approx(2.5 / 18.0)
+    assert x.iloc[0]["xg_diff_recent15"] != pytest.approx(9.8)
+    assert missing_x.iloc[0]["xg_available"] == pytest.approx(0.0)
+    assert missing_x.iloc[0]["xg_diff_recent15"] == pytest.approx(0.0)
+    assert not missing_x.isna().any().any()
+
+
 def test_api_football_provider_without_key_does_not_call_network(tmp_path, monkeypatch):
     monkeypatch.setattr(api_football_provider, "API_FOOTBALL_RAW_ROOT", tmp_path / "raw")
     monkeypatch.setattr(api_football_provider, "DOTENV_FILE", tmp_path / ".env")

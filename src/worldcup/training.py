@@ -136,6 +136,10 @@ WORLD_CUP_MODEL_LABELS = {
     "lightgbm": "LightGBM",
     "xgboost": "XGBoost",
 }
+XG_LIGHTGBM_PROFILE = "xg_lightgbm"
+WORLD_CUP_MODEL_PROFILE_LABELS = {
+    XG_LIGHTGBM_PROFILE: "xG-LightGBM",
+}
 FEATURE_PROFILE_FULL = "full"
 FEATURE_PROFILE_BALANCED = "balanced"
 DEFAULT_FEATURE_PROFILE = FEATURE_PROFILE_BALANCED
@@ -152,7 +156,7 @@ TARGET_WORLDCUP_YEAR = FUTURE_LABEL_EXCLUDED_YEAR
 INTERNATIONAL_TRAINING_START_YEAR = 2014
 INTERNATIONAL_TRAINING_START_DATE = f"{INTERNATIONAL_TRAINING_START_YEAR}-01-01"
 PREPARED_SCHEMA_VERSION = "worldcup_2026_international_since_2014_v4_split_80_10_10"
-FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v3_balanced"
+FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v4_xg_lightgbm"
 EVAL_STRATEGY_LAST_30 = "last_30_international_test"
 SPLIT_POLICY_VALIDATION_LAST_30 = "temporal_since_2014_validation_last_30_test"
 EVAL_STRATEGY_TEMPORAL_80_10_10 = "temporal_80_10_10"
@@ -238,6 +242,7 @@ BALANCED_FEATURE_FAMILY_CAPS = {
     "recent15": 55,
     "h2h": 35,
     "xi": 45,
+    "xg_lightgbm": 45,
     "kaggle": 0,
 }
 BALANCED_CORE_FAMILIES = {
@@ -259,6 +264,7 @@ BALANCED_CORE_FAMILIES = {
     "dc",
     "total",
     "goal",
+    "xg_lightgbm",
     "fixture",
     "stage",
     "venue",
@@ -443,6 +449,15 @@ def training_options() -> Dict[str, Any]:
         })
     return {
         "models": json_safe(models),
+        "model_profiles": json_safe([
+            {
+                "key": XG_LIGHTGBM_PROFILE,
+                "label": WORLD_CUP_MODEL_PROFILE_LABELS[XG_LIGHTGBM_PROFILE],
+                "base_model": "lightgbm",
+                "defaults": xg_lightgbm_defaults(),
+                "supports_cuda": True,
+            },
+        ]),
         "targets": [
             {"key": "dual_markets", "label": "1X2 + U/O 0.5-3.5 ML"},
         ],
@@ -628,6 +643,20 @@ def worldcup_model_defaults(model_key: str) -> Dict[str, Any]:
     defaults = dict(MODEL_SPECS[model_key].defaults)
     if model_key == "xgboost":
         defaults.update(WORLDCUP_XGBOOST_DEFAULTS)
+    return defaults
+
+
+def xg_lightgbm_defaults() -> Dict[str, Any]:
+    defaults = worldcup_model_defaults("lightgbm")
+    defaults.update({
+        "model_type": "lightgbm",
+        "model_profile": XG_LIGHTGBM_PROFILE,
+        "training_target": "result",
+        "market_mode": "dual_markets",
+        "feature_profile": DEFAULT_FEATURE_PROFILE,
+        "max_features": DEFAULT_MAX_FEATURES,
+        "device": "auto",
+    })
     return defaults
 
 
@@ -1230,7 +1259,8 @@ def train_single_hybrid_model(
         "requested_target": train_config["training_target"],
         "target_column": normalized["target_column"],
         "model_type": train_config["model_type"],
-        "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
+        "model_profile": train_config.get("model_profile", ""),
+        "model_label": train_config.get("model_label") or worldcup_model_label(train_config["model_type"], train_config.get("model_profile", "")),
         "model_id": model_id,
         "model_name": train_config["model_name"],
         "feature_profile": feature_profile,
@@ -1282,6 +1312,7 @@ def train_single_hybrid_model(
         "requested_target": train_config["training_target"],
         "model_id": model_id,
         "model_type": train_config["model_type"],
+        "model_profile": train_config.get("model_profile", ""),
         "feature_profile": feature_profile,
         "max_features": max_features,
         "feature_selection": feature_selection,
@@ -1456,7 +1487,8 @@ def train_dual_market_model(
         "requested_target": "dual_markets",
         "target_column": bundle_target_column,
         "model_type": train_config["model_type"],
-        "model_label": WORLD_CUP_MODEL_LABELS.get(train_config["model_type"], train_config["model_type"]),
+        "model_profile": train_config.get("model_profile", ""),
+        "model_label": train_config.get("model_label") or worldcup_model_label(train_config["model_type"], train_config.get("model_profile", "")),
         "model_id": bundle_id,
         "model_name": bundle_name,
         "feature_profile": result_record.get("feature_profile", train_config.get("feature_profile", DEFAULT_FEATURE_PROFILE)),
@@ -1511,6 +1543,7 @@ def train_dual_market_model(
         "requested_target": "dual_markets",
         "model_id": bundle_id,
         "model_type": train_config["model_type"],
+        "model_profile": train_config.get("model_profile", ""),
         "feature_profile": bundle_record["feature_profile"],
         "max_features": bundle_record["max_features"],
         "feature_selection": bundle_record["feature_selection"],
@@ -3648,6 +3681,8 @@ def team_feature_scopes(prefix: str, column: Any, feature_profile: str) -> Tuple
         if safe.endswith(BALANCED_HISTORY_SCOPED_SUFFIXES):
             return ("home", "away", "diff")
         return ("diff",)
+    if normalized_prefix in {"api_football", "qualifier"} and any(token in safe for token in ("xg", "shot")):
+        return ("home", "away", "diff")
     if normalized_prefix in {"api_football", "qualifier", "xi"}:
         return ("diff",)
     if normalized_prefix == "kaggle":
@@ -3918,7 +3953,140 @@ def match_feature_row(
             prefix="xi",
             feature_profile=feature_profile,
         )
+    row.update(xg_lightgbm_interaction_features(row, poisson))
     return row
+
+
+def xg_lightgbm_interaction_features(row: Dict[str, float], poisson: Dict[str, float]) -> Dict[str, float]:
+    qualifier_xg = scoped_feature_values(row, ("qualifier_xg_avg", "qualifier_xg_last"))
+    qualifier_xga = scoped_feature_values(row, ("qualifier_xga_avg", "qualifier_xga_last"))
+    qualifier_shots = scoped_feature_values(row, ("qualifier_shots_avg", "qualifier_shots_last"))
+    qualifier_sot = scoped_feature_values(row, ("qualifier_shots_on_target_avg", "qualifier_shots_on_target_last"))
+    api_xg = scoped_feature_values(row, (
+        "api_football_last_15_xg_for_avg",
+        "api_football_last_10_xg_for_avg",
+        "api_football_xg_for_avg",
+    ))
+    api_xga = scoped_feature_values(row, (
+        "api_football_last_15_xg_against_avg",
+        "api_football_last_10_xg_against_avg",
+        "api_football_xg_against_avg",
+    ))
+    api_shots = scoped_feature_values(row, (
+        "api_football_last_15_total_shots_for_avg",
+        "api_football_last_10_total_shots_for_avg",
+        "api_football_total_shots_for_avg",
+    ))
+    api_sot = scoped_feature_values(row, (
+        "api_football_last_15_shots_on_goal_for_avg",
+        "api_football_last_10_shots_on_goal_for_avg",
+        "api_football_shots_on_goal_for_avg",
+    ))
+    recent_xg = api_xg if api_xg["available"] else qualifier_xg
+    recent_xga = api_xga if api_xga["available"] else qualifier_xga
+    recent_shots = api_shots if api_shots["available"] else qualifier_shots
+    recent_sot = api_sot if api_sot["available"] else qualifier_sot
+    poisson_total = finite_float(poisson.get("lambda1")) + finite_float(poisson.get("lambda2"))
+    poisson_diff = finite_float(poisson.get("lambda1")) - finite_float(poisson.get("lambda2"))
+    market_total_proxy = market_total_goal_proxy(row)
+    xg_total = recent_xg["total"]
+    xg_diff = recent_xg["diff"]
+    shots_total = recent_shots["total"]
+    shots_quality_home = safe_ratio(recent_xg["home"], recent_shots["home"])
+    shots_quality_away = safe_ratio(recent_xg["away"], recent_shots["away"])
+    shots_quality_ratio = safe_ratio(xg_total, shots_total)
+    sot_rate_home = safe_ratio(recent_sot["home"], recent_shots["home"])
+    sot_rate_away = safe_ratio(recent_sot["away"], recent_shots["away"])
+    qualifier_available = 1.0 if qualifier_xg["available"] else 0.0
+    api_available = 1.0 if api_xg["available"] else 0.0
+    source_available = 1.0 if qualifier_available or api_available else 0.0
+    features = {
+        "xg_lightgbm_qualifier_xg_available": qualifier_available,
+        "xg_lightgbm_api_football_xg_available": api_available,
+        "xg_lightgbm_xg_available": source_available,
+        "xg_lightgbm_xg_home_recent15": recent_xg["home"],
+        "xg_lightgbm_xg_away_recent15": recent_xg["away"],
+        "xg_lightgbm_xg_diff_recent15": xg_diff,
+        "xg_lightgbm_xg_total_recent15": xg_total,
+        "xg_lightgbm_xga_home_recent15": recent_xga["home"],
+        "xg_lightgbm_xga_away_recent15": recent_xga["away"],
+        "xg_lightgbm_xga_diff_recent15": recent_xga["diff"],
+        "xg_lightgbm_shots_home_recent15": recent_shots["home"],
+        "xg_lightgbm_shots_away_recent15": recent_shots["away"],
+        "xg_lightgbm_shots_diff_recent15": recent_shots["diff"],
+        "xg_lightgbm_shots_total_recent15": shots_total,
+        "xg_lightgbm_sot_home_recent15": recent_sot["home"],
+        "xg_lightgbm_sot_away_recent15": recent_sot["away"],
+        "xg_lightgbm_sot_diff_recent15": recent_sot["diff"],
+        "xg_lightgbm_sot_total_recent15": recent_sot["total"],
+        "xg_lightgbm_shots_quality_home": shots_quality_home,
+        "xg_lightgbm_shots_quality_away": shots_quality_away,
+        "xg_lightgbm_shots_quality_ratio": shots_quality_ratio,
+        "xg_lightgbm_shots_quality_diff": shots_quality_home - shots_quality_away,
+        "xg_lightgbm_sot_rate_home": sot_rate_home,
+        "xg_lightgbm_sot_rate_away": sot_rate_away,
+        "xg_lightgbm_sot_rate_diff": sot_rate_home - sot_rate_away,
+        "xg_lightgbm_xg_vs_poisson_delta": xg_total - poisson_total if source_available else 0.0,
+        "xg_lightgbm_xg_diff_vs_poisson_delta": xg_diff - poisson_diff if source_available else 0.0,
+        "xg_lightgbm_xg_vs_market_delta": xg_total - market_total_proxy if source_available and market_total_proxy > 0.0 else 0.0,
+        "xg_lightgbm_market_total_goal_proxy": market_total_proxy,
+    }
+    # Stable aliases kept for report consumers and tests that refer to the interaction names directly.
+    features.update({
+        "qualifier_xg_available": features["xg_lightgbm_qualifier_xg_available"],
+        "api_football_xg_available": features["xg_lightgbm_api_football_xg_available"],
+        "xg_available": features["xg_lightgbm_xg_available"],
+        "xg_diff_recent15": features["xg_lightgbm_xg_diff_recent15"],
+        "xg_total_recent15": features["xg_lightgbm_xg_total_recent15"],
+        "xg_vs_poisson_delta": features["xg_lightgbm_xg_vs_poisson_delta"],
+        "xg_vs_market_delta": features["xg_lightgbm_xg_vs_market_delta"],
+        "shots_quality_ratio": features["xg_lightgbm_shots_quality_ratio"],
+    })
+    return {key: finite_float(value) for key, value in features.items()}
+
+
+def scoped_feature_values(row: Dict[str, float], bases: Iterable[str]) -> Dict[str, float]:
+    for base in bases:
+        home = finite_float(row.get(f"{base}_home"))
+        away = finite_float(row.get(f"{base}_away"))
+        diff = finite_float(row.get(f"{base}_diff"))
+        total = home + away
+        available = any(abs(value) > 1e-12 for value in (home, away, diff))
+        if not available:
+            continue
+        if abs(diff) <= 1e-12 and (abs(home) > 1e-12 or abs(away) > 1e-12):
+            diff = home - away
+        if abs(total) <= 1e-12 and abs(diff) > 1e-12:
+            total = abs(diff)
+        return {"home": home, "away": away, "diff": diff, "total": total, "available": 1.0}
+    return {"home": 0.0, "away": 0.0, "diff": 0.0, "total": 0.0, "available": 0.0}
+
+
+def market_total_goal_proxy(row: Dict[str, float]) -> float:
+    total = 0.0
+    available = False
+    for line in TRAIN_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        if finite_float(row.get(f"market_has_ou{suffix}")) <= 0.0:
+            continue
+        total += finite_float(row.get(f"market_prob_over{suffix}"))
+        available = True
+    return total if available else 0.0
+
+
+def finite_float(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return float(number) if np.isfinite(number) else 0.0
+
+
+def safe_ratio(numerator: Any, denominator: Any) -> float:
+    denom = finite_float(denominator)
+    if abs(denom) <= 1e-12:
+        return 0.0
+    return finite_float(numerator) / denom
 
 
 def recent15_context_available(features: pd.DataFrame, home: str, away: str) -> float:
@@ -4507,6 +4675,33 @@ def evaluation_strategy(normalized: Dict[str, Any]) -> str:
     return "unavailable"
 
 
+def normalize_worldcup_model_profile(value: Any) -> str:
+    key = str(value or "").strip().lower().replace("-", "_")
+    key = re.sub(r"[^a-z0-9_]+", "_", key).strip("_")
+    aliases = {
+        "xg_lgbm": XG_LIGHTGBM_PROFILE,
+        "xglightgbm": XG_LIGHTGBM_PROFILE,
+        "xg_light_gbm": XG_LIGHTGBM_PROFILE,
+    }
+    key = aliases.get(key, key)
+    return key if key in WORLD_CUP_MODEL_PROFILE_LABELS else ""
+
+
+def worldcup_model_key_and_profile(payload: Dict[str, Any]) -> Tuple[str, str]:
+    explicit_profile = normalize_worldcup_model_profile(payload.get("model_profile"))
+    raw_model = str(payload.get("model_type") or default_training_payload()["model_type"])
+    requested_profile = explicit_profile or normalize_worldcup_model_profile(raw_model)
+    if requested_profile == XG_LIGHTGBM_PROFILE:
+        return "lightgbm", XG_LIGHTGBM_PROFILE
+    return normalize_model_key(raw_model), ""
+
+
+def worldcup_model_label(model_key: str, model_profile: str = "") -> str:
+    if model_profile in WORLD_CUP_MODEL_PROFILE_LABELS:
+        return WORLD_CUP_MODEL_PROFILE_LABELS[model_profile]
+    return WORLD_CUP_MODEL_LABELS.get(model_key, model_key)
+
+
 def planned_holdout_rows(train_rows: int, eval_size: float = 0.25) -> int:
     if train_rows <= 0:
         return 0
@@ -4521,7 +4716,7 @@ def is_test_or_eval_file(path: Path) -> bool:
 
 
 def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
-    model_key = normalize_model_key(str(payload.get("model_type") or default_training_payload()["model_type"]))
+    model_key, model_profile = worldcup_model_key_and_profile(payload)
     params = worldcup_model_defaults(model_key)
     for key in MODEL_PARAM_KEYS:
         if key in params and payload.get(key) not in {None, ""}:
@@ -4536,12 +4731,14 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         raw_market_mode = "dual_markets"
     market_mode = normalize_market_mode(raw_market_mode, target)
     default_target = "dual_markets" if market_mode == "dual_markets" else target
-    model_id = normalize_worldcup_model_id(payload.get("model_id") or default_model_id(model_key, default_target))
+    model_id = normalize_worldcup_model_id(payload.get("model_id") or default_model_id(model_profile or model_key, default_target))
     feature_profile = normalize_feature_profile(payload.get("feature_profile", DEFAULT_FEATURE_PROFILE))
     return {
         "model_id": model_id,
         "model_name": str(payload.get("model_name") or model_id).strip() or model_id,
         "model_type": model_key,
+        "model_profile": model_profile,
+        "model_label": worldcup_model_label(model_key, model_profile),
         "training_target": target,
         "market_mode": market_mode,
         "feature_profile": feature_profile,
@@ -4568,6 +4765,7 @@ def default_model_id(model_key: str, target: str) -> str:
     short_model = {
         "xgboost": "xgb",
         "lightgbm": "lgbm",
+        XG_LIGHTGBM_PROFILE: "xg-lightgbm",
         "catboost": "cat",
         "ngboost": "ngb",
     }.get(model_key, model_key)
@@ -4598,12 +4796,19 @@ def normalize_over_under_target_key(value: Any) -> str:
     }
     if compact in aliases:
         return aliases[compact]
-    match = re.search(r"(?:over_under|overunder|ou|uo|u_o)_?0?([0-3])_?5$", key)
-    if not match:
-        match = re.search(r"(?:overunder|ou|uo)0?([0-3])5$", compact)
-    if match:
-        target = f"over_under_{match.group(1)}5"
-        return target if target in OVER_UNDER_TARGET_LINES else ""
+    for suffix in TOTAL_GOAL_LINE_SUFFIXES:
+        direct_aliases = {
+            f"overunder{suffix}",
+            f"ou{suffix}",
+            f"uo{suffix}",
+            f"u{suffix}",
+            f"overunder0{suffix}",
+            f"ou0{suffix}",
+            f"uo0{suffix}",
+            f"u0{suffix}",
+        }
+        if compact in direct_aliases:
+            return f"over_under_{suffix}"
     return key if key in OVER_UNDER_TARGET_LINES else ""
 
 
@@ -5578,7 +5783,19 @@ def feature_inventory_payload(
 
 
 def feature_family(column: str) -> str:
+    if column in {
+        "qualifier_xg_available",
+        "api_football_xg_available",
+        "xg_available",
+        "xg_diff_recent15",
+        "xg_total_recent15",
+        "xg_vs_poisson_delta",
+        "xg_vs_market_delta",
+        "shots_quality_ratio",
+    }:
+        return "xg_lightgbm"
     for prefix in (
+        "xg_lightgbm_",
         "api_football_",
         "history_",
         "market_",
@@ -6026,6 +6243,7 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "model_id": record.get("model_id", result.get("model_id", "")),
         "model_name": record.get("model_name", ""),
         "model_type": record.get("model_type", result.get("model_type", "")),
+        "model_profile": record.get("model_profile", result.get("model_profile", "")),
         "model_label": record.get("model_label", ""),
         "effective_target": record.get("effective_target", result.get("effective_target", "")),
         "requested_target": record.get("requested_target", result.get("requested_target", "")),
@@ -6661,7 +6879,8 @@ def delete_model_files(model_id: Any) -> List[str]:
 
 def save_hybrid_model(record: Dict[str, Any], model_id: Optional[str] = None) -> None:
     WORLD_CUP_MODELS_ROOT.mkdir(parents=True, exist_ok=True)
-    model_id = normalize_worldcup_model_id(model_id or record.get("model_id") or default_model_id(record.get("model_type", "xgboost"), record.get("requested_target", "result")))
+    default_key = record.get("model_profile") or record.get("model_type", "xgboost")
+    model_id = normalize_worldcup_model_id(model_id or record.get("model_id") or default_model_id(default_key, record.get("requested_target", "result")))
     record["model_id"] = model_id
     record.setdefault("model_name", model_id)
     record["trained_at"] = record.get("trained_at") or datetime.now(timezone.utc).isoformat()
@@ -6696,6 +6915,7 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "requested_target": record.get("requested_target", ""),
         "target_column": record.get("target_column", ""),
         "model_type": record.get("model_type", ""),
+        "model_profile": record.get("model_profile", ""),
         "model_label": record.get("model_label", ""),
         "model_params": record.get("model_params", {}),
         "feature_profile": record.get("feature_profile", FEATURE_PROFILE_FULL),
@@ -6783,6 +7003,7 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "confusion_matrix": {},
         "calibration": {},
         "model_type": "",
+        "model_profile": "",
         "model_label": "",
         "feature_profile": DEFAULT_FEATURE_PROFILE,
         "max_features": DEFAULT_MAX_FEATURES,

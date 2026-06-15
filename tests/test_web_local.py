@@ -569,8 +569,10 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
 
     options = training_options()
     keys = {model["key"] for model in options["models"]}
+    profile_keys = {profile["key"] for profile in options.get("model_profiles", [])}
 
     assert keys == {"ngboost", "catboost", "lightgbm", "xgboost"}
+    assert "xg_lightgbm" in profile_keys
     assert options["hardware"]["cpu_count"] >= 1
     assert options["hardware"]["default_n_jobs"] == -1
     assert options["defaults"]["model_type"] == "xgboost"
@@ -579,6 +581,24 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert [target["key"] for target in options["targets"]] == ["dual_markets"]
     assert options["targets"][0]["label"] == "1X2 + U/O 0.5-3.5 ML"
     assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
+    assert default_model_id("xg_lightgbm", "dual_markets") == "mundial-xg-lightgbm-hibrido"
+
+
+def test_worldcup_xg_lightgbm_profile_defaults_and_targets():
+    from src.worldcup import training
+
+    config = training.training_config({"model_type": "xg_lightgbm"})
+
+    assert config["model_type"] == "lightgbm"
+    assert config["model_profile"] == "xg_lightgbm"
+    assert config["model_label"] == "xG-LightGBM"
+    assert config["market_mode"] == "dual_markets"
+    assert config["training_target"] == "result"
+    assert config["device"] == "auto"
+    assert training.normalize_training_target("over_under_05") == "over_under_05"
+    assert training.normalize_training_target("over_under_15") == "over_under_15"
+    assert training.normalize_training_target("over_under_25") == "over_under_25"
+    assert training.normalize_training_target("over_under_35") == "over_under_35"
 
 
 def test_worldcup_detect_hardware_uses_nvidia_smi_from_path(monkeypatch):
