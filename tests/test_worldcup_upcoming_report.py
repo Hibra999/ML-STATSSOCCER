@@ -1054,6 +1054,32 @@ def test_worldcup_results_refresh_and_backtest_auto_use_ten_verified_finals(tmp_
     assert stored_ivory["source"] == "verified:guardian"
 
 
+def test_worldcup_results_refresh_uses_verified_netherlands_japan_result(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 22, 30, tzinfo=timezone.utc))
+    pd.DataFrame(columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+    tournament = {
+        "matches": [
+            {"num": 31, "date": "2026-06-14", "time": "15:00 UTC-5", "team1": "Netherlands", "team2": "Japan", "group": "Group F"},
+        ],
+    }
+
+    monkeypatch.setattr(worldcup_data, "fetch_fotmob_worldcup_result_rows", lambda working, warnings: [])
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", lambda working, warnings: [])
+
+    refresh = worldcup_data.refresh_worldcup_2026_results(tournament, refresh=True)
+    stored = pd.read_csv(results_path).iloc[0]
+
+    assert refresh["verified_final_rows"] == 1
+    assert refresh["confirmed_results"] == 1
+    assert stored["home"] == "Netherlands"
+    assert stored["away"] == "Japan"
+    assert int(stored["home_goals"]) == 2
+    assert int(stored["away_goals"]) == 2
+
+
 def test_mundial_fixtures_service_autorefreshes_results_on_first_load(tmp_path, monkeypatch):
     from src.web import mundial_services as services
 
@@ -1244,6 +1270,36 @@ def test_alternatives_backtest_auto_uses_confirmed_2026_walk_forward_without_lea
     assert result["models"][0]["matches"][0]["pick_hit"] is True
     assert result["models"][0]["matches"][0]["over_under"][0]["hit"] is True
     assert result["models"][0]["rank"] == 1
+
+
+def test_recent_matches_for_fixture_uses_last_15_before_fixture_date():
+    from src.web import mundial_services as services
+
+    history = pd.DataFrame([
+        {
+            "Date": f"2026-05-{day:02d}",
+            "Year": 2026,
+            "Team 1": "Mexico" if day % 2 else "Canada",
+            "Team 2": "Canada" if day % 2 else "Mexico",
+            "G1": day % 4,
+            "G2": (day + 1) % 3,
+            "Round": "Friendly",
+            "Group": "",
+        }
+        for day in range(1, 21)
+    ] + [
+        {"Date": "2026-06-12", "Year": 2026, "Team 1": "Mexico", "Team 2": "Canada", "G1": 9, "G2": 0, "Round": "Future", "Group": ""},
+    ])
+    fixture = pd.Series({"Fecha": "2026-06-11", "Equipo 1": "Mexico", "Equipo 2": "Canada"})
+
+    recent = services.recent_matches_for_fixture(history, fixture, limit=15)
+
+    assert recent["limit"] == 15
+    assert len(recent["home"]) == 15
+    assert len(recent["away"]) == 15
+    assert recent["home"][0]["date"] == "2026-05-20"
+    assert all(item["date"] < "2026-06-11" for item in recent["home"])
+    assert all(item["score"] != "9-0" for item in recent["home"])
 
 
 def test_benchmark_feature_context_uses_only_pre_match_history(monkeypatch):

@@ -696,6 +696,7 @@ function alternativeFixtureCardHtml(report) {
       <div>${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
     ${topRankedFixturePickHtml(leader, fixture)}
+    ${recentMatches15DrawerHtml(report.recent_matches_15, fixture)}
   </article>`;
 }
 
@@ -890,6 +891,7 @@ function backtestMatchCardHtml(row) {
     </div>
     ${backtestTopScoresHtml(item)}
     ${backtestOverUnderSummaryHtml(item.over_under || [])}
+    ${recentMatches15DrawerHtml(item.recent_matches_15, { home: teams.home, away: teams.away })}
   </article>`;
 }
 
@@ -1062,6 +1064,7 @@ function clientFixtureCardHtml(report) {
       <b>vs</b>
       <div>${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
+    ${recentMatches15DrawerHtml(report.recent_matches_15, fixture)}
     <div class="client-main-pick">
       <span>Pronóstico principal</span>
       <strong>${escapeHtml(pickLabel)} · ${escapeHtml(pickTeam || "-")}</strong>
@@ -1312,6 +1315,7 @@ function reportFixtureCardHtml(report) {
     ${reportOutcomeStatsHtml(stats, consensus, fixture)}
     ${reportConsensusScoreHtml(scoreDistribution)}
     ${reportTotalsStatsHtml(stats, consensus)}
+    ${recentMatches15DrawerHtml(report.recent_matches_15, fixture)}
     ${allModelsDetailsHtml(models)}
     ${warnings.length ? `<div class="warning-list compact">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
   </article>`;
@@ -1593,18 +1597,37 @@ function scoreHeatmapDrawerHtml(contextual) {
   </details>`;
 }
 
+function recentMatches15DrawerHtml(recent, fixture) {
+  const item = recent || {};
+  const fixtureData = fixture || {};
+  const homeRows = item.home || [];
+  const awayRows = item.away || [];
+  const limit = Number(item.limit || 15);
+  const homeTeam = item.home_team || fixtureData.home || "Local";
+  const awayTeam = item.away_team || fixtureData.away || "Visitante";
+  if (!homeRows.length && !awayRows.length) return "";
+  return `<details class="recent15-drawer report-recent15-drawer">
+    <summary>Ultimos ${escapeHtml(limit)} partidos por equipo</summary>
+    <div class="recent15-columns">
+      ${recentMatchesMiniTable(homeRows, homeTeam)}
+      ${recentMatchesMiniTable(awayRows, awayTeam)}
+    </div>
+  </details>`;
+}
+
 function recentMatchesMiniTable(rows, team) {
   const items = rows || [];
   if (!items.length) return `<div class="recent15-table"><strong>${escapeHtml(team)}</strong><small>Sin partidos recientes</small></div>`;
   return `<div class="recent15-table">
     <strong>${escapeHtml(team)}</strong>
     <table>
-      <thead><tr><th>Fecha</th><th>Rival</th><th>Marcador</th><th>Tipo</th></tr></thead>
+      <thead><tr><th>Fecha</th><th>Rival</th><th>Marcador</th><th>R</th><th>Tipo</th></tr></thead>
       <tbody>${items.map((row) => `
         <tr>
           <td>${escapeHtml(row.date || "")}</td>
           <td>${escapeHtml(row.opponent || "")}</td>
           <td>${escapeHtml(row.score || "")}</td>
+          <td>${escapeHtml(row.result || "")}</td>
           <td>${escapeHtml(row.match_type || "")}</td>
         </tr>`).join("")}</tbody>
     </table>

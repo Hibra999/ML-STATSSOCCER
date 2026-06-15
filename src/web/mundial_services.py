@@ -48,7 +48,14 @@ from src.worldcup.sota_alternatives import (
     sota_alternatives_catalog,
     sota_baseline_context,
 )
-from src.worldcup.data import CACHE_ROOT, fixture_results_status, group_letter, groups_from_tournament, refresh_worldcup_2026_results
+from src.worldcup.data import (
+    CACHE_ROOT,
+    fixture_results_status,
+    group_letter,
+    groups_from_tournament,
+    refresh_worldcup_2026_results,
+    team_name_key,
+)
 from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
 from src.worldcup.international_provider import (
     INTERNATIONAL_ROOT,
@@ -1118,6 +1125,7 @@ def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     payload = payload or {}
     config = simulation_config(payload)
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     model, history_source = build_model(tournament, config)
     model = apply_configured_score_model(model, tournament, config)
     result = poisson_match_payload(
@@ -1132,6 +1140,7 @@ def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     result["fixture_source"] = fixture_source
     result["history_source"] = history_source
     result["score_model"] = score_model_metadata(model)
+    result["results_autorefresh"] = results_autorefresh
     return result
 
 
@@ -1139,6 +1148,7 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     payload = payload or {}
     config = simulation_config(payload)
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     model, history_source = build_model(tournament, config)
     model = apply_configured_score_model(model, tournament, config)
 
@@ -1169,6 +1179,7 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
             "poisson_recent_matches": config["poisson_recent_matches"],
             "score_model": config["score_model"],
             "score_model_label": score_model_metadata(model).get("label", ""),
+            "results_autorefresh": results_autorefresh,
         },
     }
 
@@ -1178,6 +1189,7 @@ def predict_upcoming_monte_carlo(payload: Dict[str, Any] | None = None) -> Dict[
     config = simulation_config({**payload, "mode": "poisson_live"})
     config["iterations"] = monte_carlo_match_iterations(payload.get("iterations", DEFAULT_CONFIG["iterations"]))
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     model, history_source = build_model(tournament, config)
     model = apply_configured_score_model(model, tournament, config)
     international_matches = load_international_matches(required=False)
@@ -1212,6 +1224,7 @@ def predict_upcoming_monte_carlo(payload: Dict[str, Any] | None = None) -> Dict[
             "score_model_label": score_model_metadata(model).get("label", ""),
             "fixture_source": fixture_source,
             "history_source": history_source,
+            "results_autorefresh": results_autorefresh,
             "source": "Modelo de marcador contextual + simulacion por fixture",
         },
     }
@@ -1356,6 +1369,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
             progress_callback=progress_callback,
         )
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     base_model, history_source = build_model(tournament, config)
     limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
     group_filter = str(payload.get("group") or "").strip()
@@ -1415,6 +1429,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         "monte_carlo_iterations": config["iterations"] if config.get("sota_calculation_mode") == "monte_carlo" else 0,
         "score_models": model_sequence,
         "hardware": hardware,
+        "results_autorefresh": results_autorefresh,
         "warnings": unique_strings(hardware.get("warnings", [])),
         "config": config,
     }
@@ -1987,6 +2002,73 @@ def confirmed_backtest_match_payloads(confirmed_df: pd.DataFrame) -> List[Dict[s
     return rows
 
 
+def history_with_confirmed_worldcup_results(history_df: pd.DataFrame, tournament: Dict[str, Any]) -> pd.DataFrame:
+    frames = []
+    if history_df is not None and not history_df.empty:
+        frames.append(history_df.copy())
+    confirmed = confirmed_worldcup_2026_backtest_rows(tournament)
+    if not confirmed.empty:
+        frames.append(confirmed[["Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group"]].copy())
+    if not frames:
+        return pd.DataFrame(columns=["Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def recent_matches_for_fixture(
+        history_df: pd.DataFrame,
+        fixture: pd.Series | Dict[str, Any],
+        limit: int = 15,
+) -> Dict[str, Any]:
+    getter = fixture.get if hasattr(fixture, "get") else (lambda key, default=None: default)
+    home = str(getter("Equipo 1") or getter("Team 1") or getter("home") or "")
+    away = str(getter("Equipo 2") or getter("Team 2") or getter("away") or "")
+    before_date = str(getter("Fecha") or getter("Date") or getter("date") or "")[:10]
+    return {
+        "limit": int(limit),
+        "home_team": home,
+        "away_team": away,
+        "home": recent_team_matches(history_df, home, before_date=before_date, limit=limit),
+        "away": recent_team_matches(history_df, away, before_date=before_date, limit=limit),
+    }
+
+
+def recent_team_matches(history_df: pd.DataFrame, team: str, before_date: str = "", limit: int = 15) -> List[Dict[str, Any]]:
+    if history_df is None or history_df.empty or not str(team or "").strip():
+        return []
+    required = {"Date", "Team 1", "Team 2", "G1", "G2"}
+    if not required.issubset(history_df.columns):
+        return []
+    working = history_df.copy()
+    working["_date"] = pd.to_datetime(working["Date"], errors="coerce")
+    working = working[working["_date"].notna()].copy()
+    cutoff = pd.to_datetime(before_date, errors="coerce")
+    if pd.notna(cutoff):
+        working = working[working["_date"] < cutoff].copy()
+    team_key = team_name_key(team)
+    home_keys = working["Team 1"].map(team_name_key)
+    away_keys = working["Team 2"].map(team_name_key)
+    working = working[(home_keys == team_key) | (away_keys == team_key)].copy()
+    working["_g1"] = pd.to_numeric(working["G1"], errors="coerce")
+    working["_g2"] = pd.to_numeric(working["G2"], errors="coerce")
+    working = working[working["_g1"].notna() & working["_g2"].notna()]
+    working = working.sort_values("_date", ascending=False, kind="stable").head(int(limit)).copy()
+    rows: List[Dict[str, Any]] = []
+    for _, row in working.iterrows():
+        is_home = team_name_key(row.get("Team 1")) == team_key
+        goals_for = int(row.get("_g1") if is_home else row.get("_g2"))
+        goals_against = int(row.get("_g2") if is_home else row.get("_g1"))
+        opponent = str(row.get("Team 2" if is_home else "Team 1", ""))
+        rows.append({
+            "date": str(row.get("Date", ""))[:10],
+            "opponent": opponent,
+            "venue": "Local" if is_home else "Visitante",
+            "score": f"{goals_for}-{goals_against}",
+            "result": "G" if goals_for > goals_against else "E" if goals_for == goals_against else "P",
+            "match_type": str(row.get("Round") or row.get("tournament") or row.get("Group") or ""),
+        })
+    return rows
+
+
 def evaluate_score_model_walk_forward_2026(
         model_key: str,
         history_df: pd.DataFrame,
@@ -2068,6 +2150,7 @@ def evaluate_score_model_walk_forward_2026(
         row_metrics = score_model_backtest_prediction(prediction_model, eval_row, config)
         if not row_metrics:
             continue
+        row_metrics["sample"]["recent_matches_15"] = recent_matches_for_fixture(train_df, eval_row, limit=15)
         accumulate_backtest_totals(totals, row_metrics)
         match_rows.append(row_metrics["sample"])
         if len(sample_rows) < 8:
@@ -2978,6 +3061,9 @@ def upcoming_sota_fixture_reports(
     team_names = [team for group_teams in group_map.values() for team in group_teams]
     if history_df is None or history_df.empty:
         history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    recent_history_df = history_with_confirmed_worldcup_results(history_df, tournament)
+    for report, fixture in zip(fixture_reports, fixtures):
+        report["recent_matches_15"] = recent_matches_for_fixture(recent_history_df, fixture, limit=15)
     sequence = list(model_sequence or SOTA_SCORE_MODEL_SEQUENCE)
     model_total = len(sequence)
     fixture_total = max(len(fixtures), 1)
@@ -4246,7 +4332,47 @@ def prediction_fixture_report_card_html(report: Dict[str, Any]) -> str:
         {outcome_bars_html(probabilities)}
         {total_25_html(probabilities)}
         <div class="top-scores">{''.join(f'<span>{escape_report_html(score.get("score", ""))} <b>{escape_report_html(format_metric(score.get("probability", "")))}%</b></span>' for score in top_scores[:3])}</div>
+        {recent_matches_report_html(report.get("recent_matches_15") or {}, fixture)}
       </article>
+"""
+
+
+def recent_matches_report_html(recent: Dict[str, Any], fixture: Dict[str, Any]) -> str:
+    home_rows = recent.get("home") or []
+    away_rows = recent.get("away") or []
+    if not home_rows and not away_rows:
+        return ""
+    limit = recent.get("limit", 15)
+    home_team = recent.get("home_team") or fixture.get("home") or ""
+    away_team = recent.get("away_team") or fixture.get("away") or ""
+    return f"""
+        <details class="recent15-report">
+          <summary>Ultimos {escape_report_html(limit)} partidos por equipo</summary>
+          <div class="recent15-columns">
+            {recent_matches_report_table(home_rows, home_team)}
+            {recent_matches_report_table(away_rows, away_team)}
+          </div>
+        </details>
+"""
+
+
+def recent_matches_report_table(rows: List[Dict[str, Any]], team: str) -> str:
+    if not rows:
+        return f"<div><h3>{escape_report_html(team)}</h3><p>Sin partidos recientes.</p></div>"
+    body = "".join(
+        "<tr>"
+        f"<td>{escape_report_html(row.get('date', ''))}</td>"
+        f"<td>{escape_report_html(row.get('opponent', ''))}</td>"
+        f"<td>{escape_report_html(row.get('score', ''))}</td>"
+        f"<td>{escape_report_html(row.get('result', ''))}</td>"
+        "</tr>"
+        for row in rows[:15]
+    )
+    return f"""
+          <div>
+            <h3>{escape_report_html(team)}</h3>
+            <table><thead><tr><th>Fecha</th><th>Rival</th><th>Marcador</th><th>R</th></tr></thead><tbody>{body}</tbody></table>
+          </div>
 """
 
 
@@ -4452,12 +4578,15 @@ main{width:min(1120px,100%);margin:0 auto;padding:24px}
 .pick{display:grid;gap:3px;padding:10px;border:1px solid #c8e5dc;border-radius:8px;background:#eaf6f2}.pick strong{color:#0f7a5f;font-size:20px}
 .pick.secondary{background:#f8fafb;border-color:#d9e2e8}.top-scores{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
 .top-scores span{padding:8px;border-radius:8px;background:#f8fafb;text-align:center}.top-scores b{color:#16202a}
+.recent15-report{border:1px solid #d9e2e8;border-radius:8px;background:#f8fafb;padding:8px}.recent15-report summary{cursor:pointer;font-weight:700}
+.recent15-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px}.recent15-columns h3{margin:0 0 6px;font-size:13px}
+.recent15-columns table{min-width:0;background:#fff}.recent15-columns th,.recent15-columns td{padding:5px 6px;font-size:11px}
 .metric-bars{display:grid;gap:7px}.metric-bar{display:grid;grid-template-columns:84px minmax(0,1fr) 72px;gap:8px;align-items:center}
 .metric-bar i{height:9px;border-radius:999px;background:#edf2f4;overflow:hidden}.metric-bar b{display:block;height:100%;border-radius:inherit;background:#0f7a5f}
 .metric-bar strong{text-align:right}.table-section{margin-top:18px}.table-wrap{max-width:100%;overflow:auto;border:1px solid #d9e2e8;border-radius:8px;background:#fff}
 table{width:100%;min-width:760px;border-collapse:collapse}th,td{padding:8px 9px;border-bottom:1px solid #d9e2e8;text-align:left;vertical-align:top;font-size:12px}
 th{background:#f0f4f6;color:#40505d}@media print{body{background:#fff}main{padding:0}.fixture-grid{grid-template-columns:1fr}.table-wrap{overflow:visible}table{min-width:0}}
-@media(max-width:760px){main{padding:14px}.report-title,.summary-grid,.fixture-grid{grid-template-columns:1fr;display:grid}.metric-bar{grid-template-columns:64px minmax(0,1fr) 58px}}
+@media(max-width:760px){main{padding:14px}.report-title,.summary-grid,.fixture-grid,.recent15-columns{grid-template-columns:1fr;display:grid}.metric-bar{grid-template-columns:64px minmax(0,1fr) 58px}}
 """
 
 
@@ -4712,6 +4841,7 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     config = simulation_config(payload)
     emit_job_progress(progress_callback, "preparing", 0, 100, "Preparando Monte Carlo")
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     model, history_source = build_model(tournament, config)
     poisson_layers = ["Poisson base"]
     if config["include_confirmed_results"]:
@@ -4741,6 +4871,7 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
             "mode": config["mode"],
             "fixture_source": fixture_source,
             "history_source": history_source,
+            "results_autorefresh": results_autorefresh,
             "score_model": score_metadata,
             "poisson_layers": poisson_layers,
             "confirmed_results": len(confirmed_results),
