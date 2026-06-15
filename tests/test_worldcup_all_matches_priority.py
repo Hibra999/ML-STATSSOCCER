@@ -234,6 +234,29 @@ def test_international_training_scope_keeps_since_2014_and_drops_future_dates():
     assert stats["removed_future"] == 1
 
 
+def test_training_scope_frame_filters_support_sources_since_2014():
+    rows = pd.DataFrame([
+        {"Date": "2010-06-11", "Team": "Mexico"},
+        {"Date": "2014-01-01", "Team": "Canada"},
+        {"Date": "2022-11-20", "Team": "Qatar"},
+        {"Date": None, "Team": "Unknown"},
+    ])
+
+    scoped = training.filter_training_scope_frame(rows)
+    strict = training.filter_training_scope_frame(rows, keep_unknown_date=False)
+
+    assert scoped["Team"].tolist() == ["Canada", "Qatar", "Unknown"]
+    assert strict["Team"].tolist() == ["Canada", "Qatar"]
+    assert training.frame_has_pre_training_scope_dates(rows) is True
+    assert training.frame_has_pre_training_scope_dates(scoped) is False
+
+    year_rows = pd.DataFrame([
+        {"season": 2010, "Team": "Mexico"},
+        {"season": 2014, "Team": "Canada"},
+    ])
+    assert training.filter_training_scope_frame(year_rows)["Team"].tolist() == ["Canada"]
+
+
 def test_last_30_international_split_requires_31_international_rows():
     rows = training.international_match_rows(international_provider.normalize_international_matches(make_international_matches(rows=30)))
 
@@ -278,6 +301,74 @@ def test_prepared_dataset_metadata_uses_last_30_international_test_and_policy_no
     assert any("desde 2014" in note for note in prepared["label_policy_notes"])
     assert not any("Test final bloqueado" in warning for warning in prepared["warnings"])
     assert not any("anti-leakage" in warning and "2026" in warning for warning in prepared["warnings"])
+
+
+def test_prepared_dataset_scopes_feature_sources_since_2014(tmp_path, monkeypatch):
+    matches = make_international_matches(rows=42, include_worldcup=False)
+    history = pd.DataFrame([
+        {"Date": "2010-06-11", "Team 1": "Mexico", "Team 2": "South Africa", "G1": 1, "G2": 1},
+        {"Date": "2018-06-17", "Team 1": "Mexico", "Team 2": "Germany", "G1": 1, "G2": 0},
+    ])
+    market_matches = pd.DataFrame([
+        {"Date": "2010-06-11", "Home": "Mexico", "Away": "South Africa", "market_odds_home": 2.0, "market_odds_draw": 3.1, "market_odds_away": 3.8},
+        {"Date": "2014-06-13", "Home": "Mexico", "Away": "Cameroon", "market_odds_home": 1.9, "market_odds_draw": 3.2, "market_odds_away": 4.0},
+    ])
+    qualifiers = pd.DataFrame([
+        {"Date": "2012-03-01", "Home": "Mexico", "Away": "Canada"},
+        {"Date": "2016-03-01", "Home": "Mexico", "Away": "Canada"},
+    ])
+    api_bundle = empty_api_football_bundle()
+    api_bundle.update({
+        "fixtures": pd.DataFrame([
+            {"Date": "2010-06-11", "FixtureId": 1},
+            {"Date": "2018-06-17", "FixtureId": 2},
+        ]),
+        "team_stats": pd.DataFrame([
+            {"Date": "2010-06-11", "Team": "Mexico"},
+            {"Date": "2018-06-17", "Team": "Mexico"},
+        ]),
+        "market_rows": pd.DataFrame([
+            {"Date": "2010-06-11", "Home": "Mexico", "Away": "South Africa", "market_odds_home": 2.0, "market_odds_draw": 3.1, "market_odds_away": 3.8},
+            {"Date": "2022-11-20", "Home": "Qatar", "Away": "Ecuador", "market_odds_home": 4.4, "market_odds_draw": 3.3, "market_odds_away": 1.8},
+        ]),
+        "status": "ok",
+    })
+
+    monkeypatch.setattr(training, "load_historical_matches", lambda refresh=False: (history, "fixture"))
+    monkeypatch.setattr(training, "load_market_data", lambda **kwargs: {
+        "matches": market_matches,
+        "qualifiers": qualifiers,
+        "qualifier_rows": int(qualifiers.shape[0]),
+        "status": "ok",
+        "warnings": [],
+        "sources": [],
+        "loaded_at": "",
+    })
+    monkeypatch.setattr(training, "load_api_football_data", lambda **kwargs: api_bundle)
+    monkeypatch.setattr(training, "load_international_matches", lambda required=False: matches)
+    monkeypatch.setattr(training, "international_results_status", lambda: {
+        "available": True,
+        "source_path": str(tmp_path / "all_matches.csv"),
+        "rows": int(matches.shape[0]),
+        "all_matches_rows": int(matches.shape[0]),
+        "worldcup_rows": 0,
+    })
+
+    prepared = training.build_prepared_dataset(
+        files=[],
+        normalized=minimal_normalized_dataset(),
+        refresh_history=False,
+    )
+
+    assert prepared["market_rows"] == 2
+    assert prepared["qualifier_feature_rows"] == 1
+    assert prepared["api_football_fixture_rows"] == 1
+    assert prepared["api_football_stat_rows"] == 1
+    assert prepared["api_football_market_rows"] == 1
+    assert training.frame_has_pre_training_scope_dates(prepared["market_data"]) is False
+    assert training.frame_has_pre_training_scope_dates(prepared["qualifier_matches"]) is False
+    assert training.frame_has_pre_training_scope_dates(prepared["api_football"]["fixtures"]) is False
+    assert training.frame_has_pre_training_scope_dates(prepared["api_football"]["team_stats"]) is False
 
 
 def test_prepared_dataset_requires_all_matches_csv(monkeypatch):

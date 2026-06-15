@@ -155,8 +155,21 @@ FUTURE_LABEL_EXCLUDED_YEAR = 2026
 TARGET_WORLDCUP_YEAR = FUTURE_LABEL_EXCLUDED_YEAR
 INTERNATIONAL_TRAINING_START_YEAR = 2014
 INTERNATIONAL_TRAINING_START_DATE = f"{INTERNATIONAL_TRAINING_START_YEAR}-01-01"
-PREPARED_SCHEMA_VERSION = "worldcup_2026_international_since_2014_v4_split_80_10_10"
-FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v4_xg_lightgbm"
+TRAINING_SCOPE_DATE_COLUMNS = (
+    "Date",
+    "date",
+    "match_date",
+    "MatchDate",
+    "game_date",
+    "fixture_date",
+    "FixtureDate",
+    "kickoff",
+    "Kickoff",
+    "event_date",
+    "fetched_at",
+)
+PREPARED_SCHEMA_VERSION = "worldcup_2026_international_since_2014_v5_scoped_features_split_80_10_10"
+FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v5_xg_lightgbm_since_2014"
 EVAL_STRATEGY_LAST_30 = "last_30_international_test"
 SPLIT_POLICY_VALIDATION_LAST_30 = "temporal_since_2014_validation_last_30_test"
 EVAL_STRATEGY_TEMPORAL_80_10_10 = "temporal_80_10_10"
@@ -833,6 +846,15 @@ def prepared_dataset_schema_valid(dataset: Dict[str, Any]) -> bool:
         dates = pd.to_datetime(frame.get("Date", pd.Series(index=frame.index, dtype=object)), errors="coerce")
         if dates.notna().any() and int(dates.dt.year.min()) < INTERNATIONAL_TRAINING_START_YEAR:
             return False
+    if frame_has_pre_training_scope_dates(dataset.get("market_data", pd.DataFrame())):
+        return False
+    if frame_has_pre_training_scope_dates(dataset.get("qualifier_matches", pd.DataFrame())):
+        return False
+    api_football = dataset.get("api_football", {})
+    if isinstance(api_football, dict):
+        for key in ("fixtures", "statistics", "team_stats", "lineups", "injuries", "odds", "market_rows"):
+            if frame_has_pre_training_scope_dates(api_football.get(key, pd.DataFrame())):
+                return False
     return bool(dataset.get("over_under_ready", False)) and bool(dataset.get("goals_distribution_ready", False))
 
 
@@ -896,6 +918,7 @@ def train_single_hybrid_model(
     history_source = shared_context.get("history_source", "")
     if history_df is None:
         history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
+        history_df = filter_training_scope_frame(history_df, keep_unknown_date=False)
     feature_store = normalized["team_features"]
     market_rows = normalized.get("market_data", pd.DataFrame())
     qualifier_rows = normalized.get("qualifier_matches", pd.DataFrame())
@@ -904,6 +927,7 @@ def train_single_hybrid_model(
     international_matches = shared_context.get("international_matches")
     if international_matches is None:
         international_matches = load_international_matches(required=False)
+        international_matches = filter_training_scope_frame(international_matches, keep_unknown_date=False)
     recent15_match_index = shared_context.get("recent15_match_index")
     if recent15_match_index is None:
         recent15_match_index = build_recent15_match_index(international_matches)
@@ -1357,7 +1381,9 @@ def train_dual_market_model(
     if not normalized["trainable"]:
         raise WorldCupTrainingError("El ETL preparado no dejo filas entrenables para el modelo 1X2.")
     history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
+    history_df = filter_training_scope_frame(history_df, keep_unknown_date=False)
     international_matches = load_international_matches(required=False)
+    international_matches = filter_training_scope_frame(international_matches, keep_unknown_date=False)
     shared_context = {
         "files": files,
         "normalized": normalized,
@@ -1806,16 +1832,102 @@ def normalize_dataset_files(files: Iterable[Path]) -> Dict[str, Any]:
     }
 
 
+def training_scope_column(frame: pd.DataFrame, date_columns: Optional[Iterable[str]] = None) -> Optional[Any]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None
+    columns_by_lower = {str(column).lower(): column for column in frame.columns}
+    for candidate in date_columns or TRAINING_SCOPE_DATE_COLUMNS:
+        if candidate in frame.columns:
+            return candidate
+        matched = columns_by_lower.get(str(candidate).lower())
+        if matched is not None:
+            return matched
+    for candidate in ("Year", "year", "season", "Season"):
+        if candidate in frame.columns:
+            return candidate
+        matched = columns_by_lower.get(str(candidate).lower())
+        if matched is not None:
+            return matched
+    return None
+
+
+def training_scope_dates(frame: pd.DataFrame, column: Any) -> pd.Series:
+    if str(column).lower() in {"year", "season"}:
+        years = pd.to_numeric(frame.get(column), errors="coerce")
+        year_dates = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+        valid_years = years.notna()
+        if valid_years.any():
+            year_dates.loc[valid_years] = pd.to_datetime(
+                years.loc[valid_years].astype(int).astype(str) + "-01-01",
+                errors="coerce",
+            )
+        return year_dates.dt.normalize()
+    dates = pd.to_datetime(frame.get(column), errors="coerce", utc=True)
+    return dates.dt.tz_convert(None).dt.normalize()
+
+
+def filter_training_scope_frame(
+        frame: pd.DataFrame,
+        *,
+        start_year: int = INTERNATIONAL_TRAINING_START_YEAR,
+        date_columns: Optional[Iterable[str]] = None,
+        keep_unknown_date: bool = True,
+) -> pd.DataFrame:
+    if frame is None:
+        return pd.DataFrame()
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    column = training_scope_column(frame, date_columns=date_columns)
+    if column is None:
+        return frame.copy().reset_index(drop=True)
+    dates = training_scope_dates(frame, column)
+    start_ts = pd.Timestamp(f"{int(start_year)}-01-01")
+    keep = dates.ge(start_ts)
+    if keep_unknown_date:
+        keep = keep | dates.isna()
+    return frame.loc[keep.fillna(False)].copy().reset_index(drop=True)
+
+
+def frame_has_pre_training_scope_dates(
+        frame: pd.DataFrame,
+        *,
+        start_year: int = INTERNATIONAL_TRAINING_START_YEAR,
+        date_columns: Optional[Iterable[str]] = None,
+) -> bool:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return False
+    column = training_scope_column(frame, date_columns=date_columns)
+    if column is None:
+        return False
+    dates = training_scope_dates(frame, column)
+    start_ts = pd.Timestamp(f"{int(start_year)}-01-01")
+    return bool((dates.notna() & dates.lt(start_ts)).any())
+
+
+def filter_api_football_training_scope(api_football_bundle: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(api_football_bundle, dict):
+        return {}
+    filtered = dict(api_football_bundle)
+    for key in ("fixtures", "statistics", "team_stats", "lineups", "injuries", "odds", "market_rows"):
+        value = filtered.get(key)
+        if isinstance(value, pd.DataFrame):
+            filtered[key] = filter_training_scope_frame(value, keep_unknown_date=True)
+    return filtered
+
+
 def build_prepared_dataset(
         files: List[Path],
         normalized: Dict[str, Any],
         refresh_history: bool = False,
 ) -> Dict[str, Any]:
     history_df, history_source = load_historical_matches(refresh=bool(refresh_history))
+    history_df = filter_training_scope_frame(history_df, keep_unknown_date=False)
     market_bundle = load_market_data(force_download=bool(refresh_history), allow_download=bool(refresh_history), use_scraper=False)
-    market_data = market_bundle.get("matches", pd.DataFrame()).copy()
-    qualifier_matches = market_bundle.get("qualifiers", pd.DataFrame()).copy()
-    api_football_bundle = load_api_football_data(force_download=bool(refresh_history), allow_download=bool(refresh_history))
+    market_data = filter_training_scope_frame(market_bundle.get("matches", pd.DataFrame()).copy(), keep_unknown_date=True)
+    qualifier_matches = filter_training_scope_frame(market_bundle.get("qualifiers", pd.DataFrame()).copy(), keep_unknown_date=True)
+    api_football_bundle = filter_api_football_training_scope(
+        load_api_football_data(force_download=bool(refresh_history), allow_download=bool(refresh_history))
+    )
     api_market_rows = api_football_bundle.get("market_rows", pd.DataFrame()).copy()
     try:
         international_matches = load_international_matches(required=True)
@@ -1915,7 +2027,7 @@ def build_prepared_dataset(
         "market_data": market_data,
         "qualifier_matches": qualifier_matches,
         "market_rows": int(market_data.shape[0]),
-        "qualifier_feature_rows": int(market_bundle.get("qualifier_rows", 0)),
+        "qualifier_feature_rows": int(qualifier_matches.shape[0]),
         "market_status": market_status_payload,
         "market_warnings": market_bundle.get("warnings", []),
         "api_football": api_football_payload,
