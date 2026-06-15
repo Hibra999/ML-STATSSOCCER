@@ -22,6 +22,8 @@ RECENT_MATCH_LIMIT = 15
 INTERNATIONAL_FRESHNESS_MAX_AGE_DAYS = 30
 INTERNATIONAL_MIN_CURRENT_SCORED_DATE = "2026-01-01"
 CONTEXT_TOTAL_GOAL_LINES = tuple(line for line in TOTAL_GOAL_LINES if line <= 3.5)
+RECENT15_MIN_RECENCY_WEIGHT = 0.65
+RECENT15_MAX_RECENCY_WEIGHT = 1.55
 
 TEAM_ALIASES = {
     "USA": "United States",
@@ -469,7 +471,7 @@ def recent15_feature_table_from_index(
         )
         recent["is_friendly"] = recent["tournament"].map(is_friendly_tournament)
         recent["tournament_weight"] = recent["tournament"].map(tournament_weight).astype(float)
-        recent["recency_weight"] = 0.72 + (0.56 * (positions / float(total)))
+        recent["recency_weight"] = recent_match_recency_weights(positions, float(total))
         recent["weight"] = recent["tournament_weight"] * recent["recency_weight"]
         rating_cache = {
             opponent: rating_for_team(opponent, base_model=base_model)
@@ -551,7 +553,7 @@ def recent15_feature_rows_vectorized(
     )
     recent["is_friendly"] = recent["tournament"].map(is_friendly_tournament)
     recent["tournament_weight"] = recent["tournament"].map(tournament_weight).astype(float)
-    recent["recency_weight"] = 0.72 + (0.56 * (group_positions / group_sizes.clip(lower=1.0)))
+    recent["recency_weight"] = recent_match_recency_weights(group_positions.to_numpy(dtype=float), group_sizes.to_numpy(dtype=float))
     recent["weight"] = recent["tournament_weight"] * recent["recency_weight"]
     rating_cache = {
         opponent: rating_for_team(opponent, base_model=base_model)
@@ -761,7 +763,7 @@ def team_recent_rows(
         ga = float(row["away_score"] if is_home else row["home_score"])
         tournament = str(row.get("tournament", "") or "")
         tournament_weight_value = tournament_weight(tournament)
-        recency = 0.72 + (0.56 * ((index + 1) / total))
+        recency = recent_match_recency_weight(index + 1, total)
         opponent_rating = rating_for_team(opponent, base_model=base_model)
         difficulty = clamp(1.0 + ((opponent_rating - 1500.0) / 900.0), 0.72, 1.32)
         rows.append({
@@ -850,6 +852,9 @@ def public_recent_match_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "score": f"{int(gf) if gf.is_integer() else gf}-{int(ga) if ga.is_integer() else ga}",
             "result": result,
             "weight": round(float(row.get("weight", 0.0)), 3),
+            "tournament_weight": round(float(row.get("tournament_weight", 0.0)), 3),
+            "recency_weight": round(float(row.get("recency_weight", 0.0)), 3),
+            "importance_label": recent_match_importance_label(float(row.get("weight", 0.0)), bool(row.get("is_friendly"))),
             "opponent_rating": round(float(row.get("opponent_rating", 0.0)), 1),
         })
     return list(reversed(output))
@@ -946,25 +951,54 @@ def rating_for_team(team: str, base_model: Optional[Any] = None) -> float:
 
 def tournament_weight(tournament: str) -> float:
     text = normalize_key(tournament)
-    if "friendly" in text:
-        return 0.55
-    if any(token in text for token in ("qualification", "qualifier", "qualifiers")):
-        return 1.2
+    if "friendly" in text or "friendlies" in text:
+        return 0.50
+    if any(token in text for token in ("qualification", "qualifier", "qualifiers", "preliminary competition")):
+        return 1.45
     if "nations league" in text:
-        return 1.1
+        return 1.25
     if any(token in text for token in (
         "world cup",
         "copa america",
+        "uefa euro",
         "euro",
         "african cup",
+        "africa cup",
         "asian cup",
         "gold cup",
         "nations cup",
         "championship",
         "confederations",
+        "olympic games",
     )):
-        return 1.3
-    return 0.95
+        return 1.60
+    return 1.10
+
+
+def recent_match_recency_weights(positions: Any, totals: Any) -> np.ndarray:
+    positions_array = np.asarray(positions, dtype=float)
+    totals_array = np.asarray(totals, dtype=float)
+    denominator = np.maximum(totals_array - 1.0, 1.0)
+    rank = np.where(totals_array <= 1.0, 1.0, (positions_array - 1.0) / denominator)
+    rank = np.clip(rank, 0.0, 1.0)
+    curved_rank = np.power(rank, 1.25)
+    return RECENT15_MIN_RECENCY_WEIGHT + ((RECENT15_MAX_RECENCY_WEIGHT - RECENT15_MIN_RECENCY_WEIGHT) * curved_rank)
+
+
+def recent_match_recency_weight(position: Any, total: Any) -> float:
+    return float(recent_match_recency_weights([position], [total])[0])
+
+
+def recent_match_importance_label(weight: float, is_friendly: bool = False) -> str:
+    if is_friendly:
+        return "Baja"
+    if weight >= 2.25:
+        return "Muy alta"
+    if weight >= 1.75:
+        return "Alta"
+    if weight >= 1.20:
+        return "Media"
+    return "Base"
 
 
 def is_worldcup_tournament(tournament: str) -> bool:

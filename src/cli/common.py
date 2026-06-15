@@ -64,8 +64,11 @@ COLORMAP_OPTIONS = {
     "Crest": "crest",
     "HUSL": "husl",
     "Icefire": "icefire",
+    "Cividis": "cividis",
     "Rocket": "rocket",
     "Summer": "summer",
+    "Tab10": "tab10",
+    "Viridis": "viridis",
 }
 
 HELP_LINKS = {
@@ -347,22 +350,114 @@ def export_dataframe(df: pd.DataFrame, path: str, append: bool = False):
     console.print(f"[green]Exported:[/green] {output}")
 
 
+def _flatten_axes(ax) -> List[Any]:
+    import numpy as np
+
+    if isinstance(ax, np.ndarray):
+        return [item for item in ax.ravel().tolist() if hasattr(item, "figure")]
+    if isinstance(ax, (list, tuple)):
+        axes: List[Any] = []
+        for item in ax:
+            axes.extend(_flatten_axes(item))
+        return axes
+    return [ax] if hasattr(ax, "figure") else []
+
+
+def _axis_has_heatmap(ax) -> bool:
+    return bool(getattr(ax, "images", [])) or any(
+        collection.__class__.__name__ == "QuadMesh"
+        for collection in getattr(ax, "collections", [])
+    )
+
+
+def _resize_figure_for_labels(fig, axes: List[Any]) -> None:
+    x_labels = []
+    y_labels = []
+    for axis in axes:
+        x_labels.extend(label.get_text() for label in axis.get_xticklabels() if label.get_text())
+        y_labels.extend(label.get_text() for label in axis.get_yticklabels() if label.get_text())
+
+    longest_y = max((len(label) for label in y_labels), default=0)
+    longest_x = max((len(label) for label in x_labels), default=0)
+    rows = max(len(axes), 1)
+    target_width = min(18.0, max(10.5, 8.0 + min(longest_y, 44) * 0.11 + min(longest_x, 34) * 0.05))
+    target_height = min(18.0, max(6.2, 4.8 + min(len(y_labels), 36) * 0.14 + max(rows - 1, 0) * 1.8))
+    width = max(float(fig.get_figwidth()), target_width)
+    height = max(float(fig.get_figheight()), target_height)
+    fig.set_size_inches(width, height, forward=True)
+
+
+def polish_figure(ax) -> None:
+    axes = _flatten_axes(ax)
+    if not axes:
+        return
+
+    fig = axes[0].figure
+    fig.patch.set_facecolor("white")
+    try:
+        if hasattr(fig, "set_layout_engine"):
+            fig.set_layout_engine("constrained")
+        else:
+            fig.set_constrained_layout(True)
+    except Exception:
+        pass
+    _resize_figure_for_labels(fig, axes)
+
+    for axis in axes:
+        heatmap = _axis_has_heatmap(axis)
+        axis.set_facecolor("#ffffff")
+        axis.set_axisbelow(True)
+        axis.tick_params(axis="both", colors="#40505d", labelsize=10)
+        axis.title.set_color("#16202a")
+        axis.title.set_fontweight("bold")
+        axis.title.set_fontsize(14)
+        axis.xaxis.label.set_color("#40505d")
+        axis.yaxis.label.set_color("#40505d")
+        for side in ("top", "right"):
+            axis.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            axis.spines[side].set_color("#c8d4dc")
+            axis.spines[side].set_linewidth(0.8)
+        if heatmap:
+            axis.grid(False)
+        else:
+            axis.grid(True, which="major", color="#d9e2e8", linestyle="-", linewidth=0.7, alpha=0.7)
+
+        x_tick_labels = [label.get_text() for label in axis.get_xticklabels() if label.get_text()]
+        if len(x_tick_labels) > 6 or max((len(label) for label in x_tick_labels), default=0) > 12:
+            for label in axis.get_xticklabels():
+                label.set_rotation(32)
+                label.set_ha("right")
+
+        legend = axis.get_legend()
+        if legend is not None:
+            legend.get_frame().set_facecolor("white")
+            legend.get_frame().set_edgecolor("#d9e2e8")
+            legend.get_frame().set_alpha(0.94)
+
+        if not heatmap:
+            for container in getattr(axis, "containers", []):
+                if 0 < len(container) <= 25:
+                    try:
+                        axis.bar_label(container, fmt="%.3g", padding=3, fontsize=8, color="#40505d")
+                    except Exception:
+                        pass
+
+
 def save_figure(ax, path: str):
     import matplotlib.pyplot as plt
-    import numpy as np
 
     output = Path(path)
     if output.suffix == "":
         output = output.with_suffix(".png")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(ax, np.ndarray):
-        fig = ax.ravel()[0].figure
-    elif isinstance(ax, list):
-        fig = ax[0].figure
-    else:
-        fig = ax.figure
-    fig.savefig(output, bbox_inches="tight", dpi=160)
+    axes = _flatten_axes(ax)
+    if not axes:
+        raise CLIError("No matplotlib axes were provided to save_figure.")
+    polish_figure(ax)
+    fig = axes[0].figure
+    fig.savefig(output, bbox_inches="tight", dpi=200, facecolor="white")
     plt.close(fig)
     console.print(f"[green]Saved figure:[/green] {output}")
 

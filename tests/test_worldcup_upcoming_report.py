@@ -1334,9 +1334,13 @@ def test_recent_matches_for_fixture_uses_international_results_when_provided(mon
     assert all(row["date"] < "2026-06-11" for row in recent["home"] + recent["away"])
     assert recent["home"][0]["tournament"] == "CONCACAF Gold Cup"
     assert recent["home"][1]["match_type"] == "Friendly"
+    assert recent["home"][0]["weight"] > recent["home"][1]["weight"]
+    assert recent["home"][0]["importance_label"] == "Muy alta"
     assert "Fuente all_matches.csv" in html
     assert "Dataset internacional posiblemente viejo" in html
     assert "Torneo" in html
+    assert "Peso" in html
+    assert "Oficial" in html
 
 
 def test_benchmark_feature_context_uses_only_pre_match_history(monkeypatch):

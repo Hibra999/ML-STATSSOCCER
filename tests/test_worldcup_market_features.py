@@ -325,6 +325,37 @@ def test_international_recent_provider_aliases_features_and_contextual_poisson(t
     assert len(context["top_scores"]) == 5
     assert len(context["score_matrix"]) == 7
     assert len(context["recent_matches"]["home"]) == 2
+    assert context["recent_matches"]["home"][0]["match_type"] == "Official"
+    assert context["recent_matches"]["home"][0]["importance_label"] in {"Alta", "Muy alta"}
+    assert context["recent_matches"]["home"][0]["weight"] > context["recent_matches"]["home"][1]["weight"]
+
+
+def test_international_recent_weights_prioritize_latest_official_matches(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", tmp_path)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", tmp_path / "all_matches.csv")
+    pd.DataFrame([
+        {"date": "2025-01-10", "home_team": "Mexico", "away_team": "Canada", "home_score": 1, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2025-09-10", "home_team": "Mexico", "away_team": "USA", "home_score": 2, "away_score": 1, "tournament": "FIFA World Cup qualification", "neutral": False},
+        {"date": "2026-06-10", "home_team": "Mexico", "away_team": "Brazil", "home_score": 1, "away_score": 1, "tournament": "CONCACAF Gold Cup", "neutral": True},
+    ]).to_csv(international_provider.INTERNATIONAL_MATCHES_FILE, index=False)
+
+    matches = international_provider.load_international_matches(required=True)
+    rows = international_provider.team_recent_rows(matches, "Mexico", before_date="2026-06-11", limit=3)
+    public_rows = international_provider.public_recent_match_rows(rows)
+    features = international_provider.recent15_feature_table(matches, teams=["Mexico"], before_date="2026-06-11")
+
+    assert rows[0]["tournament_weight"] == pytest.approx(0.50)
+    assert rows[-1]["tournament_weight"] == pytest.approx(1.60)
+    assert rows[-1]["recency_weight"] > rows[0]["recency_weight"]
+    assert rows[-1]["weight"] > rows[1]["weight"] > rows[0]["weight"]
+    assert public_rows[0]["date"] == "2026-06-10"
+    assert public_rows[0]["match_type"] == "Official"
+    assert public_rows[0]["importance_label"] == "Muy alta"
+    assert features.loc[features["Team"] == "Mexico", "recent15_weight_sum"].iloc[0] == pytest.approx(
+        sum(row["weight"] for row in rows)
+    )
 
 
 def test_international_status_reports_scored_dates_and_future_unscored_rows(tmp_path, monkeypatch):

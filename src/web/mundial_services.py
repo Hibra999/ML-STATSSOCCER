@@ -64,8 +64,12 @@ from src.worldcup.international_provider import (
     INTERNATIONAL_ROOT,
     contextual_poisson_for_match,
     international_results_status,
+    is_friendly_tournament,
     load_international_matches,
     recent15_feature_table,
+    recent_match_importance_label,
+    recent_match_recency_weight,
+    tournament_weight,
 )
 from src.worldcup.market_provider import load_market_data, normalize_market_frame, qualifier_feature_table
 from src.worldcup.training import (
@@ -2080,20 +2084,29 @@ def recent_international_team_matches(matches: pd.DataFrame, team: str, before_d
     working = working[(home_keys == team_key) | (away_keys == team_key)].copy()
     working = working.sort_values("_date", ascending=False, kind="stable").head(int(limit)).copy()
     rows: List[Dict[str, Any]] = []
-    for _, row in working.iterrows():
+    total = max(int(working.shape[0]), 1)
+    for index, (_, row) in enumerate(working.iterrows()):
         is_home = team_name_key(row.get("home_team")) == team_key
         goals_for = int(row.get("_home_score") if is_home else row.get("_away_score"))
         goals_against = int(row.get("_away_score") if is_home else row.get("_home_score"))
         opponent = str(row.get("away_team" if is_home else "home_team", ""))
         tournament = str(row.get("tournament") or "")
+        is_friendly = is_friendly_tournament(tournament)
+        tournament_score = tournament_weight(tournament)
+        recency_score = recent_match_recency_weight(total - index, total)
+        weight = tournament_score * recency_score
         rows.append({
             "date": str(row.get("date", ""))[:10],
             "opponent": opponent,
             "venue": "Neutral" if bool(row.get("neutral", False)) else "Local" if is_home else "Visitante",
             "score": f"{goals_for}-{goals_against}",
             "result": "G" if goals_for > goals_against else "E" if goals_for == goals_against else "P",
-            "match_type": "Friendly" if "friendly" in tournament.lower() else "Official",
+            "match_type": "Friendly" if is_friendly else "Official",
             "tournament": tournament,
+            "weight": round(float(weight), 3),
+            "tournament_weight": round(float(tournament_score), 3),
+            "recency_weight": round(float(recency_score), 3),
+            "importance_label": recent_match_importance_label(weight, is_friendly),
         })
     return rows
 
@@ -2119,18 +2132,29 @@ def recent_team_matches(history_df: pd.DataFrame, team: str, before_date: str = 
     working = working[working["_g1"].notna() & working["_g2"].notna()]
     working = working.sort_values("_date", ascending=False, kind="stable").head(int(limit)).copy()
     rows: List[Dict[str, Any]] = []
-    for _, row in working.iterrows():
+    total = max(int(working.shape[0]), 1)
+    for index, (_, row) in enumerate(working.iterrows()):
         is_home = team_name_key(row.get("Team 1")) == team_key
         goals_for = int(row.get("_g1") if is_home else row.get("_g2"))
         goals_against = int(row.get("_g2") if is_home else row.get("_g1"))
         opponent = str(row.get("Team 2" if is_home else "Team 1", ""))
+        tournament = str(row.get("Round") or row.get("tournament") or row.get("Group") or "")
+        is_friendly = is_friendly_tournament(tournament)
+        tournament_score = tournament_weight(tournament)
+        recency_score = recent_match_recency_weight(total - index, total)
+        weight = tournament_score * recency_score
         rows.append({
             "date": str(row.get("Date", ""))[:10],
             "opponent": opponent,
             "venue": "Local" if is_home else "Visitante",
             "score": f"{goals_for}-{goals_against}",
             "result": "G" if goals_for > goals_against else "E" if goals_for == goals_against else "P",
-            "match_type": str(row.get("Round") or row.get("tournament") or row.get("Group") or ""),
+            "match_type": "Friendly" if is_friendly else "Official",
+            "tournament": tournament,
+            "weight": round(float(weight), 3),
+            "tournament_weight": round(float(tournament_score), 3),
+            "recency_weight": round(float(recency_score), 3),
+            "importance_label": recent_match_importance_label(weight, is_friendly),
         })
     return rows
 
@@ -4584,8 +4608,8 @@ def recent_matches_report_html(recent: Dict[str, Any], fixture: Dict[str, Any]) 
           {f'<p>{escape_report_html(source_note)}</p>' if source_note else ''}
           {warning_html}
           <div class="recent15-columns">
-            {recent_matches_report_table(home_rows, home_team)}
-            {recent_matches_report_table(away_rows, away_team)}
+            {recent_matches_report_panel(home_rows, home_team)}
+            {recent_matches_report_panel(away_rows, away_team)}
           </div>
         </details>
 """
@@ -4601,26 +4625,69 @@ def recent_matches_source_note(recent: Dict[str, Any]) -> str:
     return ""
 
 
-def recent_matches_report_table(rows: List[Dict[str, Any]], team: str) -> str:
+def recent_matches_report_panel(rows: List[Dict[str, Any]], team: str) -> str:
     if not rows:
-        return f"<div><h3>{escape_report_html(team)}</h3><p>Sin partidos recientes.</p></div>"
-    body = "".join(
-        "<tr>"
-        f"<td>{escape_report_html(row.get('date', ''))}</td>"
-        f"<td>{escape_report_html(row.get('opponent', ''))}</td>"
-        f"<td>{escape_report_html(row.get('score', ''))}</td>"
-        f"<td>{escape_report_html(row.get('result', ''))}</td>"
-        f"<td>{escape_report_html(row.get('tournament', row.get('match_type', '')))}</td>"
-        f"<td>{escape_report_html(row.get('match_type', ''))}</td>"
-        "</tr>"
-        for row in rows[:15]
-    )
+        return f'<div class="recent15-report-team"><h3>{escape_report_html(team)}</h3><p>Sin partidos recientes.</p></div>'
+    stats = recent_matches_summary(rows)
+    body = "".join(recent_match_report_card(row) for row in rows[:15])
     return f"""
-          <div>
-            <h3>{escape_report_html(team)}</h3>
-            <table><thead><tr><th>Fecha</th><th>Rival</th><th>Marcador</th><th>R</th><th>Torneo</th><th>Tipo</th></tr></thead><tbody>{body}</tbody></table>
+          <div class="recent15-report-team">
+            <header>
+              <div><h3>{escape_report_html(team)}</h3><small>{escape_report_html(stats["latest"])} ultimo partido</small></div>
+              <strong>{escape_report_html(stats["official"])}/{escape_report_html(stats["total"])} oficiales</strong>
+            </header>
+            <div class="recent15-report-summary">
+              <span><b>{escape_report_html(stats["record"])}</b><small>G-E-P</small></span>
+              <span><b>{escape_report_html(stats["avg_weight"])}</b><small>Peso medio</small></span>
+            </div>
+            <div class="recent15-report-list">{body}</div>
           </div>
 """
+
+
+def recent_matches_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = len(rows)
+    wins = sum(1 for row in rows if str(row.get("result") or "").upper() in {"G", "W"})
+    draws = sum(1 for row in rows if str(row.get("result") or "").upper() in {"E", "D"})
+    losses = sum(1 for row in rows if str(row.get("result") or "").upper() in {"P", "L"})
+    official = sum(1 for row in rows if str(row.get("match_type") or "").lower() == "official")
+    weights = [float_or_zero(row.get("weight")) for row in rows if float_or_zero(row.get("weight")) > 0.0]
+    avg_weight = format_metric(float(np.mean(weights))) if weights else "-"
+    return {
+        "total": total,
+        "official": official,
+        "record": f"{wins}-{draws}-{losses}",
+        "latest": str((rows[0] if rows else {}).get("date") or "-"),
+        "avg_weight": avg_weight,
+    }
+
+
+def recent_match_report_card(row: Dict[str, Any]) -> str:
+    match_type = str(row.get("match_type") or "")
+    type_label = "Oficial" if match_type.lower() == "official" else "Amistoso" if match_type.lower() == "friendly" else match_type
+    type_class = "official" if match_type.lower() == "official" else "friendly" if match_type.lower() == "friendly" else "neutral"
+    tournament = row.get("tournament") or row.get("match_type") or ""
+    weight = row.get("weight", "")
+    importance = row.get("importance_label") or ""
+    return (
+        f'<article class="recent15-report-match {escape_report_html(type_class)}">'
+        '<div class="recent15-report-main">'
+        f'<span>{escape_report_html(row.get("date", ""))}</span>'
+        f'<strong>vs {escape_report_html(row.get("opponent", ""))}</strong>'
+        f'<small>Torneo: {escape_report_html(tournament)}</small>'
+        '</div>'
+        '<div class="recent15-report-score">'
+        f'<b>{escape_report_html(row.get("score", ""))}</b>'
+        f'<span>{escape_report_html(row.get("result", ""))}</span>'
+        '</div>'
+        '<div class="recent15-report-tags">'
+        f'<span>{escape_report_html(type_label)}</span>'
+        f'<span>{escape_report_html(row.get("venue", ""))}</span>'
+        f'<span>Peso {escape_report_html(format_metric(weight))}</span>'
+        f'{f"<span>{escape_report_html(importance)}</span>" if importance else ""}'
+        '</div>'
+        '</article>'
+    )
 
 
 def backtest_report_html_body(report: Dict[str, Any]) -> str:
@@ -4826,8 +4893,14 @@ main{width:min(1120px,100%);margin:0 auto;padding:24px}
 .pick.secondary{background:#f8fafb;border-color:#d9e2e8}.top-scores{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
 .top-scores span{padding:8px;border-radius:8px;background:#f8fafb;text-align:center}.top-scores b{color:#16202a}
 .recent15-report{border:1px solid #d9e2e8;border-radius:8px;background:#f8fafb;padding:8px}.recent15-report summary{cursor:pointer;font-weight:700}
-.recent15-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px}.recent15-columns h3{margin:0 0 6px;font-size:13px}
-.recent15-columns table{min-width:0;background:#fff}.recent15-columns th,.recent15-columns td{padding:5px 6px;font-size:11px}
+.recent15-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:8px}.recent15-report-team{display:grid;gap:8px;padding:10px;border:1px solid #d9e2e8;border-radius:8px;background:#fff}
+.recent15-report-team header{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:start}.recent15-report-team h3{margin:0;font-size:14px}.recent15-report-team small{color:#65717d}
+.recent15-report-team header strong{padding:4px 7px;border-radius:999px;background:#eaf6f2;color:#0f7a5f;font-size:11px;white-space:nowrap}.recent15-report-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.recent15-report-summary span{padding:7px;border:1px solid #d9e2e8;border-radius:8px;background:#f8fafb}.recent15-report-summary b,.recent15-report-summary small{display:block}
+.recent15-report-list{display:grid;gap:6px}.recent15-report-match{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 8px;padding:8px;border:1px solid #d9e2e8;border-left:4px solid #96a3ad;border-radius:8px;background:#fff;break-inside:avoid}
+.recent15-report-match.official{border-left-color:#0f7a5f}.recent15-report-match.friendly{border-left-color:#d9822b}.recent15-report-main{min-width:0}.recent15-report-main span,.recent15-report-main small{display:block;color:#65717d;font-size:10px;font-weight:700}
+.recent15-report-main strong{display:block;margin:2px 0;color:#16202a;font-size:12px;overflow-wrap:anywhere}.recent15-report-score{display:grid;justify-items:end;align-content:start;gap:3px}.recent15-report-score b{font-size:14px}
+.recent15-report-score span{padding:3px 6px;border-radius:999px;background:#edf2f4;color:#40505d;font-size:10px;font-weight:800}.recent15-report-tags{display:flex;flex-wrap:wrap;gap:4px;grid-column:1/-1}.recent15-report-tags span{padding:3px 6px;border-radius:999px;background:#eef3f5;color:#40505d;font-size:10px;font-weight:800}
 .metric-bars{display:grid;gap:7px}.metric-bar{display:grid;grid-template-columns:84px minmax(0,1fr) 72px;gap:8px;align-items:center}
 .metric-bar i{height:9px;border-radius:999px;background:#edf2f4;overflow:hidden}.metric-bar b{display:block;height:100%;border-radius:inherit;background:#0f7a5f}
 .metric-bar strong{text-align:right}.table-section{margin-top:18px}.table-wrap{max-width:100%;overflow:auto;border:1px solid #d9e2e8;border-radius:8px;background:#fff}

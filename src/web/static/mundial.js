@@ -1617,21 +1617,68 @@ function recentMatches15DrawerHtml(recent, fixture) {
 
 function recentMatchesMiniTable(rows, team) {
   const items = rows || [];
-  if (!items.length) return `<div class="recent15-table"><strong>${escapeHtml(team)}</strong><small>Sin partidos recientes</small></div>`;
-  return `<div class="recent15-table">
-    <strong>${escapeHtml(team)}</strong>
-    <table>
-      <thead><tr><th>Fecha</th><th>Rival</th><th>Marcador</th><th>R</th><th>Tipo</th></tr></thead>
-      <tbody>${items.map((row) => `
-        <tr>
-          <td>${escapeHtml(row.date || "")}</td>
-          <td>${escapeHtml(row.opponent || "")}</td>
-          <td>${escapeHtml(row.score || "")}</td>
-          <td>${escapeHtml(row.result || "")}</td>
-          <td>${escapeHtml(row.match_type || "")}</td>
-        </tr>`).join("")}</tbody>
-    </table>
+  if (!items.length) return `<div class="recent15-panel empty"><strong>${escapeHtml(team)}</strong><small>Sin partidos recientes</small></div>`;
+  const summary = recentMatchesSummary(items);
+  return `<div class="recent15-panel">
+    <header class="recent15-team-header">
+      <div><strong>${escapeHtml(team)}</strong><small>${escapeHtml(summary.latest)} ultimo partido</small></div>
+      <span>${escapeHtml(summary.official)}/${escapeHtml(summary.total)} oficiales</span>
+    </header>
+    <div class="recent15-summary">
+      <span><b>${escapeHtml(summary.record)}</b><small>G-E-P</small></span>
+      <span><b>${escapeHtml(summary.avgWeight)}</b><small>Peso medio</small></span>
+      <span><b>${escapeHtml(summary.highImportance)}</b><small>Alta imp.</small></span>
+    </div>
+    <div class="recent15-match-list">
+      ${items.map((row) => recentMatchCardHtml(row)).join("")}
+    </div>
   </div>`;
+}
+
+function recentMatchesSummary(items) {
+  const wins = items.filter((row) => ["G", "W"].includes(String(row.result || "").toUpperCase())).length;
+  const draws = items.filter((row) => ["E", "D"].includes(String(row.result || "").toUpperCase())).length;
+  const losses = items.filter((row) => ["P", "L"].includes(String(row.result || "").toUpperCase())).length;
+  const official = items.filter((row) => String(row.match_type || "").toLowerCase() === "official").length;
+  const weights = items.map((row) => Number(row.weight)).filter((value) => Number.isFinite(value) && value > 0);
+  const highImportance = items.filter((row) => Number(row.weight) >= 1.75).length;
+  const average = weights.length ? weights.reduce((sum, value) => sum + value, 0) / weights.length : null;
+  return {
+    total: items.length,
+    official,
+    record: `${wins}-${draws}-${losses}`,
+    latest: items[0]?.date || "-",
+    avgWeight: average === null ? "-" : formatNumber(average),
+    highImportance,
+  };
+}
+
+function recentMatchCardHtml(row) {
+  const type = String(row.match_type || "");
+  const typeKey = type.toLowerCase() === "official" ? "official" : type.toLowerCase() === "friendly" ? "friendly" : "neutral";
+  const typeLabel = typeKey === "official" ? "Oficial" : typeKey === "friendly" ? "Amistoso" : type || "-";
+  const result = String(row.result || "").toUpperCase();
+  const resultClass = ["G", "W"].includes(result) ? "win" : ["E", "D"].includes(result) ? "draw" : ["P", "L"].includes(result) ? "loss" : "";
+  const tournament = row.tournament || row.match_type || "";
+  const weight = Number(row.weight);
+  const weightText = Number.isFinite(weight) ? formatNumber(weight) : "-";
+  return `<article class="recent15-match ${escapeAttr(typeKey)}">
+    <div class="recent15-match-main">
+      <span>${escapeHtml(row.date || "")}</span>
+      <strong>vs ${escapeHtml(row.opponent || "")}</strong>
+      <small title="${escapeAttr(tournament)}">${escapeHtml(tournament || "Sin torneo")}</small>
+    </div>
+    <div class="recent15-score">
+      <b>${escapeHtml(row.score || "")}</b>
+      <span class="${escapeAttr(resultClass)}">${escapeHtml(row.result || "")}</span>
+    </div>
+    <div class="recent15-tags">
+      <span class="recent15-badge ${escapeAttr(typeKey)}">${escapeHtml(typeLabel)}</span>
+      <span>${escapeHtml(row.venue || "")}</span>
+      <span>Peso ${escapeHtml(weightText)}</span>
+      ${row.importance_label ? `<span>${escapeHtml(row.importance_label)}</span>` : ""}
+    </div>
+  </article>`;
 }
 
 async function runMatchMonteCarlo() {

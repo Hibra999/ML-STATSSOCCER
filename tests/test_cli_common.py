@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from src.cli import app as cli_app
-from src.cli.common import CLIError, parse_eval_odd_range, parse_odd_range, validate_identifier
+from src.cli.common import CLIError, parse_eval_odd_range, parse_odd_range, save_figure, validate_identifier
 from src.cli.model_specs import MODEL_SPECS, build_model_params, normalize_model_key
 from src.models.trainer import Trainer
 from src.preprocessing.utils.target import TargetType, construct_targets
@@ -33,6 +33,20 @@ def test_parse_eval_odd_range():
 def test_validate_identifier_rejects_spaces():
     with pytest.raises(CLIError):
         validate_identifier("bad id", "model id")
+
+
+def test_save_figure_writes_polished_matplotlib_output(tmp_path):
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    ax.barh(["recent15_adjusted_goal_diff_avg", "market_prob_home"], [0.72, 0.48])
+    ax.set_title("Feature importance")
+
+    output = tmp_path / "importance.png"
+    save_figure(ax, str(output))
+
+    assert output.exists()
+    assert output.stat().st_size > 0
 
 
 def test_run_without_args_shows_web_help(capsys):
