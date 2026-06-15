@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 import requests
 
-from src.worldcup.data import clean_team_name
+from src.worldcup.data import clean_team_name, team_name_similarity
 
 
 FOTMOB_ROOT = Path("storage") / "worldcup" / "fotmob"
@@ -320,15 +320,7 @@ def slugify(value: Any) -> str:
 
 
 def name_similarity(left: str, right: str) -> float:
-    left_key = re.sub(r"[^a-z0-9]+", "", str(left or "").lower())
-    right_key = re.sub(r"[^a-z0-9]+", "", str(right or "").lower())
-    if not left_key or not right_key:
-        return 0.0
-    if left_key == right_key:
-        return 1.0
-    if left_key in right_key or right_key in left_key:
-        return 0.9
-    return 0.0
+    return team_name_similarity(left, right)
 
 
 def clean_scalar(value: Any) -> Any:

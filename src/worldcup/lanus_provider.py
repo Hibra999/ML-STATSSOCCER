@@ -4,14 +4,13 @@ import json
 import math
 import re
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from unicodedata import normalize as unicode_normalize
 
 import pandas as pd
 
-from src.worldcup.data import clean_team_name, tournament_fixtures_dataframe
+from src.worldcup.data import clean_team_name, team_name_similarity, tournament_fixtures_dataframe
 from src.worldcup.fotmob_provider import fetch_best_fotmob_event, fetch_fotmob_lineup
 
 
@@ -572,30 +571,7 @@ def event_team_name(event: Dict[str, Any], side: str) -> str:
 
 
 def team_similarity(expected: str, candidate: str) -> float:
-    expected_key = normalize_team_key(expected)
-    candidate_key = normalize_team_key(candidate)
-    if not expected_key or not candidate_key:
-        return 0.0
-    if expected_key == candidate_key:
-        return 1.0
-    aliases = TEAM_ALIASES.get(expected_key, set())
-    if candidate_key in aliases:
-        return 1.0
-    if expected_key in candidate_key or candidate_key in expected_key:
-        return 0.9
-    return SequenceMatcher(None, expected_key, candidate_key).ratio()
-
-
-TEAM_ALIASES = {
-    "usa": {"united states", "united states of america"},
-    "united states": {"usa", "united states of america"},
-    "south korea": {"korea republic", "republic of korea", "korea"},
-    "czech republic": {"czechia"},
-    "ivory coast": {"cote divoire", "cote d ivoire"},
-    "dr congo": {"congo dr", "democratic republic congo", "d r congo"},
-    "curacao": {"curaçao"},
-    "bosnia herzegovina": {"bosnia and herzegovina"},
-}
+    return team_name_similarity(expected, candidate)
 
 
 def detect_lineup_status(raw: Dict[str, Any], starters_home: int, starters_away: int) -> str:

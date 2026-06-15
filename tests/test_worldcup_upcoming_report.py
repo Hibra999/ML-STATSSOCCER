@@ -980,6 +980,109 @@ def test_worldcup_results_refresh_and_backtest_auto_use_nine_verified_finals(tmp
     assert len(result["models"][0]["matches"]) == 9
 
 
+def test_worldcup_results_refresh_matches_cote_divoire_alias_from_fotmob(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+    import src.worldcup.fotmob_provider as fotmob_provider
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 15, 2, 15, tzinfo=timezone.utc))
+    pd.DataFrame(columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+    tournament = {
+        "matches": [
+            {"num": 26, "date": "2026-06-14", "time": "19:00 UTC-4", "team1": "Ivory Coast", "team2": "Ecuador", "group": "Group E"},
+        ],
+    }
+
+    monkeypatch.setattr(
+        fotmob_provider,
+        "fotmob_get_json",
+        lambda url, params=None: {"matches": [_fotmob_event(2601, "Côte d’Ivoire", "Ecuador", 1, 0)]},
+    )
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", lambda working, warnings: [])
+
+    refresh = worldcup_data.refresh_worldcup_2026_results(tournament, refresh=True)
+    stored = pd.read_csv(results_path).iloc[0]
+
+    assert refresh["fotmob_final_rows"] == 1
+    assert refresh["confirmed_results"] == 1
+    assert stored["home"] == "Ivory Coast"
+    assert stored["away"] == "Ecuador"
+    assert int(stored["home_goals"]) == 1
+    assert int(stored["away_goals"]) == 0
+    assert str(stored["source"]).startswith("fotmob:2601")
+
+
+def test_worldcup_results_refresh_and_backtest_auto_use_ten_verified_finals(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 15, 2, 15, tzinfo=timezone.utc))
+    pd.DataFrame(columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+    tournament = {
+        "matches": [
+            {"num": 1, "date": "2026-06-11", "time": "13:00 UTC-6", "team1": "Mexico", "team2": "South Africa", "group": "Group A"},
+            {"num": 2, "date": "2026-06-11", "time": "20:00 UTC-6", "team1": "South Korea", "team2": "Czech Republic", "group": "Group A"},
+            {"num": 5, "date": "2026-06-12", "time": "18:00 UTC-4", "team1": "Canada", "team2": "Bosnia & Herzegovina", "group": "Group B"},
+            {"num": 9, "date": "2026-06-12", "time": "18:00 UTC-7", "team1": "USA", "team2": "Paraguay", "group": "Group D"},
+            {"num": 6, "date": "2026-06-13", "time": "15:00 UTC-4", "team1": "Qatar", "team2": "Switzerland", "group": "Group B"},
+            {"num": 13, "date": "2026-06-13", "time": "18:00 UTC-4", "team1": "Brazil", "team2": "Morocco", "group": "Group C"},
+            {"num": 14, "date": "2026-06-13", "time": "21:00 UTC-4", "team1": "Haiti", "team2": "Scotland", "group": "Group C"},
+            {"num": 10, "date": "2026-06-13", "time": "21:00 UTC-5", "team1": "Australia", "team2": "Turkey", "group": "Group D"},
+            {"num": 17, "date": "2026-06-14", "time": "18:00 UTC-4", "team1": "Germany", "team2": "Curaçao", "group": "Group E"},
+            {"num": 26, "date": "2026-06-14", "time": "19:00 UTC-4", "team1": "Ivory Coast", "team2": "Ecuador", "group": "Group E"},
+        ],
+    }
+
+    monkeypatch.setattr(worldcup_data, "fetch_fotmob_worldcup_result_rows", lambda working, warnings: [])
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", lambda working, warnings: [])
+
+    refresh = worldcup_data.refresh_worldcup_2026_results(tournament, refresh=True)
+    confirmed = services.confirmed_worldcup_2026_backtest_rows(tournament)
+
+    assert refresh["verified_final_rows"] == 10
+    assert refresh["confirmed_results"] == 10
+    assert refresh["missing_result_fixtures"] == []
+    assert confirmed.shape[0] == 10
+    ivory = confirmed[confirmed["Team 1"].eq("Ivory Coast") & confirmed["Team 2"].eq("Ecuador")].iloc[0]
+    assert ivory["G1"] == 1
+    assert ivory["G2"] == 0
+    stored = pd.read_csv(results_path)
+    assert stored.shape[0] == 10
+    stored_ivory = stored[stored["home"].eq("Ivory Coast") & stored["away"].eq("Ecuador")].iloc[0]
+    assert int(stored_ivory["home_goals"]) == 1
+    assert int(stored_ivory["away_goals"]) == 0
+    assert stored_ivory["source"] == "verified:guardian"
+
+
+def test_mundial_fixtures_service_autorefreshes_results_on_first_load(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 15, 2, 15, tzinfo=timezone.utc))
+    pd.DataFrame(columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+    tournament = {
+        "matches": [
+            {"num": 26, "date": "2026-06-14", "time": "19:00 UTC-4", "team1": "Ivory Coast", "team2": "Ecuador", "group": "Group E"},
+        ],
+    }
+
+    monkeypatch.setattr(worldcup_data, "fetch_fotmob_worldcup_result_rows", lambda working, warnings: [])
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", lambda working, warnings: [])
+    monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: (tournament, "test:tournament"))
+    monkeypatch.setattr(services, "_WORLD_CUP_RESULTS_AUTO_REFRESHED", False)
+    monkeypatch.setattr(services, "_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY", {})
+
+    payload = services.fixtures()
+    fixture = payload["fixtures"][0]
+
+    assert payload["confirmed_results"] == 1
+    assert fixture["label"] == "Ivory Coast vs Ecuador"
+    assert fixture["finished"] is True
+    assert fixture["score_home"] == 1
+    assert fixture["score_away"] == 0
+    assert fixture["result_source"] == "verified:guardian"
+
+
 def test_worldcup_results_refresh_updates_conflicting_local_result(tmp_path, monkeypatch):
     from src.web import mundial_services as services
 

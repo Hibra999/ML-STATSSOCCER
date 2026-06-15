@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -797,10 +798,46 @@ LOCAL_FLAG_ALIASES = {
     "United States of America": "USA",
     "Curacao": "Curaçao",
 }
+_WORLD_CUP_RESULTS_AUTO_REFRESH_LOCK = threading.Lock()
+_WORLD_CUP_RESULTS_AUTO_REFRESHED = False
+_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY: Dict[str, Any] = {}
+
+
+def ensure_worldcup_results_autorefreshed_once(tournament: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    global _WORLD_CUP_RESULTS_AUTO_REFRESHED, _WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY
+    if _WORLD_CUP_RESULTS_AUTO_REFRESHED:
+        return dict(_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY)
+    with _WORLD_CUP_RESULTS_AUTO_REFRESH_LOCK:
+        if _WORLD_CUP_RESULTS_AUTO_REFRESHED:
+            return dict(_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY)
+        try:
+            target = tournament if tournament is not None else load_tournament_2026(refresh=False)[0]
+            summary = refresh_worldcup_2026_results(target, refresh=True)
+        except Exception as exc:
+            summary = {
+                "source": "unavailable:auto-refresh",
+                "provider": "auto-refresh",
+                "refresh_attempted": True,
+                "refresh_added": 0,
+                "refresh_updated": 0,
+                "fotmob_final_rows": 0,
+                "sofascore_final_rows": 0,
+                "verified_final_rows": 0,
+                "conflicts": [],
+                "warnings": [f"Auto-refresh resultados Mundial no disponible: {exc.__class__.__name__}: {exc}"],
+                "provider_warnings": [],
+                "missing_result_fixtures": [],
+                "auto_refresh_error": str(exc),
+                "auto_refreshed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        _WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY = dict(summary or {})
+        _WORLD_CUP_RESULTS_AUTO_REFRESHED = True
+        return dict(_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY)
 
 
 def overview(refresh: bool = False) -> Dict[str, Any]:
     tournament, fixture_source = load_tournament_2026(refresh=bool(refresh))
+    results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     groups = groups_from_tournament(tournament)
     fixture_df = tournament_fixtures_dataframe(tournament)
     players_df, players_source = load_players(refresh=False)
@@ -820,6 +857,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
         "result_override_applied": results_status["override_applied"],
         "confirmed_results": results_status["confirmed_results"],
         "results_updated_at": results_status["updated_at"],
+        "results_autorefresh": results_autorefresh,
         "players_source": players_source,
         "opener": fixture_summary["opener"],
         "featured_matches": fixture_summary["featured_matches"],
@@ -839,6 +877,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
 
 def groups(refresh: bool = False) -> Dict[str, Any]:
     tournament, source = load_tournament_2026(refresh=bool(refresh))
+    ensure_worldcup_results_autorefreshed_once(tournament)
     group_map = groups_from_tournament(tournament)
     fixture_df = tournament_fixtures_dataframe(tournament)
     results_status = fixture_results_status(fixture_df)
@@ -870,6 +909,7 @@ def groups(refresh: bool = False) -> Dict[str, Any]:
 
 def fixtures(refresh: bool = False) -> Dict[str, Any]:
     tournament, source = load_tournament_2026(refresh=bool(refresh))
+    ensure_worldcup_results_autorefreshed_once(tournament)
     df = tournament_fixtures_dataframe(tournament)
     results_status = fixture_results_status(df)
     rows = []

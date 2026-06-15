@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from unicodedata import normalize as unicode_normalize
 
 import pandas as pd
 import requests
@@ -25,6 +27,38 @@ PLAYERS_CACHE_FILE = CACHE_ROOT / "players_2026.csv"
 WIKIPEDIA_SQUADS_URL = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup_squads"
 RESULT_OVERRIDE_COLUMNS = ["date", "home", "away", "home_goals", "away_goals", "status", "source", "updated_at"]
 RESULT_REFRESH_PARTIAL_WARNING = "backtest parcial por fuente no disponible"
+TEAM_NAME_ALIASES = {
+    "usa": "USA",
+    "united states": "USA",
+    "united states of america": "USA",
+    "south korea": "South Korea",
+    "korea republic": "South Korea",
+    "republic of korea": "South Korea",
+    "korea": "South Korea",
+    "czech republic": "Czech Republic",
+    "czechia": "Czech Republic",
+    "cote divoire": "Ivory Coast",
+    "cote d ivoire": "Ivory Coast",
+    "cotedivoire": "Ivory Coast",
+    "costa de marfil": "Ivory Coast",
+    "costa marfil": "Ivory Coast",
+    "ivory coast": "Ivory Coast",
+    "dr congo": "DR Congo",
+    "congo dr": "DR Congo",
+    "democratic republic congo": "DR Congo",
+    "d r congo": "DR Congo",
+    "curacao": "Curaçao",
+    "curaçao": "Curaçao",
+    "bosnia herzegovina": "Bosnia & Herzegovina",
+    "bosnia and herzegovina": "Bosnia & Herzegovina",
+    "netherlands": "Netherlands",
+    "the netherlands": "Netherlands",
+    "holland": "Netherlands",
+    "paises bajos": "Netherlands",
+    "paisesbajos": "Netherlands",
+    "japan": "Japan",
+    "japon": "Japan",
+}
 VERIFIED_WORLD_CUP_2026_RESULTS: List[Dict[str, Any]] = [
     {
         "date": "2026-06-11",
@@ -115,6 +149,26 @@ VERIFIED_WORLD_CUP_2026_RESULTS: List[Dict[str, Any]] = [
         "status": "final",
         "source": "verified:user-table",
         "available_after_utc": "2026-06-14T20:00:00+00:00",
+    },
+    {
+        "date": "2026-06-14",
+        "home": "Ivory Coast",
+        "away": "Ecuador",
+        "home_goals": 1,
+        "away_goals": 0,
+        "status": "final",
+        "source": "verified:guardian",
+        "available_after_utc": "2026-06-15T02:10:00+00:00",
+    },
+    {
+        "date": "2026-06-14",
+        "home": "Netherlands",
+        "away": "Japan",
+        "home_goals": 2,
+        "away_goals": 2,
+        "status": "final",
+        "source": "verified:guardian",
+        "available_after_utc": "2026-06-14T22:15:00+00:00",
     },
 ]
 
@@ -930,9 +984,7 @@ def _worldcup_result_key(date_value: Any, home: Any, away: Any) -> Tuple[str, st
 
 
 def _worldcup_team_key(value: Any) -> str:
-    text = str(value or "").lower().replace("&", " and ")
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    return team_name_key(value)
 
 
 def teams_dataframe(tournament: Dict[str, Any], model=None) -> pd.DataFrame:
@@ -1013,7 +1065,40 @@ def normalize_players_dataframe(df: pd.DataFrame, source: str, default_team: str
 
 
 def clean_team_name(value: Any) -> str:
-    return str(value or "").strip()
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return TEAM_NAME_ALIASES.get(_raw_team_name_key(text), text)
+
+
+def team_name_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    key = _raw_team_name_key(text)
+    canonical = TEAM_NAME_ALIASES.get(key)
+    return _raw_team_name_key(canonical) if canonical else key
+
+
+def team_name_similarity(expected: Any, candidate: Any) -> float:
+    expected_key = team_name_key(expected)
+    candidate_key = team_name_key(candidate)
+    if not expected_key or not candidate_key:
+        return 0.0
+    if expected_key == candidate_key:
+        return 1.0
+    if expected_key in candidate_key or candidate_key in expected_key:
+        return 0.9
+    return SequenceMatcher(None, expected_key, candidate_key).ratio()
+
+
+def _raw_team_name_key(value: Any) -> str:
+    text = unicode_normalize("NFKD", str(value or ""))
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.lower().replace("&", " and ")
+    text = re.sub(r"\b(fc|cf|national team|team)\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def group_letter(group: str) -> str:
