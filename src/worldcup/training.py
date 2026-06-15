@@ -155,6 +155,7 @@ FUTURE_LABEL_EXCLUDED_YEAR = 2026
 TARGET_WORLDCUP_YEAR = FUTURE_LABEL_EXCLUDED_YEAR
 INTERNATIONAL_TRAINING_START_YEAR = 2014
 INTERNATIONAL_TRAINING_START_DATE = f"{INTERNATIONAL_TRAINING_START_YEAR}-01-01"
+WORLD_CUP_2026_TEAM_SCOPE_POLICY = "worldcup_2026_participant_any"
 TRAINING_SCOPE_DATE_COLUMNS = (
     "Date",
     "date",
@@ -168,8 +169,24 @@ TRAINING_SCOPE_DATE_COLUMNS = (
     "event_date",
     "fetched_at",
 )
-PREPARED_SCHEMA_VERSION = "worldcup_2026_international_since_2014_v5_scoped_features_split_80_10_10"
-FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v5_xg_lightgbm_since_2014"
+TRAINING_SCOPE_TEAM_COLUMNS = (
+    "Home",
+    "Away",
+    "Team 1",
+    "Team 2",
+    "home_team",
+    "away_team",
+    "Team",
+    "Opponent",
+    "team",
+    "opponent",
+    "Equipo 1",
+    "Equipo 2",
+    "Equipo",
+    "team_name",
+)
+PREPARED_SCHEMA_VERSION = "worldcup_2026_international_since_2014_v6_teams_scope_split_80_10_10"
+FEATURE_STORE_SCHEMA_VERSION = "worldcup_feature_matrix_v6_xg_lightgbm_since_2014_teams_scope"
 EVAL_STRATEGY_LAST_30 = "last_30_international_test"
 SPLIT_POLICY_VALIDATION_LAST_30 = "temporal_since_2014_validation_last_30_test"
 EVAL_STRATEGY_TEMPORAL_80_10_10 = "temporal_80_10_10"
@@ -743,7 +760,15 @@ def dataset_status() -> Dict[str, Any]:
         "sample_weight_policy": prepared.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "data_quality": prepared.get("data_quality", {}),
         "training_start_year": int(prepared.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR)),
+        "training_team_scope_policy": prepared.get("training_team_scope_policy", WORLD_CUP_2026_TEAM_SCOPE_POLICY),
+        "training_scope_team_count": int(prepared.get("training_scope_team_count", 0) or 0),
+        "training_scope_teams": prepared.get("training_scope_teams", []),
         "max_label_date": prepared.get("max_label_date", ""),
+        "raw_international_source_rows": int(prepared.get("raw_international_source_rows", 0) or 0),
+        "date_scoped_international_source_rows": int(prepared.get("date_scoped_international_source_rows", 0) or 0),
+        "team_scoped_international_source_rows": int(prepared.get("team_scoped_international_source_rows", 0) or 0),
+        "removed_outside_team_scope_rows": int(prepared.get("removed_outside_team_scope_rows", 0) or 0),
+        "removed_outside_team_scope_label_rows": int(prepared.get("removed_outside_team_scope_label_rows", 0) or 0),
         "market_rows": int(prepared.get("market_rows", 0)),
         "qualifier_feature_rows": int(prepared.get("qualifier_feature_rows", 0)),
         "market_status": prepared.get("market_status", {}),
@@ -836,6 +861,9 @@ def prepared_dataset_schema_valid(dataset: Dict[str, Any]) -> bool:
         return False
     if int(dataset.get("training_start_year", 0) or 0) != INTERNATIONAL_TRAINING_START_YEAR:
         return False
+    if str(dataset.get("training_team_scope_policy") or "") != WORLD_CUP_2026_TEAM_SCOPE_POLICY:
+        return False
+    scope_teams = dataset.get("training_scope_teams") or worldcup_training_scope_teams()
     validation_rows = dataset.get("validation", pd.DataFrame())
     if not isinstance(validation_rows, pd.DataFrame) or validation_rows.empty:
         return False
@@ -846,14 +874,22 @@ def prepared_dataset_schema_valid(dataset: Dict[str, Any]) -> bool:
         dates = pd.to_datetime(frame.get("Date", pd.Series(index=frame.index, dtype=object)), errors="coerce")
         if dates.notna().any() and int(dates.dt.year.min()) < INTERNATIONAL_TRAINING_START_YEAR:
             return False
+        if frame_has_rows_outside_worldcup_team_scope(frame, scope_teams):
+            return False
     if frame_has_pre_training_scope_dates(dataset.get("market_data", pd.DataFrame())):
         return False
+    if frame_has_rows_outside_worldcup_team_scope(dataset.get("market_data", pd.DataFrame()), scope_teams):
+        return False
     if frame_has_pre_training_scope_dates(dataset.get("qualifier_matches", pd.DataFrame())):
+        return False
+    if frame_has_rows_outside_worldcup_team_scope(dataset.get("qualifier_matches", pd.DataFrame()), scope_teams):
         return False
     api_football = dataset.get("api_football", {})
     if isinstance(api_football, dict):
         for key in ("fixtures", "statistics", "team_stats", "lineups", "injuries", "odds", "market_rows"):
             if frame_has_pre_training_scope_dates(api_football.get(key, pd.DataFrame())):
+                return False
+            if frame_has_rows_outside_worldcup_team_scope(api_football.get(key, pd.DataFrame()), scope_teams):
                 return False
     return bool(dataset.get("over_under_ready", False)) and bool(dataset.get("goals_distribution_ready", False))
 
@@ -918,7 +954,7 @@ def train_single_hybrid_model(
     history_source = shared_context.get("history_source", "")
     if history_df is None:
         history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
-        history_df = filter_training_scope_frame(history_df, keep_unknown_date=False)
+        history_df = filter_training_scope_sources(history_df, group_teams, keep_unknown_date=False)
     feature_store = normalized["team_features"]
     market_rows = normalized.get("market_data", pd.DataFrame())
     qualifier_rows = normalized.get("qualifier_matches", pd.DataFrame())
@@ -927,7 +963,7 @@ def train_single_hybrid_model(
     international_matches = shared_context.get("international_matches")
     if international_matches is None:
         international_matches = load_international_matches(required=False)
-        international_matches = filter_training_scope_frame(international_matches, keep_unknown_date=False)
+        international_matches = filter_training_scope_sources(international_matches, group_teams, keep_unknown_date=False)
     recent15_match_index = shared_context.get("recent15_match_index")
     if recent15_match_index is None:
         recent15_match_index = build_recent15_match_index(international_matches)
@@ -1266,6 +1302,14 @@ def train_single_hybrid_model(
         "sample_weight_policy": normalized.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "sample_weight_summary": sample_weight_summary(fit_sample_weight),
         "data_quality": normalized.get("data_quality", {}),
+        "training_team_scope_policy": normalized.get("training_team_scope_policy", WORLD_CUP_2026_TEAM_SCOPE_POLICY),
+        "training_scope_team_count": int(normalized.get("training_scope_team_count", 0) or 0),
+        "training_scope_teams": normalized.get("training_scope_teams", []),
+        "raw_international_source_rows": int(normalized.get("raw_international_source_rows", 0) or 0),
+        "date_scoped_international_source_rows": int(normalized.get("date_scoped_international_source_rows", 0) or 0),
+        "team_scoped_international_source_rows": int(normalized.get("team_scoped_international_source_rows", 0) or 0),
+        "removed_outside_team_scope_rows": int(normalized.get("removed_outside_team_scope_rows", 0) or 0),
+        "removed_outside_team_scope_label_rows": int(normalized.get("removed_outside_team_scope_label_rows", 0) or 0),
         "dc_rho": dc_rho,
         "source_files": [str(path) for path in normalized.get("source_files", [])],
         "kaggle_files": [],
@@ -1380,10 +1424,11 @@ def train_dual_market_model(
         files = []
     if not normalized["trainable"]:
         raise WorldCupTrainingError("El ETL preparado no dejo filas entrenables para el modelo 1X2.")
+    group_teams = teams_from_tournament(tournament)
     history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
-    history_df = filter_training_scope_frame(history_df, keep_unknown_date=False)
+    history_df = filter_training_scope_sources(history_df, group_teams, keep_unknown_date=False)
     international_matches = load_international_matches(required=False)
-    international_matches = filter_training_scope_frame(international_matches, keep_unknown_date=False)
+    international_matches = filter_training_scope_sources(international_matches, group_teams, keep_unknown_date=False)
     shared_context = {
         "files": files,
         "normalized": normalized,
@@ -1498,6 +1543,14 @@ def train_dual_market_model(
         "sample_weight_policy": result_record.get("sample_weight_policy", normalized.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY)),
         "sample_weight_summary": result_record.get("sample_weight_summary", {}),
         "data_quality": result_record.get("data_quality", normalized.get("data_quality", {})),
+        "training_team_scope_policy": result_record.get("training_team_scope_policy", normalized.get("training_team_scope_policy", WORLD_CUP_2026_TEAM_SCOPE_POLICY)),
+        "training_scope_team_count": int(result_record.get("training_scope_team_count", normalized.get("training_scope_team_count", 0)) or 0),
+        "training_scope_teams": result_record.get("training_scope_teams", normalized.get("training_scope_teams", [])),
+        "raw_international_source_rows": int(result_record.get("raw_international_source_rows", normalized.get("raw_international_source_rows", 0)) or 0),
+        "date_scoped_international_source_rows": int(result_record.get("date_scoped_international_source_rows", normalized.get("date_scoped_international_source_rows", 0)) or 0),
+        "team_scoped_international_source_rows": int(result_record.get("team_scoped_international_source_rows", normalized.get("team_scoped_international_source_rows", 0)) or 0),
+        "removed_outside_team_scope_rows": int(result_record.get("removed_outside_team_scope_rows", normalized.get("removed_outside_team_scope_rows", 0)) or 0),
+        "removed_outside_team_scope_label_rows": int(result_record.get("removed_outside_team_scope_label_rows", normalized.get("removed_outside_team_scope_label_rows", 0)) or 0),
         "dc_rho": float(result_record.get("dc_rho", 0.0) or 0.0),
         "source_files": result_record.get("source_files", normalized.get("source_files", [])),
         "kaggle_files": [],
@@ -1904,14 +1957,106 @@ def frame_has_pre_training_scope_dates(
     return bool((dates.notna() & dates.lt(start_ts)).any())
 
 
-def filter_api_football_training_scope(api_football_bundle: Dict[str, Any]) -> Dict[str, Any]:
+def worldcup_training_scope_teams(tournament: Optional[Dict[str, Any]] = None) -> List[str]:
+    selected = tournament or fallback_tournament_2026()
+    return teams_from_tournament(selected)
+
+
+def training_scope_team_columns(frame: pd.DataFrame, team_columns: Optional[Iterable[str]] = None) -> List[Any]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    columns_by_lower = {str(column).lower(): column for column in frame.columns}
+    selected: List[Any] = []
+    for candidate in team_columns or TRAINING_SCOPE_TEAM_COLUMNS:
+        matched = candidate if candidate in frame.columns else columns_by_lower.get(str(candidate).lower())
+        if matched is not None and matched not in selected:
+            selected.append(matched)
+    return selected
+
+
+def training_scope_team_keys(team_names: Iterable[Any]) -> set:
+    return {
+        normalize_team_key(clean_team_name(team))
+        for team in team_names
+        if normalize_team_key(clean_team_name(team))
+    }
+
+
+def worldcup_team_scope_mask(
+        frame: pd.DataFrame,
+        team_names: Iterable[Any],
+        *,
+        team_columns: Optional[Iterable[str]] = None,
+) -> pd.Series:
+    mask = pd.Series(False, index=frame.index, dtype=bool)
+    columns = training_scope_team_columns(frame, team_columns=team_columns)
+    if not columns:
+        return mask
+    allowed = training_scope_team_keys(team_names)
+    if not allowed:
+        return mask
+    for column in columns:
+        values = frame[column].map(clean_team_name).map(normalize_team_key)
+        mask = mask | values.isin(allowed)
+    return mask.fillna(False)
+
+
+def filter_worldcup_team_scope_frame(
+        frame: pd.DataFrame,
+        team_names: Iterable[Any],
+        *,
+        team_columns: Optional[Iterable[str]] = None,
+        keep_without_team_columns: bool = True,
+) -> pd.DataFrame:
+    if frame is None:
+        return pd.DataFrame()
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    columns = training_scope_team_columns(frame, team_columns=team_columns)
+    if not columns:
+        return frame.copy().reset_index(drop=True) if keep_without_team_columns else frame.iloc[0:0].copy().reset_index(drop=True)
+    mask = worldcup_team_scope_mask(frame, team_names, team_columns=team_columns)
+    return frame.loc[mask].copy().reset_index(drop=True)
+
+
+def frame_has_rows_outside_worldcup_team_scope(
+        frame: pd.DataFrame,
+        team_names: Iterable[Any],
+        *,
+        team_columns: Optional[Iterable[str]] = None,
+) -> bool:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return False
+    columns = training_scope_team_columns(frame, team_columns=team_columns)
+    if not columns:
+        return False
+    mask = worldcup_team_scope_mask(frame, team_names, team_columns=team_columns)
+    return bool((~mask).any())
+
+
+def filter_training_scope_sources(
+        frame: pd.DataFrame,
+        team_names: Iterable[Any],
+        *,
+        keep_unknown_date: bool = True,
+        keep_without_team_columns: bool = True,
+) -> pd.DataFrame:
+    scoped = filter_training_scope_frame(frame, keep_unknown_date=keep_unknown_date)
+    return filter_worldcup_team_scope_frame(
+        scoped,
+        team_names,
+        keep_without_team_columns=keep_without_team_columns,
+    )
+
+
+def filter_api_football_training_scope(api_football_bundle: Dict[str, Any], team_names: Iterable[Any]) -> Dict[str, Any]:
     if not isinstance(api_football_bundle, dict):
         return {}
     filtered = dict(api_football_bundle)
     for key in ("fixtures", "statistics", "team_stats", "lineups", "injuries", "odds", "market_rows"):
         value = filtered.get(key)
         if isinstance(value, pd.DataFrame):
-            filtered[key] = filter_training_scope_frame(value, keep_unknown_date=True)
+            filtered[key] = filter_training_scope_sources(value, team_names, keep_unknown_date=True)
     return filtered
 
 
@@ -1920,19 +2065,30 @@ def build_prepared_dataset(
         normalized: Dict[str, Any],
         refresh_history: bool = False,
 ) -> Dict[str, Any]:
+    scope_teams = worldcup_training_scope_teams()
     history_df, history_source = load_historical_matches(refresh=bool(refresh_history))
-    history_df = filter_training_scope_frame(history_df, keep_unknown_date=False)
+    history_df = filter_training_scope_sources(history_df, scope_teams, keep_unknown_date=False)
     market_bundle = load_market_data(force_download=bool(refresh_history), allow_download=bool(refresh_history), use_scraper=False)
-    market_data = filter_training_scope_frame(market_bundle.get("matches", pd.DataFrame()).copy(), keep_unknown_date=True)
-    qualifier_matches = filter_training_scope_frame(market_bundle.get("qualifiers", pd.DataFrame()).copy(), keep_unknown_date=True)
+    market_data = filter_training_scope_sources(market_bundle.get("matches", pd.DataFrame()).copy(), scope_teams, keep_unknown_date=True)
+    qualifier_matches = filter_training_scope_sources(market_bundle.get("qualifiers", pd.DataFrame()).copy(), scope_teams, keep_unknown_date=True)
     api_football_bundle = filter_api_football_training_scope(
-        load_api_football_data(force_download=bool(refresh_history), allow_download=bool(refresh_history))
+        load_api_football_data(force_download=bool(refresh_history), allow_download=bool(refresh_history)),
+        scope_teams,
     )
     api_market_rows = api_football_bundle.get("market_rows", pd.DataFrame()).copy()
     try:
-        international_matches = load_international_matches(required=True)
+        raw_international_matches = load_international_matches(required=True)
     except Exception as exc:
         raise WorldCupTrainingError(f"all_matches.csv es obligatorio para labels: {exc}") from exc
+    raw_international_source_rows = int(raw_international_matches.shape[0]) if isinstance(raw_international_matches, pd.DataFrame) else 0
+    date_scoped_international_matches = filter_training_scope_frame(raw_international_matches, keep_unknown_date=False)
+    date_scoped_international_source_rows = int(date_scoped_international_matches.shape[0])
+    international_matches = filter_worldcup_team_scope_frame(
+        date_scoped_international_matches,
+        scope_teams,
+        keep_without_team_columns=False,
+    )
+    removed_outside_team_scope = max(date_scoped_international_source_rows - int(international_matches.shape[0]), 0)
     international_status = international_results_status()
     all_matches_label_rows = international_match_rows(international_matches)
     if not api_market_rows.empty:
@@ -1944,6 +2100,7 @@ def build_prepared_dataset(
         f"Objetivo operativo: Mundial {TARGET_WORLDCUP_YEAR}.",
         "Labels obligatorios desde all_matches.csv; train.csv/test.csv y el Kaggle Mundial legacy se ignoran por completo.",
         f"Corpus entrenable: partidos internacionales desde {INTERNATIONAL_TRAINING_START_YEAR}, incluyendo FIFA World Cup y resultados 2026 ya jugados.",
+        f"Scope de equipos: partidos donde participa al menos una de las {len(scope_teams)} selecciones del Mundial {TARGET_WORLDCUP_YEAR}.",
         "Anti-leakage: split temporal 80/10/10 por fecha: train primero, validacion intermedia y test final.",
     ]
     label_source = "all_matches.csv"
@@ -1957,6 +2114,9 @@ def build_prepared_dataset(
 
     labeled_rows = deduplicate_labeled_matches(sanitize_match_rows(all_matches_label_rows))
     labeled_rows, scope_stats = filter_international_training_scope(labeled_rows)
+    rows_after_date_scope = int(labeled_rows.shape[0])
+    labeled_rows = filter_worldcup_team_scope_frame(labeled_rows, scope_teams, keep_without_team_columns=False)
+    removed_outside_team_scope_labels = max(rows_after_date_scope - int(labeled_rows.shape[0]), 0)
     if scope_stats["removed_before_start"]:
         label_policy_notes.append(
             f"{scope_stats['removed_before_start']} partidos anteriores a {INTERNATIONAL_TRAINING_START_YEAR} quedaron fuera del entrenamiento."
@@ -1965,8 +2125,15 @@ def build_prepared_dataset(
         label_policy_notes.append(
             f"{scope_stats['removed_future']} partidos posteriores a {scope_stats['max_label_date']} quedaron fuera por fecha futura."
         )
+    if removed_outside_team_scope or removed_outside_team_scope_labels:
+        label_policy_notes.append(
+            f"{removed_outside_team_scope} filas raw y {removed_outside_team_scope_labels} labels sin selecciones del Mundial {TARGET_WORLDCUP_YEAR} quedaron fuera del entrenamiento."
+        )
     if labeled_rows.empty:
-        raise WorldCupTrainingError(f"all_matches.csv no contiene partidos internacionales entrenables desde {INTERNATIONAL_TRAINING_START_YEAR}.")
+        raise WorldCupTrainingError(
+            f"all_matches.csv no contiene partidos internacionales entrenables desde {INTERNATIONAL_TRAINING_START_YEAR} "
+            f"para selecciones del Mundial {TARGET_WORLDCUP_YEAR}."
+        )
     worldcup_rows_count = int(labeled_rows["is_worldcup_match"].map(coerce_bool_value).sum()) if "is_worldcup_match" in labeled_rows.columns else 0
     train_df, validation_df, test_df, split_warning = split_temporal_80_10_10_international(labeled_rows)
     if split_warning:
@@ -1980,7 +2147,7 @@ def build_prepared_dataset(
     preview_source = train_df if not train_df.empty else test_df if not test_df.empty else team_features
     dc_rho = estimate_dixon_coles_rho(history_df)
     class_distribution = split_class_distribution(train_df, test_df, validation_df=validation_df)
-    all_matches_rows_count = int(all_matches_label_rows.shape[0])
+    all_matches_rows_count = int(labeled_rows.shape[0])
     market_status_payload = {
         "status": "ok" if combined_has_1x2 or combined_has_ou25 else market_bundle.get("status", "missing"),
         "has_1x2": combined_has_1x2,
@@ -2047,9 +2214,17 @@ def build_prepared_dataset(
         "sample_weight_policy": SAMPLE_WEIGHT_POLICY,
         "data_quality": data_quality,
         "training_start_year": INTERNATIONAL_TRAINING_START_YEAR,
+        "training_team_scope_policy": WORLD_CUP_2026_TEAM_SCOPE_POLICY,
+        "training_scope_team_count": int(len(scope_teams)),
+        "training_scope_teams": scope_teams,
         "max_label_date": scope_stats["max_label_date"],
         "removed_before_start_rows": scope_stats["removed_before_start"],
         "removed_future_rows": scope_stats["removed_future"],
+        "raw_international_source_rows": raw_international_source_rows,
+        "date_scoped_international_source_rows": date_scoped_international_source_rows,
+        "team_scoped_international_source_rows": int(international_matches.shape[0]),
+        "removed_outside_team_scope_rows": removed_outside_team_scope,
+        "removed_outside_team_scope_label_rows": removed_outside_team_scope_labels,
         "dc_rho": float(dc_rho),
         "target_column": "Label + GoalsDistribution + OverUnder05/15/25/35",
         "team_columns": [],
@@ -2508,6 +2683,7 @@ def value_counts_payload(values: Iterable[Any]) -> Dict[str, int]:
 
 def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Dict[str, Any]:
     dataset = load_prepared_dataset(required=False)
+    default_scope_teams = worldcup_training_scope_teams()
     if not dataset:
         return {
             "ready": False,
@@ -2532,7 +2708,15 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
             "sample_weight_policy": SAMPLE_WEIGHT_POLICY,
             "data_quality": {},
             "training_start_year": INTERNATIONAL_TRAINING_START_YEAR,
+            "training_team_scope_policy": WORLD_CUP_2026_TEAM_SCOPE_POLICY,
+            "training_scope_team_count": len(default_scope_teams),
+            "training_scope_teams": default_scope_teams,
             "max_label_date": "",
+            "raw_international_source_rows": 0,
+            "date_scoped_international_source_rows": 0,
+            "team_scoped_international_source_rows": 0,
+            "removed_outside_team_scope_rows": 0,
+            "removed_outside_team_scope_label_rows": 0,
             "warnings": [],
         }
     current_international_status = international_results_status()
@@ -2577,7 +2761,15 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "sample_weight_policy": dataset.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "data_quality": {} if schema_stale else dataset.get("data_quality", {}),
         "training_start_year": int(dataset.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
+        "training_team_scope_policy": str(dataset.get("training_team_scope_policy") or WORLD_CUP_2026_TEAM_SCOPE_POLICY),
+        "training_scope_team_count": len(default_scope_teams) if schema_stale else int(dataset.get("training_scope_team_count", len(default_scope_teams)) or len(default_scope_teams)),
+        "training_scope_teams": default_scope_teams if schema_stale else dataset.get("training_scope_teams", default_scope_teams),
         "max_label_date": "" if schema_stale else str(dataset.get("max_label_date") or ""),
+        "raw_international_source_rows": 0 if schema_stale else int(dataset.get("raw_international_source_rows", 0) or 0),
+        "date_scoped_international_source_rows": 0 if schema_stale else int(dataset.get("date_scoped_international_source_rows", 0) or 0),
+        "team_scoped_international_source_rows": 0 if schema_stale else int(dataset.get("team_scoped_international_source_rows", 0) or 0),
+        "removed_outside_team_scope_rows": 0 if schema_stale else int(dataset.get("removed_outside_team_scope_rows", 0) or 0),
+        "removed_outside_team_scope_label_rows": 0 if schema_stale else int(dataset.get("removed_outside_team_scope_label_rows", 0) or 0),
         "warnings": [] if schema_stale else dataset.get("warnings", []),
     }
 
@@ -2618,9 +2810,17 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "sample_weight_policy": dataset.get("sample_weight_policy", SAMPLE_WEIGHT_POLICY),
         "data_quality": dataset.get("data_quality", {}),
         "training_start_year": int(dataset.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
+        "training_team_scope_policy": dataset.get("training_team_scope_policy", WORLD_CUP_2026_TEAM_SCOPE_POLICY),
+        "training_scope_team_count": int(dataset.get("training_scope_team_count", 0) or 0),
+        "training_scope_teams": dataset.get("training_scope_teams", []),
         "max_label_date": dataset.get("max_label_date", ""),
         "removed_before_start_rows": int(dataset.get("removed_before_start_rows", 0) or 0),
         "removed_future_rows": int(dataset.get("removed_future_rows", 0) or 0),
+        "raw_international_source_rows": int(dataset.get("raw_international_source_rows", 0) or 0),
+        "date_scoped_international_source_rows": int(dataset.get("date_scoped_international_source_rows", 0) or 0),
+        "team_scoped_international_source_rows": int(dataset.get("team_scoped_international_source_rows", 0) or 0),
+        "removed_outside_team_scope_rows": int(dataset.get("removed_outside_team_scope_rows", 0) or 0),
+        "removed_outside_team_scope_label_rows": int(dataset.get("removed_outside_team_scope_label_rows", 0) or 0),
         "dc_rho": float(dataset.get("dc_rho", 0.0) or 0.0),
         "over_under_ready": bool(dataset.get("over_under_ready", False)),
         "goals_distribution_ready": bool(dataset.get("goals_distribution_ready", dataset.get("over_under_ready", False))),
@@ -6842,6 +7042,11 @@ def etl_steps(
     international_status = prepared.get("international_recent") or normalized.get("international_recent") or international_results_status()
     all_matches_rows = int(prepared.get("all_matches_rows", normalized.get("all_matches_rows", international_status.get("all_matches_rows", 0))) or 0)
     worldcup_rows = int(prepared.get("worldcup_rows", normalized.get("worldcup_rows", international_status.get("worldcup_rows", 0))) or 0)
+    team_scope_count = int(prepared.get("training_scope_team_count", normalized.get("training_scope_team_count", 0)) or 0)
+    raw_international_rows = int(prepared.get("raw_international_source_rows", normalized.get("raw_international_source_rows", 0)) or 0)
+    date_scoped_rows = int(prepared.get("date_scoped_international_source_rows", normalized.get("date_scoped_international_source_rows", 0)) or 0)
+    team_scoped_rows = int(prepared.get("team_scoped_international_source_rows", normalized.get("team_scoped_international_source_rows", 0)) or 0)
+    removed_team_scope_rows = int(prepared.get("removed_outside_team_scope_rows", normalized.get("removed_outside_team_scope_rows", 0)) or 0)
     benchmark_year = str(
         prepared.get("benchmark_worldcup_year")
         or normalized.get("benchmark_worldcup_year")
@@ -6874,6 +7079,15 @@ def etl_steps(
             "status": "ok" if train_rows else "pending",
             "count": train_rows,
             "detail": f"Modo activo: {normalized.get('training_mode') or 'sin modo'}; fuente labels: {prepared_label_source or normalized.get('training_mode') or 'sin modo'}; train={train_rows}, validacion={validation_rows}, test={test_rows}.",
+        },
+        {
+            "name": "Scope equipos 2026",
+            "status": "ok" if all_matches_rows else "pending",
+            "count": all_matches_rows,
+            "detail": (
+                f"Desde {INTERNATIONAL_TRAINING_START_YEAR} y con al menos una de {team_scope_count or len(worldcup_training_scope_teams())} selecciones 2026; "
+                f"raw={raw_international_rows}, post-fecha={date_scoped_rows}, post-equipos={team_scoped_rows}, labels={all_matches_rows}, removidos-equipos={removed_team_scope_rows}."
+            ),
         },
         {
             "name": "Split evaluacion",

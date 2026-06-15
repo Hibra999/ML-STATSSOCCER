@@ -737,17 +737,28 @@ function renderXgLightgbmTrainingStatus(payload) {
   const etlLabel = dataset.etl_ready && !dataset.etl_stale ? "Listo" : dataset.etl_stale ? "Desactualizado" : "Pendiente";
   const modelLabel = model.trained ? (model.model_name || model.model_id || "Entrenado") : "No entrenado";
   const budget = Number(options.default_total_trial_budget || 0);
+  const teamScopeCount = split.team_scope_count || dataset.training_scope_team_count || 0;
+  const rawRows = split.raw_international_source_rows || dataset.raw_international_source_rows || 0;
+  const dateRows = split.date_scoped_international_source_rows || dataset.date_scoped_international_source_rows || 0;
+  const teamRows = split.team_scoped_international_source_rows || dataset.team_scoped_international_source_rows || 0;
+  const labelRows = dataset.all_matches_rows || teamRows || 0;
+  const removedTeamRows = split.removed_outside_team_scope_rows || dataset.removed_outside_team_scope_rows || 0;
   document.getElementById("xg-lightgbm-summary").textContent =
-    `xG-LightGBM - ETL ${etlLabel} - train/val/test ${split.train_rows || 0}/${split.validation_rows || 0}/${split.test_rows || 0} - ${modelLabel}`;
+    `xG-LightGBM - ETL ${etlLabel} - scope ${teamScopeCount || 48} equipos 2026 - train/val/test ${split.train_rows || 0}/${split.validation_rows || 0}/${split.test_rows || 0} - ${modelLabel}`;
   document.getElementById("xg-status-cards").innerHTML = `
     ${reportSummaryCard("ETL", etlLabel)}
     ${reportSummaryCard("Train/Val/Test", `${split.train_rows || 0}/${split.validation_rows || 0}/${split.test_rows || 0}`)}
+    ${reportSummaryCard("Scope equipos", `${teamScopeCount || 48} selecciones`)}
+    ${reportSummaryCard("Raw/Post fecha", `${rawRows || 0}/${dateRows || 0}`)}
+    ${reportSummaryCard("Post equipos", `${teamRows || 0}`)}
+    ${reportSummaryCard("Labels finales", `${labelRows || 0}`)}
+    ${reportSummaryCard("Removidos scope", `${removedTeamRows || 0}`)}
     ${reportSummaryCard("Labels", split.label_source || dataset.prepared_label_source || "-")}
     ${reportSummaryCard("Optuna default", budget ? `${options.default_trials_per_market || 0} x ${options.planned_market_count || 0} = ${budget}` : "Off")}
     ${reportSummaryCard("Modelo", modelLabel)}
     ${reportSummaryCard("Device", `${((model.hardware || {}).actual_device) || ((options.hardware || {}).device_default) || "auto"}`)}
   `;
-  document.getElementById("xg-etl-subtitle").textContent = `${split.policy || "temporal_80_10_10"} · max label ${split.max_label_date || "-"}`;
+  document.getElementById("xg-etl-subtitle").textContent = `${split.policy || "temporal_80_10_10"} · desde ${split.training_start_year || 2014} · scope ${teamScopeCount || 48} equipos · max label ${split.max_label_date || "-"}`;
   document.getElementById("xg-model-subtitle").textContent = model.trained ? `${model.model_id || ""} · ${formatReportDateTime(model.trained_at || "")}` : status.default_model_id || "Sin bundle entrenado";
   document.getElementById("xg-market-subtitle").textContent = `${(options.required_markets || []).length} mercados requeridos${(options.optional_markets || []).length ? " + distribución goles" : ""}`;
   document.getElementById("xg-tuning-subtitle").textContent = status.anti_leakage || "Validation temporal";

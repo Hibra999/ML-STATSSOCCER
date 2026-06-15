@@ -257,6 +257,26 @@ def test_training_scope_frame_filters_support_sources_since_2014():
     assert training.filter_training_scope_frame(year_rows)["Team"].tolist() == ["Canada"]
 
 
+def test_worldcup_team_scope_keeps_rows_with_at_least_one_2026_team():
+    scope_teams = ["Mexico", "Canada", "USA"]
+    rows = pd.DataFrame([
+        {"Date": "2018-01-01", "Home": "Mexico", "Away": "Chile"},
+        {"Date": "2018-01-02", "Home": "Chile", "Away": "Peru"},
+        {"Date": "2018-01-03", "Home": "United States", "Away": "Peru"},
+        {"Date": "2018-01-04", "Home": "Canada", "Away": "USA"},
+    ])
+
+    scoped = training.filter_worldcup_team_scope_frame(rows, scope_teams, keep_without_team_columns=False)
+
+    assert scoped[["Home", "Away"]].to_dict(orient="records") == [
+        {"Home": "Mexico", "Away": "Chile"},
+        {"Home": "United States", "Away": "Peru"},
+        {"Home": "Canada", "Away": "USA"},
+    ]
+    assert training.frame_has_rows_outside_worldcup_team_scope(rows, scope_teams) is True
+    assert training.frame_has_rows_outside_worldcup_team_scope(scoped, scope_teams) is False
+
+
 def test_last_30_international_split_requires_31_international_rows():
     rows = training.international_match_rows(international_provider.normalize_international_matches(make_international_matches(rows=30)))
 
@@ -294,6 +314,8 @@ def test_prepared_dataset_metadata_uses_last_30_international_test_and_policy_no
     assert prepared["label_source"] == "all_matches.csv"
     assert prepared["split_policy"] == training.SPLIT_POLICY_TEMPORAL_80_10_10
     assert prepared["training_start_year"] == 2014
+    assert prepared["training_team_scope_policy"] == training.WORLD_CUP_2026_TEAM_SCOPE_POLICY
+    assert prepared["training_scope_team_count"] >= 40
     assert prepared["test"].shape[0] == 5
     assert prepared["validation"].shape[0] == 4
     assert pd.concat([prepared["train"], prepared["validation"], prepared["test"]])["is_worldcup_match"].map(bool).any()
@@ -312,24 +334,29 @@ def test_prepared_dataset_scopes_feature_sources_since_2014(tmp_path, monkeypatc
     market_matches = pd.DataFrame([
         {"Date": "2010-06-11", "Home": "Mexico", "Away": "South Africa", "market_odds_home": 2.0, "market_odds_draw": 3.1, "market_odds_away": 3.8},
         {"Date": "2014-06-13", "Home": "Mexico", "Away": "Cameroon", "market_odds_home": 1.9, "market_odds_draw": 3.2, "market_odds_away": 4.0},
+        {"Date": "2018-06-13", "Home": "Italy", "Away": "Peru", "market_odds_home": 1.8, "market_odds_draw": 3.3, "market_odds_away": 4.5},
     ])
     qualifiers = pd.DataFrame([
         {"Date": "2012-03-01", "Home": "Mexico", "Away": "Canada"},
         {"Date": "2016-03-01", "Home": "Mexico", "Away": "Canada"},
+        {"Date": "2018-03-01", "Home": "Italy", "Away": "Peru"},
     ])
     api_bundle = empty_api_football_bundle()
     api_bundle.update({
         "fixtures": pd.DataFrame([
             {"Date": "2010-06-11", "FixtureId": 1},
-            {"Date": "2018-06-17", "FixtureId": 2},
+            {"Date": "2018-06-17", "FixtureId": 2, "Home": "Mexico", "Away": "Germany"},
+            {"Date": "2018-06-18", "FixtureId": 3, "Home": "Italy", "Away": "Peru"},
         ]),
         "team_stats": pd.DataFrame([
             {"Date": "2010-06-11", "Team": "Mexico"},
             {"Date": "2018-06-17", "Team": "Mexico"},
+            {"Date": "2018-06-18", "Team": "Italy"},
         ]),
         "market_rows": pd.DataFrame([
             {"Date": "2010-06-11", "Home": "Mexico", "Away": "South Africa", "market_odds_home": 2.0, "market_odds_draw": 3.1, "market_odds_away": 3.8},
             {"Date": "2022-11-20", "Home": "Qatar", "Away": "Ecuador", "market_odds_home": 4.4, "market_odds_draw": 3.3, "market_odds_away": 1.8},
+            {"Date": "2022-11-21", "Home": "Italy", "Away": "Peru", "market_odds_home": 2.0, "market_odds_draw": 3.0, "market_odds_away": 3.9},
         ]),
         "status": "ok",
     })
@@ -369,6 +396,9 @@ def test_prepared_dataset_scopes_feature_sources_since_2014(tmp_path, monkeypatc
     assert training.frame_has_pre_training_scope_dates(prepared["qualifier_matches"]) is False
     assert training.frame_has_pre_training_scope_dates(prepared["api_football"]["fixtures"]) is False
     assert training.frame_has_pre_training_scope_dates(prepared["api_football"]["team_stats"]) is False
+    assert training.frame_has_rows_outside_worldcup_team_scope(prepared["market_data"], prepared["training_scope_teams"]) is False
+    assert training.frame_has_rows_outside_worldcup_team_scope(prepared["qualifier_matches"], prepared["training_scope_teams"]) is False
+    assert training.frame_has_rows_outside_worldcup_team_scope(prepared["api_football"]["team_stats"], prepared["training_scope_teams"]) is False
 
 
 def test_prepared_dataset_requires_all_matches_csv(monkeypatch):
@@ -452,6 +482,9 @@ def test_ensure_prepared_dataset_current_regenerates_old_schema(tmp_path, monkey
         "test": test_rows,
         "split_policy": training.SPLIT_POLICY_TEMPORAL_80_10_10,
         "training_start_year": training.INTERNATIONAL_TRAINING_START_YEAR,
+        "training_team_scope_policy": training.WORLD_CUP_2026_TEAM_SCOPE_POLICY,
+        "training_scope_team_count": len(training.worldcup_training_scope_teams()),
+        "training_scope_teams": training.worldcup_training_scope_teams(),
     }
     calls = {"prepare": 0}
 
@@ -516,6 +549,7 @@ def test_build_training_matrix_dynamic_progress_is_batched(monkeypatch):
     progress = []
 
     monkeypatch.setattr(training, "match_feature_row", lambda *args, **kwargs: {"bias": 1.0})
+    monkeypatch.setattr(training, "load_feature_matrix_from_store", lambda key: None)
 
     training.build_training_matrix(
         rows,
@@ -557,6 +591,7 @@ def test_build_training_matrix_progress_every_override_controls_events(monkeypat
     progress = []
 
     monkeypatch.setattr(training, "match_feature_row", lambda *args, **kwargs: {"bias": 1.0})
+    monkeypatch.setattr(training, "load_feature_matrix_from_store", lambda key: None)
 
     training.build_training_matrix(
         rows,
@@ -583,6 +618,7 @@ def test_build_training_matrix_recent15_cache_reuses_date_table(monkeypatch):
     cache = training.WorldCupFeatureBuildCache()
 
     monkeypatch.setattr(training, "match_feature_row", lambda *args, **kwargs: {"bias": 1.0})
+    monkeypatch.setattr(training, "load_feature_matrix_from_store", lambda key: None)
 
     training.build_training_matrix(
         rows,
@@ -660,6 +696,7 @@ def test_build_training_matrix_cache_reuses_features_across_market_targets(monke
         return original(*args, **kwargs)
 
     monkeypatch.setattr(training, "match_feature_row", counted_match_feature_row)
+    monkeypatch.setattr(training, "load_feature_matrix_from_store", lambda key: None)
 
     x_result, y_result, feature_columns = training.build_training_matrix(
         rows,

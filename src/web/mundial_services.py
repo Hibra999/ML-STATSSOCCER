@@ -1754,6 +1754,13 @@ def xg_lightgbm_training_status() -> Dict[str, Any]:
         "test_rows": int(dataset.get("test_rows", 0) or 0),
         "eval_strategy": dataset.get("eval_strategy", ""),
         "training_start_year": dataset.get("training_start_year", ""),
+        "team_scope_policy": dataset.get("training_team_scope_policy", ""),
+        "team_scope_count": int(dataset.get("training_scope_team_count", 0) or 0),
+        "raw_international_source_rows": int(dataset.get("raw_international_source_rows", 0) or 0),
+        "date_scoped_international_source_rows": int(dataset.get("date_scoped_international_source_rows", 0) or 0),
+        "team_scoped_international_source_rows": int(dataset.get("team_scoped_international_source_rows", 0) or 0),
+        "removed_outside_team_scope_rows": int(dataset.get("removed_outside_team_scope_rows", 0) or 0),
+        "removed_outside_team_scope_label_rows": int(dataset.get("removed_outside_team_scope_label_rows", 0) or 0),
         "max_label_date": dataset.get("max_label_date", ""),
         "label_source": dataset.get("prepared_label_source", ""),
     }
