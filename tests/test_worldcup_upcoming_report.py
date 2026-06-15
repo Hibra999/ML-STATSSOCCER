@@ -1302,6 +1302,43 @@ def test_recent_matches_for_fixture_uses_last_15_before_fixture_date():
     assert all(item["score"] != "9-0" for item in recent["home"])
 
 
+def test_recent_matches_for_fixture_uses_international_results_when_provided(monkeypatch):
+    from src.web import mundial_services as services
+
+    history = pd.DataFrame([
+        {"Date": "2022-11-22", "Year": 2022, "Team 1": "Mexico", "Team 2": "Poland", "G1": 0, "G2": 0, "Round": "FIFA World Cup", "Group": "C"},
+        {"Date": "2022-12-01", "Year": 2022, "Team 1": "Canada", "Team 2": "Morocco", "G1": 1, "G2": 2, "Round": "FIFA World Cup", "Group": "F"},
+    ])
+    international = pd.DataFrame([
+        {"date": "2026-06-08", "home_team": "Mexico", "away_team": "Switzerland", "home_score": 1, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2026-06-09", "home_team": "Canada", "away_team": "Japan", "home_score": 2, "away_score": 2, "tournament": "Friendly", "neutral": True},
+        {"date": "2026-06-10", "home_team": "Mexico", "away_team": "Canada", "home_score": 3, "away_score": 1, "tournament": "CONCACAF Gold Cup", "neutral": True},
+        {"date": "2026-06-11", "home_team": "Mexico", "away_team": "Canada", "home_score": 9, "away_score": 0, "tournament": "Future leak", "neutral": True},
+        {"date": "2026-06-12", "home_team": "Canada", "away_team": "Mexico", "home_score": None, "away_score": None, "tournament": "Future unscored", "neutral": True},
+    ])
+    international.attrs["source_path"] = "storage/worldcup/international/all_matches.csv"
+    monkeypatch.setattr(services, "international_results_status", lambda: {
+        "source_path": "storage/worldcup/international/all_matches.csv",
+        "max_scored_date": "2026-06-10",
+        "warnings": ["Dataset internacional posiblemente viejo"],
+    })
+    fixture = pd.Series({"Fecha": "2026-06-11", "Equipo 1": "Mexico", "Equipo 2": "Canada"})
+
+    recent = services.recent_matches_for_fixture(history, fixture, limit=2, international_matches=international)
+    html = services.recent_matches_report_html(recent, {"home": "Mexico", "away": "Canada"})
+
+    assert recent["source"] == "all_matches.csv"
+    assert [row["date"] for row in recent["home"]] == ["2026-06-10", "2026-06-08"]
+    assert [row["date"] for row in recent["away"]] == ["2026-06-10", "2026-06-09"]
+    assert all(row["date"] != "2022-11-22" for row in recent["home"])
+    assert all(row["date"] < "2026-06-11" for row in recent["home"] + recent["away"])
+    assert recent["home"][0]["tournament"] == "CONCACAF Gold Cup"
+    assert recent["home"][1]["match_type"] == "Friendly"
+    assert "Fuente all_matches.csv" in html
+    assert "Dataset internacional posiblemente viejo" in html
+    assert "Torneo" in html
+
+
 def test_benchmark_feature_context_uses_only_pre_match_history(monkeypatch):
     from src.web import mundial_services as services
     from src.worldcup.model import WorldCupModel

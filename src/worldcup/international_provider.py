@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import math
 import shutil
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import requests
 
 from src.worldcup.model import HOST_TEAMS, TEAM_RATING_PRIORS, TOTAL_GOAL_LINES, poisson_score_grid, total_line_suffix
 
 
-INTERNATIONAL_DATASET_SLUG = "patateriedata/all-international-football-results"
+INTERNATIONAL_DATASET_SLUG = "martj42/international_results"
+INTERNATIONAL_KAGGLE_DATASET_SLUG = "patateriedata/all-international-football-results"
+INTERNATIONAL_GITHUB_RESULTS_URL = "https://raw.githubusercontent.com/martj42/international_results/refs/heads/master/results.csv"
 INTERNATIONAL_ROOT = Path("storage") / "worldcup" / "international"
 INTERNATIONAL_MATCHES_FILE = INTERNATIONAL_ROOT / "all_matches.csv"
 RECENT_MATCH_LIMIT = 15
+INTERNATIONAL_FRESHNESS_MAX_AGE_DAYS = 30
+INTERNATIONAL_MIN_CURRENT_SCORED_DATE = "2026-01-01"
 CONTEXT_TOTAL_GOAL_LINES = tuple(line for line in TOTAL_GOAL_LINES if line <= 3.5)
 
 TEAM_ALIASES = {
@@ -73,21 +78,59 @@ INTERNATIONAL_COLUMN_ALIASES = {
 }
 
 
-def download_international_results(force: bool = False) -> Dict[str, Any]:
+def download_international_results(force: bool = False, source: str = "auto") -> Dict[str, Any]:
     canonical_valid = False
     if INTERNATIONAL_MATCHES_FILE.exists() and not force:
         status = international_results_status()
         canonical_valid = bool(status.get("available") and Path(str(status.get("source_path") or "")) == INTERNATIONAL_MATCHES_FILE)
         if canonical_valid:
             return status
+
+    source_key = str(source or "auto").strip().lower()
+    github_error = ""
+    if source_key in {"auto", "github", "martj42"}:
+        try:
+            return download_international_results_from_github(force=force)
+        except Exception as exc:
+            github_error = f"{exc.__class__.__name__}: {exc}"
+            if source_key in {"github", "martj42"}:
+                raise
+    status = download_international_results_from_kaggle(force=force)
+    if github_error:
+        status["warning"] = "GitHub martj42 no disponible; se uso fallback Kaggle. " + str(status.get("warning") or github_error)
+        status["github_error"] = github_error
+    return status
+
+
+def download_international_results_from_github(force: bool = False) -> Dict[str, Any]:
+    INTERNATIONAL_ROOT.mkdir(parents=True, exist_ok=True)
+    response = requests.get(INTERNATIONAL_GITHUB_RESULTS_URL, timeout=30)
+    response.raise_for_status()
+    candidate_path = INTERNATIONAL_ROOT / "results.csv"
+    candidate_path.write_bytes(response.content)
+    matches, reason = read_normalized_international_csv(candidate_path)
+    if matches.empty:
+        raise RuntimeError(f"GitHub martj42 no entrego un CSV internacional valido: {reason}")
+    if force or not INTERNATIONAL_MATCHES_FILE.exists() or candidate_path.absolute() != INTERNATIONAL_MATCHES_FILE.absolute():
+        shutil.copy2(candidate_path, INTERNATIONAL_MATCHES_FILE)
+    status = international_results_status()
+    status["downloaded_path"] = INTERNATIONAL_GITHUB_RESULTS_URL
+    status["copied_files"] = [str(INTERNATIONAL_MATCHES_FILE)]
+    status["source_file"] = str(candidate_path)
+    status["scanned_files"] = 1
+    status["provider"] = "github:martj42/international_results"
+    return status
+
+
+def download_international_results_from_kaggle(force: bool = False) -> Dict[str, Any]:
     try:
         import kagglehub
     except ImportError as exc:
         raise RuntimeError("kagglehub no esta instalado. Ejecuta pip install -r requirements.txt.") from exc
 
-    source_path = Path(kagglehub.dataset_download(INTERNATIONAL_DATASET_SLUG))
+    source_path = Path(kagglehub.dataset_download(INTERNATIONAL_KAGGLE_DATASET_SLUG))
     if not source_path.exists():
-        raise RuntimeError(f"Kaggle no devolvio una ruta valida para {INTERNATIONAL_DATASET_SLUG}.")
+        raise RuntimeError(f"Kaggle no devolvio una ruta valida para {INTERNATIONAL_KAGGLE_DATASET_SLUG}.")
     INTERNATIONAL_ROOT.mkdir(parents=True, exist_ok=True)
     copied: List[str] = []
     invalid_files: List[str] = []
@@ -135,8 +178,13 @@ def international_results_status() -> Dict[str, Any]:
     available = bool(not matches.empty)
     worldcup_rows = int(matches["tournament"].map(is_worldcup_tournament).sum()) if available and "tournament" in matches.columns else 0
     friendly_rows = int(matches["tournament"].map(is_friendly_tournament).sum()) if available and "tournament" in matches.columns else 0
+    max_scored_date = date_to_string(matches["date"].max()) if available and "date" in matches.columns else ""
+    max_dataset_date = str(matches.attrs.get("max_dataset_date") or max_scored_date)
+    freshness_warning = international_freshness_warning(max_scored_date)
     status = {
         "dataset_slug": INTERNATIONAL_DATASET_SLUG,
+        "github_url": INTERNATIONAL_GITHUB_RESULTS_URL,
+        "fallback_dataset_slug": INTERNATIONAL_KAGGLE_DATASET_SLUG,
         "local_path": str(INTERNATIONAL_ROOT),
         "file_path": str(INTERNATIONAL_MATCHES_FILE),
         "source_path": source_path,
@@ -144,6 +192,12 @@ def international_results_status() -> Dict[str, Any]:
         "available": available,
         "rows": int(matches.shape[0]),
         "all_matches_rows": int(matches.shape[0]) if available else 0,
+        "scored_rows": int(matches.shape[0]) if available else 0,
+        "raw_rows": int(matches.attrs.get("raw_rows", matches.shape[0] if available else 0) or 0),
+        "unscored_rows": int(matches.attrs.get("unscored_rows", 0) or 0),
+        "future_unscored_rows": int(matches.attrs.get("future_unscored_rows", 0) or 0),
+        "max_dataset_date": max_dataset_date,
+        "max_scored_date": max_scored_date,
         "worldcup_rows": worldcup_rows,
         "official_rows": int(matches.shape[0] - friendly_rows) if available else 0,
         "friendly_rows": friendly_rows,
@@ -151,8 +205,11 @@ def international_results_status() -> Dict[str, Any]:
     }
     if not available:
         status["reason"] = reason or f"No existe {INTERNATIONAL_MATCHES_FILE}."
-    if warning:
-        status["warning"] = warning
+    warnings = [warning, freshness_warning]
+    warnings = [item for item in warnings if item]
+    if warnings:
+        status["warning"] = " ".join(warnings)
+        status["warnings"] = warnings
     elif available and source_path and Path(source_path) != INTERNATIONAL_MATCHES_FILE:
         status["warning"] = f"Usando {source_path}; se recomienda descargar/guardar el artifact canonico en {INTERNATIONAL_MATCHES_FILE}."
     return status
@@ -232,6 +289,7 @@ def normalize_international_matches(raw: pd.DataFrame) -> pd.DataFrame:
     output["tournament"] = clean[column_map["tournament"]].astype(str) if "tournament" in column_map else ""
     output["country"] = clean[column_map["country"]].astype(str) if "country" in column_map else ""
     output["neutral"] = clean[column_map["neutral"]].map(coerce_bool) if "neutral" in column_map else False
+    metadata = international_raw_metadata(output)
     output = output[
         output["date"].notna()
         & output["home_team"].astype(str).str.len().gt(1)
@@ -240,10 +298,39 @@ def normalize_international_matches(raw: pd.DataFrame) -> pd.DataFrame:
         & output["away_score"].notna()
     ].copy()
     if output.empty:
-        return empty_matches_frame(reason="CSV sin filas con fecha, equipos y marcadores validos.")
+        frame = empty_matches_frame(reason="CSV sin filas con fecha, equipos y marcadores validos.")
+        frame.attrs.update(metadata)
+        return frame
     output["home_score"] = output["home_score"].astype(float)
     output["away_score"] = output["away_score"].astype(float)
-    return output.sort_values("date", kind="stable").reset_index(drop=True)
+    output = output.sort_values("date", kind="stable").reset_index(drop=True)
+    output.attrs.update(metadata)
+    return output
+
+
+def international_raw_metadata(output: pd.DataFrame) -> Dict[str, Any]:
+    if output is None or output.empty or "date" not in output.columns:
+        return {
+            "raw_rows": 0,
+            "unscored_rows": 0,
+            "future_unscored_rows": 0,
+            "max_dataset_date": "",
+        }
+    dates = pd.to_datetime(output["date"], errors="coerce")
+    scored = (
+        dates.notna()
+        & pd.to_numeric(output.get("home_score"), errors="coerce").notna()
+        & pd.to_numeric(output.get("away_score"), errors="coerce").notna()
+    )
+    unscored = dates.notna() & ~scored
+    max_scored = dates[scored].max() if scored.any() else pd.NaT
+    future_unscored = int((unscored & dates.gt(max_scored)).sum()) if pd.notna(max_scored) else int(unscored.sum())
+    return {
+        "raw_rows": int(output.shape[0]),
+        "unscored_rows": int(unscored.sum()),
+        "future_unscored_rows": future_unscored,
+        "max_dataset_date": date_to_string(dates.max()) if dates.notna().any() else "",
+    }
 
 
 def resolve_international_columns(columns: Iterable[str]) -> Dict[str, str]:
@@ -991,6 +1078,26 @@ def date_to_string(value: Optional[Any]) -> str:
         return value.date().isoformat() if isinstance(value, datetime) else value.isoformat()
     parsed = pd.to_datetime(value, errors="coerce")
     return parsed.date().isoformat() if pd.notna(parsed) else str(value)
+
+
+def international_freshness_warning(max_scored_date: Any, today: Optional[date] = None) -> str:
+    scored = pd.to_datetime(max_scored_date, errors="coerce")
+    if pd.isna(scored):
+        return "Dataset internacional sin fecha maxima de partidos finalizados; no se puede validar actualidad."
+    min_current = pd.Timestamp(INTERNATIONAL_MIN_CURRENT_SCORED_DATE)
+    if scored < min_current:
+        return (
+            f"Dataset internacional desactualizado: ultimo partido finalizado {date_to_string(scored)}, "
+            f"por debajo del minimo requerido {INTERNATIONAL_MIN_CURRENT_SCORED_DATE}."
+        )
+    today_value = today or date.today()
+    stale_cutoff = pd.Timestamp(today_value - timedelta(days=INTERNATIONAL_FRESHNESS_MAX_AGE_DAYS))
+    if scored < stale_cutoff:
+        return (
+            f"Dataset internacional posiblemente viejo: ultimo partido finalizado {date_to_string(scored)}; "
+            f"actualiza all_matches.csv desde martj42/international_results."
+        )
+    return ""
 
 
 def empty_matches_frame(reason: str = "", source_path: str = "") -> pd.DataFrame:

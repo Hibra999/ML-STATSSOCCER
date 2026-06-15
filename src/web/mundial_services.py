@@ -854,6 +854,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
     fixture_summary = fixture_overview_payload(fixture_df)
     standings = group_standings_payload(groups, fixture_df)
     results_status = fixture_results_status(fixture_df)
+    international_status = international_results_status()
     return {
         "name": tournament.get("name", "World Cup 2026"),
         "teams": sum(len(teams) for teams in groups.values()),
@@ -878,6 +879,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
         "group_standings": standings,
         "default_config": DEFAULT_CONFIG,
         "score_models": score_model_options(),
+        "international_recent": international_status,
         "hardware": detect_hardware(),
         "model": "Elo + modelos de marcador Monte Carlo",
         "last_simulation": LAST_SIMULATION_RESULT,
@@ -2022,11 +2024,29 @@ def recent_matches_for_fixture(
         history_df: pd.DataFrame,
         fixture: pd.Series | Dict[str, Any],
         limit: int = 15,
+        international_matches: pd.DataFrame | None = None,
+        international_status: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     getter = fixture.get if hasattr(fixture, "get") else (lambda key, default=None: default)
     home = str(getter("Equipo 1") or getter("Team 1") or getter("home") or "")
     away = str(getter("Equipo 2") or getter("Team 2") or getter("away") or "")
     before_date = str(getter("Fecha") or getter("Date") or getter("date") or "")[:10]
+    if international_matches is not None:
+        status = international_status or international_results_status()
+        warnings = list(status.get("warnings") or [])
+        if status.get("warning") and not warnings:
+            warnings.append(str(status.get("warning")))
+        return {
+            "limit": int(limit),
+            "home_team": home,
+            "away_team": away,
+            "source": "all_matches.csv",
+            "source_path": str(getattr(international_matches, "attrs", {}).get("source_path") or status.get("source_path") or ""),
+            "max_scored_date": status.get("max_scored_date", ""),
+            "warnings": unique_strings(warnings),
+            "home": recent_international_team_matches(international_matches, home, before_date=before_date, limit=limit),
+            "away": recent_international_team_matches(international_matches, away, before_date=before_date, limit=limit),
+        }
     return {
         "limit": int(limit),
         "home_team": home,
@@ -2034,6 +2054,48 @@ def recent_matches_for_fixture(
         "home": recent_team_matches(history_df, home, before_date=before_date, limit=limit),
         "away": recent_team_matches(history_df, away, before_date=before_date, limit=limit),
     }
+
+
+def recent_international_team_matches(matches: pd.DataFrame, team: str, before_date: str = "", limit: int = 15) -> List[Dict[str, Any]]:
+    if matches is None or matches.empty or not str(team or "").strip():
+        return []
+    required = {"date", "home_team", "away_team", "home_score", "away_score"}
+    if not required.issubset(matches.columns):
+        return []
+    working = matches.copy()
+    working["_date"] = pd.to_datetime(working["date"], errors="coerce")
+    working["_home_score"] = pd.to_numeric(working["home_score"], errors="coerce")
+    working["_away_score"] = pd.to_numeric(working["away_score"], errors="coerce")
+    working = working[
+        working["_date"].notna()
+        & working["_home_score"].notna()
+        & working["_away_score"].notna()
+    ].copy()
+    cutoff = pd.to_datetime(before_date, errors="coerce")
+    if pd.notna(cutoff):
+        working = working[working["_date"] < cutoff].copy()
+    team_key = team_name_key(team)
+    home_keys = working["home_team"].map(team_name_key)
+    away_keys = working["away_team"].map(team_name_key)
+    working = working[(home_keys == team_key) | (away_keys == team_key)].copy()
+    working = working.sort_values("_date", ascending=False, kind="stable").head(int(limit)).copy()
+    rows: List[Dict[str, Any]] = []
+    for _, row in working.iterrows():
+        is_home = team_name_key(row.get("home_team")) == team_key
+        goals_for = int(row.get("_home_score") if is_home else row.get("_away_score"))
+        goals_against = int(row.get("_away_score") if is_home else row.get("_home_score"))
+        opponent = str(row.get("away_team" if is_home else "home_team", ""))
+        tournament = str(row.get("tournament") or "")
+        rows.append({
+            "date": str(row.get("date", ""))[:10],
+            "opponent": opponent,
+            "venue": "Neutral" if bool(row.get("neutral", False)) else "Local" if is_home else "Visitante",
+            "score": f"{goals_for}-{goals_against}",
+            "result": "G" if goals_for > goals_against else "E" if goals_for == goals_against else "P",
+            "match_type": "Friendly" if "friendly" in tournament.lower() else "Official",
+            "tournament": tournament,
+        })
+    return rows
 
 
 def recent_team_matches(history_df: pd.DataFrame, team: str, before_date: str = "", limit: int = 15) -> List[Dict[str, Any]]:
@@ -3065,9 +3127,16 @@ def upcoming_sota_fixture_reports(
     team_names = [team for group_teams in group_map.values() for team in group_teams]
     if history_df is None or history_df.empty:
         history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
-    recent_history_df = history_with_confirmed_worldcup_results(history_df, tournament)
+    international_matches = load_international_matches(required=False)
+    international_status = international_results_status()
     for report, fixture in zip(fixture_reports, fixtures):
-        report["recent_matches_15"] = recent_matches_for_fixture(recent_history_df, fixture, limit=15)
+        report["recent_matches_15"] = recent_matches_for_fixture(
+            history_df,
+            fixture,
+            limit=15,
+            international_matches=international_matches,
+            international_status=international_status,
+        )
     sequence = list(model_sequence or SOTA_SCORE_MODEL_SEQUENCE)
     model_total = len(sequence)
     fixture_total = max(len(fixtures), 1)
@@ -4506,15 +4575,30 @@ def recent_matches_report_html(recent: Dict[str, Any], fixture: Dict[str, Any]) 
     limit = recent.get("limit", 15)
     home_team = recent.get("home_team") or fixture.get("home") or ""
     away_team = recent.get("away_team") or fixture.get("away") or ""
+    warnings = recent.get("warnings") or []
+    source_note = recent_matches_source_note(recent)
+    warning_html = "".join(f"<p>{escape_report_html(item)}</p>" for item in warnings)
     return f"""
         <details class="recent15-report">
           <summary>Ultimos {escape_report_html(limit)} partidos por equipo</summary>
+          {f'<p>{escape_report_html(source_note)}</p>' if source_note else ''}
+          {warning_html}
           <div class="recent15-columns">
             {recent_matches_report_table(home_rows, home_team)}
             {recent_matches_report_table(away_rows, away_team)}
           </div>
         </details>
 """
+
+
+def recent_matches_source_note(recent: Dict[str, Any]) -> str:
+    source = str(recent.get("source") or "").strip()
+    max_scored = str(recent.get("max_scored_date") or "").strip()
+    if source and max_scored:
+        return f"Fuente {source}; ultimo marcador disponible {max_scored}."
+    if source:
+        return f"Fuente {source}."
+    return ""
 
 
 def recent_matches_report_table(rows: List[Dict[str, Any]], team: str) -> str:
@@ -4526,13 +4610,15 @@ def recent_matches_report_table(rows: List[Dict[str, Any]], team: str) -> str:
         f"<td>{escape_report_html(row.get('opponent', ''))}</td>"
         f"<td>{escape_report_html(row.get('score', ''))}</td>"
         f"<td>{escape_report_html(row.get('result', ''))}</td>"
+        f"<td>{escape_report_html(row.get('tournament', row.get('match_type', '')))}</td>"
+        f"<td>{escape_report_html(row.get('match_type', ''))}</td>"
         "</tr>"
         for row in rows[:15]
     )
     return f"""
           <div>
             <h3>{escape_report_html(team)}</h3>
-            <table><thead><tr><th>Fecha</th><th>Rival</th><th>Marcador</th><th>R</th></tr></thead><tbody>{body}</tbody></table>
+            <table><thead><tr><th>Fecha</th><th>Rival</th><th>Marcador</th><th>R</th><th>Torneo</th><th>Tipo</th></tr></thead><tbody>{body}</tbody></table>
           </div>
 """
 
@@ -5113,7 +5199,7 @@ def procedure() -> Dict[str, Any]:
             "openfootball/worldcup.json",
             "Football-Data WorldCup2026.xlsx para odds 1X2 historicas y clasificatorios",
             "storage/worldcup/market/manual_odds.csv opcional para odds actuales/O-U 2.5",
-            "Kaggle: patateriedata/all-international-football-results",
+            "GitHub: martj42/international_results/results.csv para resultados internacionales recientes; Kaggle queda como fallback",
             "storage/worldcup/cache/*.json",
             "Wikipedia squads opcional para jugadores",
         ],

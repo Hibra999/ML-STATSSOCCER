@@ -327,6 +327,38 @@ def test_international_recent_provider_aliases_features_and_contextual_poisson(t
     assert len(context["recent_matches"]["home"]) == 2
 
 
+def test_international_status_reports_scored_dates_and_future_unscored_rows(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", tmp_path)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", tmp_path / "all_matches.csv")
+    pd.DataFrame([
+        {"date": "2026-06-10", "home_team": "Mexico", "away_team": "Canada", "home_score": 2, "away_score": 0, "tournament": "Friendly"},
+        {"date": "2026-06-14", "home_team": "Brazil", "away_team": "Morocco", "home_score": 1, "away_score": 1, "tournament": "FIFA World Cup"},
+        {"date": "2026-06-24", "home_team": "Brazil", "away_team": "Scotland", "home_score": "NA", "away_score": "NA", "tournament": "FIFA World Cup"},
+    ]).to_csv(international_provider.INTERNATIONAL_MATCHES_FILE, index=False)
+
+    status = international_provider.international_results_status()
+
+    assert status["available"] is True
+    assert status["rows"] == 2
+    assert status["scored_rows"] == 2
+    assert status["raw_rows"] == 3
+    assert status["future_unscored_rows"] == 1
+    assert status["max_scored_date"] == "2026-06-14"
+    assert status["max_dataset_date"] == "2026-06-24"
+
+
+def test_international_freshness_warning_rejects_2022_as_current():
+    from datetime import date
+    from src.worldcup import international_provider
+
+    warning = international_provider.international_freshness_warning("2022-12-18", today=date(2026, 6, 15))
+
+    assert "desactualizado" in warning
+    assert international_provider.international_freshness_warning("2026-06-14", today=date(2026, 6, 15)) == ""
+
+
 def test_international_provider_uses_valid_alternate_csv_name(tmp_path, monkeypatch):
     from src.worldcup import international_provider
 
@@ -350,6 +382,32 @@ def test_international_provider_uses_valid_alternate_csv_name(tmp_path, monkeypa
     assert "warning" in status
 
 
+def test_download_international_results_from_github_writes_canonical_all_matches(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    class FakeResponse:
+        content = (
+            b"date,home_team,away_team,home_score,away_score,tournament,city,country,neutral\n"
+            b"2026-06-14,Brazil,Morocco,1,1,FIFA World Cup,East Rutherford,United States,TRUE\n"
+        )
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", tmp_path)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", tmp_path / "all_matches.csv")
+    monkeypatch.setattr(international_provider.requests, "get", lambda url, timeout=30: FakeResponse())
+
+    status = international_provider.download_international_results(force=True, source="github")
+    matches = international_provider.load_international_matches(required=True)
+
+    assert international_provider.INTERNATIONAL_MATCHES_FILE.exists() is True
+    assert status["provider"] == "github:martj42/international_results"
+    assert status["rows"] == 1
+    assert status["max_scored_date"] == "2026-06-14"
+    assert matches.iloc[0]["home_team"] == "Brazil"
+
+
 def test_download_international_results_copies_valid_alternate_to_all_matches(tmp_path, monkeypatch):
     from src.worldcup import international_provider
 
@@ -367,7 +425,7 @@ def test_download_international_results_copies_valid_alternate_to_all_matches(tm
         {"match_date": "2025-02-01", "home": "USA", "away": "Canada", "home_goals": 2, "away_goals": 0},
     ]).to_csv(source_root / "results.csv", index=False)
 
-    status = international_provider.download_international_results(force=True)
+    status = international_provider.download_international_results(force=True, source="kaggle")
     matches = international_provider.load_international_matches(required=True)
 
     assert international_provider.INTERNATIONAL_MATCHES_FILE.exists() is True
