@@ -72,6 +72,8 @@ def test_sota_and_alternative_sequences_are_statistical_score_models():
     assert removed.isdisjoint(services.SOTA_SCORE_MODEL_SEQUENCE)
     assert removed.isdisjoint(services.ALTERNATIVE_SCORE_MODEL_SEQUENCE)
     assert removed.isdisjoint(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
+    assert services.XG_LIGHTGBM_PIPELINE_MODE not in services.SOTA_SCORE_MODEL_SEQUENCE
+    assert services.XG_LIGHTGBM_PIPELINE_MODE not in services.BENCHMARK_SCORE_MODEL_SEQUENCE
 
 
 def test_alternatives_benchmark_aliases_and_statistical_registry():
@@ -81,6 +83,8 @@ def test_alternatives_benchmark_aliases_and_statistical_registry():
     assert services.normalize_report_pipeline_mode("benchmark_alternativas") == "alternatives_benchmark"
     assert services.normalize_report_pipeline_mode("sota_alternatives") == "alternatives_benchmark"
     assert services.normalize_report_pipeline_mode("modelos mejores") == "alternatives_benchmark"
+    assert services.normalize_report_pipeline_mode("xg_lightgbm") == "xg_lightgbm"
+    assert services.normalize_report_pipeline_mode("xg-lightgbm-cuda") == "xg_lightgbm"
     assert services.normalize_report_pipeline_mode("poisson_sota") == "poisson_sota"
     assert services.normalize_report_pipeline_mode("modo_desconocido") == "poisson_sota"
     assert services.SOTA_SCORE_MODEL_SEQUENCE == [
@@ -161,6 +165,123 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
     assert all(item["ranking_metric"] == "score_resultados" for item in ranked)
     assert "log-loss" in ranked[0]["ranking_reason"]
     assert all(item["holdout_start"] == "2022-12-09" for item in ranked)
+
+
+def test_xg_lightgbm_report_is_separate_prediction_pipeline(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+
+    class FakeModel:
+        max_goals = 10
+
+        def match_probabilities(self, home, away, max_goals=None):
+            return {
+                "home": 0.50,
+                "draw": 0.25,
+                "away": 0.25,
+                "over05": 0.85,
+                "under05": 0.15,
+                "over15": 0.62,
+                "under15": 0.38,
+                "over25": 0.42,
+                "under25": 0.58,
+                "over35": 0.18,
+                "under35": 0.82,
+                "lambda1": 1.3,
+                "lambda2": 0.9,
+                "modal_g1": 1,
+                "modal_g2": 0,
+            }
+
+    fixtures = pd.DataFrame([
+        {"No.": 1, "Fecha": "2026-06-11", "Hora": "18:00 UTC+0", "Grupo": "Group A", "Equipo 1": "Mexico", "Equipo 2": "Canada", "Sede": "A"},
+    ])
+    model_meta = {
+        "trained": True,
+        "bundle": True,
+        "model_id": "mundial-xg-lightgbm-hibrido",
+        "model_name": "xG LightGBM test",
+        "model_type": "lightgbm",
+        "model_profile": "xg_lightgbm",
+        "model_label": "xG-LightGBM",
+        "market_mode": "dual_markets",
+        "train_rows": 80,
+        "validation_rows": 10,
+        "test_rows": 10,
+        "hardware": {"requested_device": "auto", "actual_device": "cuda", "cuda_available": True},
+        "tuning": {"enabled": True, "sampler": "tpe", "best_value": 0.42},
+        "warnings": [],
+    }
+
+    monkeypatch.setattr(services, "REPORTS_ROOT", tmp_path)
+    monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: ({}, "fixture-test"))
+    monkeypatch.setattr(services, "ensure_worldcup_results_autorefreshed_once", lambda tournament: {"attempted": False})
+    monkeypatch.setattr(services, "build_model", lambda tournament, config: (FakeModel(), "history-test"))
+    monkeypatch.setattr(services, "apply_recent_context_model", lambda model, config: model)
+    monkeypatch.setattr(services, "upcoming_fixture_rows", lambda tournament, group_filter="": fixtures)
+    monkeypatch.setattr(services, "read_model_metadata", lambda model_id=None: model_meta)
+    monkeypatch.setattr(services, "upcoming_sota_fixture_reports", lambda *args, **kwargs: pytest.fail("xg pipeline must not use SOTA reports"))
+
+    def fake_predict_match_payload(tournament, base_model, **kwargs):
+        assert kwargs["use_ml_model"] is True
+        assert kwargs["ml_weight"] == 1.0
+        assert kwargs["model_id"] == "mundial-xg-lightgbm-hibrido"
+        return {
+            "fixture": {
+                "id": "1",
+                "date": "2026-06-11",
+                "time": "18:00 UTC+0",
+                "group": "Group A",
+                "home": "Mexico",
+                "away": "Canada",
+                "venue": "A",
+            },
+            "probabilities": {
+                "home": 61.0,
+                "draw": 22.0,
+                "away": 17.0,
+                "over05": 91.0,
+                "under05": 9.0,
+                "over15": 68.0,
+                "under15": 32.0,
+                "over25": 48.0,
+                "under25": 52.0,
+                "over35": 21.0,
+                "under35": 79.0,
+            },
+            "prediction": "1 Mexico",
+            "expected_goals": {"home": 1.3, "away": 0.9},
+            "modal_score": "1-0",
+            "model_probs": {
+                "ml": {"H": 61.0, "D": 22.0, "A": 17.0},
+                "over_under_ml": {"over05": 91.0, "under05": 9.0},
+                "result_weight": 1.0,
+                "over_under_weight": 1.0,
+                "model_id": "mundial-xg-lightgbm-hibrido",
+                "model_name": "xG LightGBM test",
+            },
+            "market_readout": {},
+            "contextual_poisson": {},
+            "notes": ["Modelo xG aplicado."],
+        }
+
+    monkeypatch.setattr(services, "predict_match_payload", fake_predict_match_payload)
+
+    progress = []
+    result = services.predict_upcoming_report(
+        {"pipeline_mode": "xg_lightgbm", "limit": 1},
+        progress_callback=progress.append,
+    )
+
+    assert result["summary"]["pipeline_mode"] == "xg_lightgbm"
+    assert result["summary"]["pipeline_label"] == "xG-LightGBM"
+    assert result["summary"]["score_models"] == ["xg_lightgbm"]
+    assert result["summary"]["model"]["model_profile"] == "xg_lightgbm"
+    assert result["fixture_reports"][0]["decision"]["label"] == "1"
+    assert "models" not in result["fixture_reports"][0]
+    assert result["table"]["rows"][0]["Pipeline"] == "xG-LightGBM"
+    assert result["table"]["rows"][0]["Peso ML 1X2"] == 1.0
+    assert any(item.get("model_key") == "xg_lightgbm" for item in progress)
+    assert (tmp_path / "latest.json").exists()
 
 
 def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_consensus(tmp_path, monkeypatch):

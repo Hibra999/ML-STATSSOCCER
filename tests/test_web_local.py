@@ -284,6 +284,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson" not in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-pipeline-mode" in html_source
+    assert "xG-LightGBM" in html_source
     assert "Benchmark alternativas" in html_source
     assert "upcoming-sota-calculation-mode" in html_source
     assert "Consenso exacto" in html_source

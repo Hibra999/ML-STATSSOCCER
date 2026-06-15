@@ -452,6 +452,8 @@ async function runUpcomingPredictions() {
   const benchmarkTuningEnabled = pipelineMode === "alternatives_benchmark" && Boolean((document.getElementById("upcoming-benchmark-tuning-enabled") || {}).checked);
   const calculationLabel = pipelineMode === "alternatives_benchmark"
     ? `Benchmark alternativas${benchmarkTuningEnabled ? " + Optuna" : ""}`
+    : pipelineMode === "xg_lightgbm"
+    ? "xG-LightGBM"
     : sotaCalculationMode === "monte_carlo"
     ? `SOTA Monte Carlo consenso N=${formatInteger(currentMonteCarloSimulations())}`
     : "Consenso exacto";
@@ -481,12 +483,14 @@ async function runUpcomingPredictions() {
 function syncUpcomingPipelineControls() {
   const select = document.getElementById("upcoming-pipeline-mode");
   const mode = (select && select.value) || "poisson_sota";
+  const isBenchmark = mode === "alternatives_benchmark";
+  const isXgLightgbm = mode === "xg_lightgbm";
   const calculation = document.getElementById("upcoming-sota-calculation-mode");
-  if (calculation) calculation.disabled = mode === "alternatives_benchmark";
+  if (calculation) calculation.disabled = isBenchmark || isXgLightgbm;
   const sotaControls = document.getElementById("upcoming-sota-controls");
-  if (sotaControls) sotaControls.classList.toggle("hidden", mode === "alternatives_benchmark");
+  if (sotaControls) sotaControls.classList.toggle("hidden", isBenchmark || isXgLightgbm);
   const benchmarkControls = document.getElementById("upcoming-benchmark-controls");
-  if (benchmarkControls) benchmarkControls.classList.toggle("hidden", mode !== "alternatives_benchmark");
+  if (benchmarkControls) benchmarkControls.classList.toggle("hidden", !isBenchmark);
   return mode;
 }
 
@@ -495,6 +499,10 @@ function renderUpcomingReport(report) {
   const summary = report.summary || {};
   if (summary.pipeline_mode === "alternatives_benchmark") {
     renderAlternativesBenchmarkReport(report);
+    return;
+  }
+  if (summary.pipeline_mode === "xg_lightgbm") {
+    renderXgLightgbmReport(report);
     return;
   }
   const fixtures = report.fixture_reports || [];
@@ -524,6 +532,131 @@ function renderUpcomingReport(report) {
     </details>`;
   refreshCountdowns();
   renderTable("upcoming-predictions-table", report.table);
+}
+
+function renderXgLightgbmReport(report) {
+  const summary = report.summary || {};
+  const fixtures = report.fixture_reports || [];
+  const model = summary.model || {};
+  const modelDevice = summary.model_device || model.hardware || {};
+  const warnings = summary.warnings || [];
+  const tuning = model.tuning || {};
+  const rowLabel = `${model.train_rows || 0}/${model.validation_rows || 0}/${model.test_rows || 0}`;
+  const modelName = model.model_name || model.model_id || summary.model_id || "xG-LightGBM";
+  document.getElementById("upcoming-summary").textContent =
+    `${summary.pipeline_label || "xG-LightGBM"} - ${fixtures.length}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - ${modelName} - ${summary.report_id || report.report_id || ""}`;
+  document.getElementById("upcoming-predictions").innerHTML = "";
+  document.getElementById("upcoming-report").innerHTML = `
+    <div class="report-summary-grid">
+      ${reportSummaryCard("Pipeline", summary.pipeline_label || "xG-LightGBM")}
+      ${reportSummaryCard("Modelo", model.trained ? modelName : "No entrenado")}
+      ${reportSummaryCard("Filas T/V/Test", rowLabel)}
+      ${reportSummaryCard("Partidos", `${summary.returned || 0}/${summary.requested || 0}`)}
+      ${reportSummaryCard("Hardware ML", `${modelDevice.actual_device || "cpu"} · ${modelDevice.requested_device || "auto"}`)}
+      ${reportSummaryCard("Optuna", tuning.enabled ? `${tuning.sampler || "Optuna"} · ${formatNumber(tuning.best_value ?? "")}` : "No")}
+      ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
+    </div>
+    ${reportDownloadButtonsHtml(report.downloads || {}, false)}
+    ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    <section class="client-report-shell">
+      <header>
+        <div>
+          <h3>Reporte xG-LightGBM</h3>
+          <small>Clasificación ML 1X2 y U/O 0.5-3.5</small>
+        </div>
+        <span>${escapeHtml(fixtures.length)} partido${fixtures.length === 1 ? "" : "s"}</span>
+      </header>
+      <div class="client-report-grid">
+        ${fixtures.map((fixtureReport) => xgLightgbmFixtureCardHtml(fixtureReport)).join("") || loadingHtml("Sin predicciones xG-LightGBM")}
+      </div>
+    </section>
+    ${xgLightgbmTopFeaturesHtml(model)}
+    <details class="technical-report-drawer">
+      <summary>Metadata del bundle</summary>
+      ${xgLightgbmModelMetadataHtml(model)}
+    </details>`;
+  refreshCountdowns();
+  renderTable("upcoming-predictions-table", report.table);
+}
+
+function xgLightgbmFixtureCardHtml(report) {
+  const fixture = report.fixture || {};
+  const probabilities = report.probabilities || {};
+  const decision = report.decision || {};
+  const model = report.model_probs || {};
+  const totals = report.totals || {};
+  const expected = report.expected_goals || {};
+  const warnings = report.warnings || [];
+  const activeOutcome = decision.outcome || strongestOutcomeFromProbabilities(probabilities);
+  const pickTeam = decision.team || (activeOutcome === "draw" ? "Empate" : activeOutcome === "home" ? fixture.home : fixture.away);
+  const confidence = Number(probabilities[activeOutcome] || 0);
+  const confidenceClass = confidence >= 70 ? "high" : confidence >= 55 ? "medium" : "low";
+  const homeAsset = fixture.home_asset || assetFor(fixture.home || "");
+  const awayAsset = fixture.away_asset || assetFor(fixture.away || "");
+  const sourceLabel = `${Number(model.result_weight || 0) > 0 ? "ML 1X2" : "Poisson 1X2"} · ${Number(model.over_under_weight || 0) > 0 ? "ML U/O" : "Poisson U/O"}`;
+  return `<article class="client-fixture-card confidence-${escapeAttr(confidenceClass)}">
+    <header>
+      <span>${escapeHtml([fixture.date || "", fixture.time || ""].filter(Boolean).join(" · "))}</span>
+      <strong>${escapeHtml(fixture.group || "")}</strong>
+    </header>
+    ${fixtureCountdownHtml(fixture)}
+    <div class="client-match-row">
+      <div>${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
+      <b>vs</b>
+      <div>${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
+    </div>
+    <div class="client-main-pick">
+      <span>Pronóstico xG-LightGBM</span>
+      <strong>${escapeHtml(decision.label || outcomeLabel(activeOutcome) || "-")} · ${escapeHtml(pickTeam || "-")}</strong>
+      <small>${escapeHtml(formatProbability(confidence))}% · ${escapeHtml(sourceLabel)}</small>
+    </div>
+    ${modelOutcomeProbabilitiesHtml(probabilities, activeOutcome, fixture)}
+    ${modelOverUnderProbabilitiesHtml(probabilities, totals)}
+    <section class="client-score-panel">
+      <header><strong>Marcador base</strong><small>${escapeHtml(model.model_name || model.model_id || "xG-LightGBM")}</small></header>
+      <div class="technical-meta-row">
+        <span>Top ${escapeHtml(report.modal_score || "-")}</span>
+        <span>xG local ${escapeHtml(formatNumber(expected.home ?? "-"))}</span>
+        <span>xG visita ${escapeHtml(formatNumber(expected.away ?? "-"))}</span>
+        <span>Peso 1X2 ${escapeHtml(formatNumber(Number(model.result_weight || 0) * 100))}%</span>
+        <span>Peso U/O ${escapeHtml(formatNumber(Number(model.over_under_weight || 0) * 100))}%</span>
+      </div>
+    </section>
+    ${warnings.length ? `<div class="warning-list compact">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+  </article>`;
+}
+
+function xgLightgbmTopFeaturesHtml(model) {
+  const features = (model.top_features || []).slice(0, 10);
+  if (!features.length) return "";
+  return `<section class="report-panel">
+    <header><strong>Top features</strong><small>Importancias LightGBM del bundle</small></header>
+    <div class="technical-meta-row">
+      ${features.map((item) => {
+        const name = item.feature || item.name || item.column || "";
+        const value = item.importance ?? item.gain ?? item.value ?? "";
+        return `<span>${escapeHtml(name)} ${value !== "" ? `<b>${escapeHtml(formatNumber(value))}</b>` : ""}</span>`;
+      }).join("")}
+    </div>
+  </section>`;
+}
+
+function xgLightgbmModelMetadataHtml(model) {
+  const hardware = model.hardware || {};
+  const markets = model.markets || {};
+  const marketKeys = Object.keys(markets);
+  return `<section class="report-panel">
+    <header><strong>${escapeHtml(model.model_label || "xG-LightGBM")}</strong><small>${escapeHtml(model.model_id || "")}</small></header>
+    <div class="technical-meta-row">
+      <span>Tipo ${escapeHtml(model.model_type || "-")}</span>
+      <span>Perfil ${escapeHtml(model.model_profile || "-")}</span>
+      <span>Modo ${escapeHtml(model.market_mode || "-")}</span>
+      <span>Entrenado ${escapeHtml(formatReportDateTime(model.trained_at || ""))}</span>
+      <span>CUDA ${escapeHtml(hardware.cuda_available ? "si" : "no")}</span>
+      <span>Device ${escapeHtml(hardware.actual_device || "-")}</span>
+    </div>
+    ${marketKeys.length ? `<div class="technical-meta-row">${marketKeys.map((key) => `<span>${escapeHtml(key)}</span>`).join("")}</div>` : ""}
+  </section>`;
 }
 
 function renderAlternativesBenchmarkReport(report) {

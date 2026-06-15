@@ -75,10 +75,14 @@ from src.worldcup.market_provider import load_market_data, normalize_market_fram
 from src.worldcup.training import (
     HISTORY_REFERENCE_DATE,
     TARGET_WORLDCUP_YEAR,
+    XG_LIGHTGBM_PROFILE,
     build_history_feature_table,
     build_matchup_feature_table,
+    default_model_id,
     json_safe,
     match_feature_row,
+    predict_match_payload,
+    read_model_metadata,
 )
 from src.worldcup.lanus_provider import (
     LINEUPS_ROOT,
@@ -103,6 +107,8 @@ REPORTS_ROOT = Path("storage") / "worldcup" / "reports"
 FEATURE_STORE_ROOT = Path("storage") / "worldcup" / "features"
 WALK_FORWARD_ROOT = Path("storage") / "worldcup" / "walk_forward"
 POISSON_SOTA_PIPELINE_MODE = "poisson_sota"
+XG_LIGHTGBM_PIPELINE_MODE = "xg_lightgbm"
+XG_LIGHTGBM_PIPELINE_LABEL = "xG-LightGBM"
 SOTA_SCORE_MODEL_SEQUENCE = [
     "independent_poisson",
     "dixon_coles_mle",
@@ -1378,6 +1384,14 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
             hardware=hardware,
             progress_callback=progress_callback,
         )
+    if pipeline_mode == XG_LIGHTGBM_PIPELINE_MODE:
+        return xg_lightgbm_report(
+            payload=payload,
+            config=config,
+            start_time=start_time,
+            hardware=hardware,
+            progress_callback=progress_callback,
+        )
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     base_model, history_source = build_model(tournament, config)
@@ -1463,6 +1477,246 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         force_complete=True,
     )
     return report
+
+
+def xg_lightgbm_report(
+        payload: Dict[str, Any],
+        config: Dict[str, Any],
+        start_time: float,
+        hardware: Dict[str, Any],
+        progress_callback=None,
+) -> Dict[str, Any]:
+    model_id, model_meta, model_warnings = resolve_xg_lightgbm_model(payload)
+    tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
+    base_model, history_source = build_model(tournament, config)
+    base_model = apply_recent_context_model(base_model, config)
+    limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
+    group_filter = str(payload.get("group") or "").strip()
+    fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter).head(limit).copy()
+    fixture_records = [fixture for _, fixture in fixture_df.iterrows()]
+    fixture_total = max(len(fixture_records), 1)
+    fixture_reports: List[Dict[str, Any]] = []
+    for index, fixture in enumerate(fixture_records, start=1):
+        emit_report_progress(
+            progress_callback,
+            stage="predicting",
+            start_time=start_time,
+            model_index=1,
+            model_total=1,
+            model_key=XG_LIGHTGBM_PIPELINE_MODE,
+            fixture_index=index - 1,
+            fixture_total=fixture_total,
+            hardware=hardware,
+            message=f"xG-LightGBM {index}/{fixture_total}",
+        )
+        prediction = predict_match_payload(
+            tournament,
+            base_model,
+            fixture_id=fixture.get("No.", ""),
+            home=fixture.get("Equipo 1", ""),
+            away=fixture.get("Equipo 2", ""),
+            use_ml_model=True,
+            ml_weight=1.0,
+            model_id=model_id,
+            poisson_recent_matches=int(config.get("poisson_recent_matches") or DEFAULT_CONFIG["poisson_recent_matches"]),
+        )
+        fixture_reports.append(xg_lightgbm_fixture_report(prediction))
+    table_rows = xg_lightgbm_report_table_rows(fixture_reports)
+    table = table_payload(pd.DataFrame(table_rows), page=1, page_size=max(len(table_rows), 1))
+    fixture_warnings = [
+        warning
+        for report in fixture_reports
+        for warning in report.get("warnings", [])
+    ]
+    model_summary = xg_lightgbm_model_summary(model_meta)
+    summary = {
+        "pipeline_mode": XG_LIGHTGBM_PIPELINE_MODE,
+        "pipeline_label": XG_LIGHTGBM_PIPELINE_LABEL,
+        "requested": limit,
+        "returned": len(fixture_reports),
+        "group": group_filter or "Todos",
+        "fixture_source": fixture_source,
+        "history_source": history_source,
+        "poisson_recent_matches": config["poisson_recent_matches"],
+        "iterations": 0,
+        "seed": config["seed"],
+        "sota_device": "not_applicable",
+        "sota_calculation_mode": "not_applicable",
+        "sota_calculation_label": "Bundle ML xG-LightGBM",
+        "monte_carlo_iterations": 0,
+        "score_models": [XG_LIGHTGBM_PIPELINE_MODE],
+        "model_id": model_id,
+        "model": model_summary,
+        "model_device": model_summary.get("hardware", {}),
+        "hardware": hardware,
+        "results_autorefresh": results_autorefresh,
+        "warnings": unique_strings([
+            *model_warnings,
+            *hardware.get("warnings", []),
+            *fixture_warnings,
+        ]),
+        "config": config,
+    }
+    report = persist_upcoming_report({
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "summary": summary,
+        "fixture_reports": fixture_reports,
+        "table": table,
+    })
+    emit_report_progress(
+        progress_callback,
+        stage="complete",
+        start_time=start_time,
+        model_index=1,
+        model_total=1,
+        model_key=XG_LIGHTGBM_PIPELINE_MODE,
+        fixture_index=len(fixture_reports),
+        fixture_total=fixture_total,
+        hardware=hardware,
+        message="Reporte xG-LightGBM guardado",
+        force_complete=True,
+    )
+    return report
+
+
+def resolve_xg_lightgbm_model(payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any], List[str]]:
+    explicit_model_id = str(payload.get("model_id") or payload.get("xg_model_id") or "").strip()
+    if explicit_model_id:
+        meta = read_model_metadata(model_id=explicit_model_id)
+        warnings = xg_lightgbm_model_warnings(meta, explicit_model_id, explicit=True)
+        return explicit_model_id, meta, warnings
+    active_meta = read_model_metadata()
+    if active_meta.get("trained") and active_meta.get("model_profile") == XG_LIGHTGBM_PROFILE:
+        return str(active_meta.get("model_id") or ""), active_meta, []
+    default_id = default_model_id(XG_LIGHTGBM_PROFILE, "dual_markets")
+    default_meta = read_model_metadata(model_id=default_id)
+    if default_meta.get("trained") and default_meta.get("model_profile") == XG_LIGHTGBM_PROFILE:
+        return default_id, default_meta, []
+    warnings = xg_lightgbm_model_warnings(default_meta, default_id, explicit=False)
+    if active_meta.get("trained") and active_meta.get("model_id") and active_meta.get("model_profile") != XG_LIGHTGBM_PROFILE:
+        warnings.append(
+            f"Modelo activo {active_meta.get('model_id')} ignorado: no tiene perfil xG-LightGBM."
+        )
+    return default_id, default_meta, unique_strings(warnings)
+
+
+def xg_lightgbm_model_warnings(meta: Dict[str, Any], model_id: str, explicit: bool) -> List[str]:
+    warnings = []
+    if not meta.get("trained"):
+        warnings.append(
+            f"Bundle xG-LightGBM {model_id or 'default'} no entrenado; el pipeline usa respaldo Poisson."
+        )
+    elif meta.get("model_profile") != XG_LIGHTGBM_PROFILE:
+        scope = "solicitado" if explicit else "detectado"
+        warnings.append(
+            f"Modelo {scope} {model_id or meta.get('model_id') or ''} no tiene perfil xG-LightGBM."
+        )
+    elif meta.get("market_mode") != "dual_markets":
+        warnings.append(
+            f"Modelo {model_id or meta.get('model_id') or ''} no es dual_markets; algunos U/O pueden venir de Poisson."
+        )
+    return unique_strings([*warnings, *list(meta.get("warnings") or [])])
+
+
+def xg_lightgbm_model_summary(meta: Dict[str, Any]) -> Dict[str, Any]:
+    hardware = meta.get("hardware") or {}
+    return json_safe({
+        "trained": bool(meta.get("trained")),
+        "bundle": bool(meta.get("bundle")),
+        "model_id": meta.get("model_id", ""),
+        "model_name": meta.get("model_name", ""),
+        "model_type": meta.get("model_type", ""),
+        "model_profile": meta.get("model_profile", ""),
+        "model_label": meta.get("model_label") or XG_LIGHTGBM_PIPELINE_LABEL,
+        "market_mode": meta.get("market_mode", ""),
+        "trained_at": meta.get("trained_at", ""),
+        "train_rows": int(meta.get("train_rows", 0) or 0),
+        "validation_rows": int(meta.get("validation_rows", 0) or 0),
+        "test_rows": int(meta.get("test_rows", meta.get("prediction_rows", 0)) or 0),
+        "metrics": meta.get("metrics", {}),
+        "confusion_matrix": meta.get("confusion_matrix", {}),
+        "tuning": meta.get("tuning", {}),
+        "top_features": meta.get("top_features", [])[:20],
+        "markets": meta.get("markets", {}),
+        "market_models": meta.get("market_models", {}),
+        "hardware": {
+            "requested_device": hardware.get("requested_device") or hardware.get("device", ""),
+            "actual_device": hardware.get("actual_device") or hardware.get("device_default", ""),
+            "cuda_available": bool(hardware.get("cuda_available")),
+            "cuda_devices": hardware.get("cuda_devices", []),
+            "cuda_warning": hardware.get("cuda_warning", ""),
+            "warnings": hardware.get("warnings", []),
+        },
+    })
+
+
+def xg_lightgbm_fixture_report(prediction: Dict[str, Any]) -> Dict[str, Any]:
+    fixture = report_fixture_payload(prediction.get("fixture") or {})
+    probabilities = prediction.get("probabilities") or {}
+    outcome = outcome_decision(probabilities)
+    decision = {
+        "outcome": outcome,
+        "label": outcome_label(outcome),
+        "team": outcome_team(outcome, fixture),
+    }
+    model_probs = prediction.get("model_probs") or {}
+    warnings = list(prediction.get("notes") or [])
+    if not model_probs.get("ml"):
+        warnings.append("1X2 ML no disponible; probabilidades 1X2 salen de respaldo Poisson.")
+    if not model_probs.get("over_under_ml"):
+        warnings.append("U/O ML no disponible; totales salen de respaldo Poisson.")
+    return {
+        "fixture": fixture,
+        "prediction": prediction.get("prediction", ""),
+        "probabilities": probabilities,
+        "decision": decision,
+        "totals": total_decisions(probabilities),
+        "expected_goals": prediction.get("expected_goals", {}),
+        "modal_score": prediction.get("modal_score", ""),
+        "model_probs": model_probs,
+        "market_readout": prediction.get("market_readout", {}),
+        "data_quality": prediction.get("data_quality", {}),
+        "contextual_poisson": prediction.get("contextual_poisson", {}),
+        "warnings": unique_strings(warnings),
+    }
+
+
+def xg_lightgbm_report_table_rows(fixture_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for report in fixture_reports:
+        fixture = report.get("fixture", {})
+        probabilities = report.get("probabilities", {})
+        expected = report.get("expected_goals", {})
+        model_probs = report.get("model_probs", {})
+        decision = report.get("decision", {})
+        rows.append({
+            "No.": fixture.get("id", ""),
+            "Fecha": fixture.get("date", ""),
+            "Grupo": fixture.get("group", ""),
+            "Partido": fixture.get("label", ""),
+            "Pipeline": XG_LIGHTGBM_PIPELINE_LABEL,
+            "Modelo": model_probs.get("model_name", "") or model_probs.get("model_id", ""),
+            "Pick": f"{decision.get('label', '')} {decision.get('team', '')}".strip(),
+            "Top score": report.get("modal_score", ""),
+            "Lambda Local": expected.get("home", ""),
+            "Lambda Visita": expected.get("away", ""),
+            "Peso ML 1X2": model_probs.get("result_weight", ""),
+            "Peso ML U/O": model_probs.get("over_under_weight", ""),
+            "1 %": probabilities.get("home", ""),
+            "X %": probabilities.get("draw", ""),
+            "2 %": probabilities.get("away", ""),
+            "O0.5": probabilities.get("over05", ""),
+            "U0.5": probabilities.get("under05", ""),
+            "O1.5": probabilities.get("over15", ""),
+            "U1.5": probabilities.get("under15", ""),
+            "O2.5": probabilities.get("over25", ""),
+            "U2.5": probabilities.get("under25", ""),
+            "O3.5": probabilities.get("over35", ""),
+            "U3.5": probabilities.get("under35", ""),
+            "Warnings": " | ".join(report.get("warnings", [])),
+        })
+    return rows
 
 
 def alternatives_benchmark_report(
@@ -3363,6 +3617,17 @@ def expected_lambdas_for_batched_report(model: Any, fixture: pd.Series, config: 
 def normalize_report_pipeline_mode(value: Any) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", str(value or POISSON_SOTA_PIPELINE_MODE).strip().lower()).strip("_")
     if normalized in {
+        XG_LIGHTGBM_PIPELINE_MODE,
+        "xg_light_gbm",
+        "xg_lgbm",
+        "xglightgbm",
+        "xg_lightgbm_cuda",
+        "lightgbm_xg",
+        "lightgbm_xg_cuda",
+        "xg",
+    }:
+        return XG_LIGHTGBM_PIPELINE_MODE
+    if normalized in {
         ALTERNATIVES_BENCHMARK_PIPELINE_MODE,
         "alternatives",
         "alternative_benchmark",
@@ -3402,6 +3667,11 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
     if config["sota_device"] not in {"auto", "cpu", "cuda"}:
         config["sota_device"] = "auto"
     config["score_model"] = DEFAULT_SCORE_MODEL
+    if pipeline_mode == XG_LIGHTGBM_PIPELINE_MODE:
+        config["sota_calculation_mode"] = "not_applicable"
+        config["bayes_profile"] = "not_applicable"
+        config["stat_model_cache"] = True
+        config["stat_model_refit"] = False
     if config["bayes_profile"] == "deep":
         config["bayes_draws"] = 2000
         config["bayes_tune"] = 2000
@@ -4558,6 +4828,8 @@ def predictions_report_html_body(report: Dict[str, Any]) -> str:
 
 
 def prediction_fixture_report_card_html(report: Dict[str, Any]) -> str:
+    if report.get("probabilities") and report.get("decision"):
+        return xg_lightgbm_prediction_fixture_report_card_html(report)
     fixture = report.get("fixture") or {}
     primary = report.get("primary_model") or {}
     if not primary.get("available"):
@@ -4587,6 +4859,31 @@ def prediction_fixture_report_card_html(report: Dict[str, Any]) -> str:
         {total_25_html(probabilities)}
         <div class="top-scores">{''.join(f'<span>{escape_report_html(score.get("score", ""))} <b>{escape_report_html(format_metric(score.get("probability", "")))}%</b></span>' for score in top_scores[:3])}</div>
         {recent_matches_report_html(report.get("recent_matches_15") or {}, fixture)}
+      </article>
+"""
+
+
+def xg_lightgbm_prediction_fixture_report_card_html(report: Dict[str, Any]) -> str:
+    fixture = report.get("fixture") or {}
+    decision = report.get("decision") or {}
+    probabilities = report.get("probabilities") or {}
+    expected = report.get("expected_goals") or {}
+    model_probs = report.get("model_probs") or {}
+    warnings = report.get("warnings") or []
+    warning_html = "".join(f"<p>{escape_report_html(item)}</p>" for item in warnings)
+    return f"""
+      <article class="fixture-card">
+        <header><span>{escape_report_html(fixture.get("date", ""))}</span><strong>{escape_report_html(fixture.get("group", ""))}</strong></header>
+        <h2>{escape_report_html(fixture.get("label", ""))}</h2>
+        <div class="pick"><span>{escape_report_html(model_probs.get("model_name") or "xG-LightGBM")}</span><strong>{escape_report_html(decision.get("label", ""))} · {escape_report_html(decision.get("team", ""))}</strong></div>
+        {outcome_bars_html(probabilities)}
+        {total_25_html(probabilities)}
+        <div class="top-scores">
+          <span>Top {escape_report_html(report.get("modal_score", ""))}</span>
+          <span>xG local <b>{escape_report_html(format_metric(expected.get("home", "")))}</b></span>
+          <span>xG visita <b>{escape_report_html(format_metric(expected.get("away", "")))}</b></span>
+        </div>
+        {f'<div class="warnings">{warning_html}</div>' if warning_html else ''}
       </article>
 """
 
