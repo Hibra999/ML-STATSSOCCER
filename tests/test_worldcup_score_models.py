@@ -7,6 +7,7 @@ from src.worldcup.score_models import (
     build_score_model,
     normalize_score_model_key,
     score_grid_from_lambdas,
+    score_grids_from_lambdas,
 )
 
 
@@ -22,6 +23,25 @@ def test_score_model_grids_are_normalized_and_non_negative():
         assert grid.shape == (9, 9)
         assert np.isclose(grid.sum(), 1.0)
         assert np.all(grid >= 0.0)
+
+
+def test_batched_score_model_grids_match_scalar_numpy_backend():
+    state = ScoreModelState("dixon_coles_mle", "Dixon-Coles", True, {"rho": -0.08})
+    lambdas_home = np.asarray([1.42, 0.95, 2.1], dtype=float)
+    lambdas_away = np.asarray([1.08, 1.2, 0.7], dtype=float)
+
+    batched = score_grids_from_lambdas(
+        state,
+        lambdas_home,
+        lambdas_away,
+        max_goals=8,
+        backend="numpy",
+    )
+
+    assert batched.shape == (3, 9, 9)
+    for index in range(3):
+        scalar = score_grid_from_lambdas(state, lambdas_home[index], lambdas_away[index], max_goals=8)
+        assert np.allclose(batched[index], scalar)
 
 
 def test_removed_score_model_keys_fall_back_to_independent_poisson():

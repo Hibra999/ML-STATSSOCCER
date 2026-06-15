@@ -1648,7 +1648,7 @@ def test_consensus_agreement_and_model_statistics_include_ranges():
     assert statistics["probability_ranges"]["home"] == {"min": 50.0, "max": 60.0, "spread": 10.0}
 
 
-def test_sota_report_honors_explicit_cuda_when_detected_and_warns_cpu_bound(monkeypatch):
+def test_sota_report_honors_explicit_cuda_for_exact_cupy_backend(monkeypatch):
     from src.web import mundial_services as services
 
     monkeypatch.setattr(services, "detect_hardware", lambda: {
@@ -1663,11 +1663,20 @@ def test_sota_report_honors_explicit_cuda_when_detected_and_warns_cpu_bound(monk
         "cuda_warning": "",
         "device_default": "cuda",
     })
+    monkeypatch.setattr(services, "score_backend_status", lambda requested_device="auto": {
+        "score_backend": "cupy",
+        "actual_device": "cuda",
+        "backend_supports_cuda": True,
+        "cuda_available": True,
+        "cuda_device_names": ["NVIDIA GeForce RTX 5070"],
+        "warning": "",
+    })
 
     hardware = services.stat_report_hardware("cuda", "poisson_sota")
     assert hardware["actual_device"] == "cuda"
-    assert hardware["backend_supports_cuda"] is False
-    assert sum("CPU-bound" in warning for warning in hardware["warnings"]) == 1
+    assert hardware["backend_supports_cuda"] is True
+    assert hardware["score_backend"] == "cupy"
+    assert sum("CPU-bound" in warning for warning in hardware["warnings"]) == 0
 
 
 def test_sota_monte_carlo_hardware_uses_cuda_backend_when_available(monkeypatch):

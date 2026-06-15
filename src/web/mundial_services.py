@@ -37,7 +37,10 @@ from src.worldcup.score_models import (
     build_score_model,
     normalize_score_model_key,
     probabilities_from_score_grid,
+    probabilities_from_score_grids,
     sample_scores_from_grid,
+    score_backend_status,
+    score_grids_from_lambdas_with_backend,
     score_model_options,
 )
 from src.worldcup.sota_alternatives import (
@@ -1348,6 +1351,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         pipeline_mode,
         config.get("sota_calculation_mode", "exact"),
     )
+    config["score_backend"] = str(hardware.get("score_backend") or "numpy")
     emit_report_progress(
         progress_callback,
         stage="preparing",
@@ -3105,6 +3109,31 @@ def upcoming_sota_fixture_reports(
             }
         score_model = apply_recent_context_model(score_model, config)
         score_model = apply_benchmark_feature_model(score_model, model_key, feature_source, history_df=history_df)
+        batched_reports = batched_score_model_reports_for_fixtures(
+            score_model=score_model,
+            model_key=model_key,
+            metadata=metadata,
+            fixtures=fixtures,
+            config=config,
+            hardware=hardware,
+            feature_source=feature_source,
+        )
+        if batched_reports is not None:
+            for fixture_index, (fixture, model_report) in enumerate(zip(fixtures, batched_reports), start=1):
+                emit_report_progress(
+                    progress_callback,
+                    stage="predicting",
+                    start_time=start_time,
+                    model_index=model_index,
+                    model_total=model_total,
+                    model_key=model_key,
+                    fixture_index=fixture_index,
+                    fixture_total=fixture_total,
+                    hardware=hardware,
+                    message=f"{score_model_display_label(model_key)}: {fixture.get('Equipo 1', '')} vs {fixture.get('Equipo 2', '')}",
+                )
+                fixture_reports[fixture_index - 1]["models"].append(model_report)
+            continue
         for fixture_index, fixture in enumerate(fixtures, start=1):
             emit_report_progress(
                 progress_callback,
@@ -3136,6 +3165,106 @@ def upcoming_sota_fixture_reports(
             model_report["heatmap"] = score_distribution.get("heatmap", {})
             fixture_reports[fixture_index - 1]["models"].append(model_report)
     return fixture_reports
+
+
+def batched_score_model_reports_for_fixtures(
+        score_model: Any,
+        model_key: str,
+        metadata: Dict[str, Any],
+        fixtures: List[pd.Series],
+        config: Dict[str, Any],
+        hardware: Dict[str, Any],
+        feature_source: BenchmarkFeatureSource | None = None,
+) -> List[Dict[str, Any]] | None:
+    requested_backend = str((hardware or {}).get("score_backend") or config.get("score_backend") or "numpy").strip().lower()
+    if requested_backend != "cupy" or feature_source is not None or not fixtures:
+        return None
+    key = normalize_score_model_key(model_key)
+    if key not in SOTA_SCORE_MODEL_SEQUENCE:
+        return None
+    lambda_home: List[float] = []
+    lambda_away: List[float] = []
+    try:
+        for fixture in fixtures:
+            home_lambda, away_lambda = expected_lambdas_for_batched_report(score_model, fixture, config)
+            lambda_home.append(float(home_lambda))
+            lambda_away.append(float(away_lambda))
+        grids, backend, backend_warnings = score_grids_from_lambdas_with_backend(
+            metadata,
+            lambda1_values=lambda_home,
+            lambda2_values=lambda_away,
+            max_goals=int(config.get("max_goals") or DEFAULT_CONFIG["max_goals"]),
+            backend=requested_backend,
+        )
+        probability_rows = probabilities_from_score_grids(grids, lambda_home, lambda_away)
+    except Exception:
+        return None
+    reports: List[Dict[str, Any]] = []
+    metadata_with_backend = dict(metadata)
+    metadata_warnings = [str(item) for item in metadata_with_backend.get("warnings", []) if str(item)]
+    metadata_with_backend["warnings"] = unique_strings([
+        *metadata_warnings,
+        *[str(item) for item in backend_warnings if str(item)],
+    ])
+    params = dict(metadata_with_backend.get("params") or {})
+    params["score_backend"] = backend
+    metadata_with_backend["params"] = params
+    for index, (fixture, probabilities) in enumerate(zip(fixtures, probability_rows)):
+        probabilities = dict(probabilities)
+        probabilities["score_model"] = key
+        probabilities["score_model_label"] = metadata_with_backend.get("label", score_model_display_label(key))
+        probabilities["score_model_available"] = bool(metadata_with_backend.get("available", True))
+        model_report = score_prediction_model_report(
+            model_key=key,
+            metadata=metadata_with_backend,
+            probabilities=probabilities,
+            fixture=fixture,
+            config=config,
+            already_percent=False,
+        )
+        score_distribution = score_distribution_payload(
+            grids[index],
+            lambda_home=float(lambda_home[index]),
+            lambda_away=float(lambda_away[index]),
+        )
+        model_report["score_distribution"] = score_distribution
+        model_report["top_scores"] = score_distribution.get("top_scores", [])
+        if model_report["top_scores"]:
+            model_report["top_score"] = model_report["top_scores"][0].get("score", model_report.get("top_score", ""))
+            model_report["top_score_probability"] = model_report["top_scores"][0].get("probability", 0.0)
+        model_report["heatmap"] = score_distribution.get("heatmap", {})
+        model_report["score_backend"] = backend
+        reports.append(model_report)
+    return reports
+
+
+def expected_lambdas_for_batched_report(model: Any, fixture: pd.Series, config: Dict[str, Any]) -> Tuple[float, float]:
+    home = str(fixture.get("Equipo 1", ""))
+    away = str(fixture.get("Equipo 2", ""))
+    if isinstance(model, RecentPoissonWorldCupModel):
+        context = contextual_poisson_for_match(
+            home,
+            away,
+            base_model=model.base_model,
+            before_date=fixture.get("Fecha", ""),
+            max_goals=int(config.get("max_goals") or DEFAULT_CONFIG["max_goals"]),
+            matches=getattr(model, "matches", pd.DataFrame()),
+            limit=int(getattr(model, "recent_match_limit", config.get("poisson_recent_matches") or DEFAULT_CONFIG["poisson_recent_matches"])),
+        )
+        try:
+            lambda_home = float(context.get("context_lambda_home") or (context.get("lambdas") or {}).get("home") or 0.0)
+            lambda_away = float(context.get("context_lambda_away") or (context.get("lambdas") or {}).get("away") or 0.0)
+        except (TypeError, ValueError):
+            lambda_home = 0.0
+            lambda_away = 0.0
+        if context.get("matrix_available") and lambda_home > 0.0 and lambda_away > 0.0:
+            return lambda_home, lambda_away
+        return expected_lambdas_for_batched_report(model.base_model, fixture, config)
+    record = fixture.to_dict() if hasattr(fixture, "to_dict") else dict(fixture)
+    method = getattr(model, "expected_goals_for_match", None)
+    if callable(method):
+        return method(home, away, match=record)
+    return model.expected_goals(home, away)
 
 
 def normalize_report_pipeline_mode(value: Any) -> str:
@@ -3263,18 +3392,44 @@ def stat_report_hardware(requested_device: Any, pipeline_mode: str, sota_calcula
     actual_device = "cpu"
     device_error = ""
     monte_carlo_backend = "numpy"
+    score_status = score_backend_status(requested)
+    score_backend = str(score_status.get("score_backend") or "numpy")
+    score_backend_warning = str(score_status.get("warning") or "")
+    if score_backend == "cupy":
+        actual_device = "cuda"
+        backend_supports_cuda = True
+        detected = dict(detected)
+        detected["cuda_available"] = True
+        detected["device_default"] = "cuda"
+        score_device_names = [str(item) for item in score_status.get("cuda_device_names", []) if str(item)]
+        if score_device_names:
+            detected["cuda_device_names"] = score_device_names
+            if not detected.get("cuda_devices"):
+                detected["cuda_devices"] = [f"GPU {index}: {name}" for index, name in enumerate(score_device_names)]
+        sources = list(detected.get("cuda_detection_sources") or [])
+        if "cupy" not in sources:
+            sources.append("cupy")
+        detected["cuda_detection_sources"] = sources
+        if detected.get("cuda_detection_source") in {"", "none"}:
+            detected["cuda_detection_source"] = "cupy"
+        detected["cuda_error"] = ""
     if pipeline_mode == POISSON_SOTA_PIPELINE_MODE:
         cuda_reason = detected.get("cuda_error") or detected.get("cuda_warning") or "sin dispositivos"
         if calculation_mode == "monte_carlo":
             if requested == "cpu":
                 warnings.append("Monte Carlo SOTA configurado en CPU por solicitud explicita.")
+            elif score_backend == "cupy":
+                monte_carlo_backend = "cupy"
             elif detected.get("cuda_available"):
                 backend_name, backend_warning = monte_carlo_cuda_backend()
                 if backend_name:
                     actual_device = "cuda"
                     backend_supports_cuda = True
                     monte_carlo_backend = backend_name
-                    warnings.append(f"CUDA activa para Monte Carlo SOTA via {backend_name}; el ajuste estadistico previo sigue en CPU.")
+                    if score_backend != "cupy":
+                        warnings.append(
+                            f"CUDA activa para Monte Carlo SOTA via {backend_name}; scoring exacto/MLE usa NumPy porque CuPy no esta usable ({score_backend_warning or cuda_reason})."
+                        )
                 elif requested == "cuda":
                     device_error = f"CUDA fue solicitada explicitamente, pero no hay backend CuPy/Torch usable ({backend_warning or cuda_reason}); Monte Carlo SOTA corre en CPU."
                     warnings.append(device_error)
@@ -3285,14 +3440,18 @@ def stat_report_hardware(requested_device: Any, pipeline_mode: str, sota_calcula
                 warnings.append(device_error)
             else:
                 warnings.append(f"CUDA no disponible ({cuda_reason}); Monte Carlo SOTA corre en CPU.")
-        elif requested == "cuda" and detected.get("cuda_available"):
+        elif requested == "cpu":
+            actual_device = "cpu"
+            backend_supports_cuda = False
+            score_backend = "numpy"
+        elif score_backend == "cupy":
             actual_device = "cuda"
-            warnings.append("CUDA fue solicitada y detectada; SOTA rapido usa matriz exacta CPU-bound. Cambia Calculo a Monte Carlo para muestreo GPU.")
+            backend_supports_cuda = True
         elif requested == "cuda":
-            device_error = f"CUDA fue solicitada explicitamente, pero no se detecto GPU ({cuda_reason}); SOTA corre en CPU."
+            device_error = f"CUDA fue solicitada explicitamente, pero CuPy no esta usable ({score_backend_warning or cuda_reason}); SOTA exacto corre en CPU/NumPy."
             warnings.append(device_error)
         elif requested == "auto" and detected.get("cuda_available"):
-            warnings.append("CUDA detectada; SOTA rapido usa matriz exacta CPU-bound. Cambia Calculo a Monte Carlo para muestreo GPU.")
+            warnings.append(f"CUDA detectada, pero CuPy no esta usable ({score_backend_warning or cuda_reason}); SOTA exacto corre en CPU/NumPy.")
         elif requested == "auto" and not detected.get("cuda_available"):
             warnings.append(f"CUDA no disponible ({cuda_reason}); SOTA corre en CPU.")
     return {
@@ -3301,6 +3460,8 @@ def stat_report_hardware(requested_device: Any, pipeline_mode: str, sota_calcula
         "actual_device": actual_device,
         "backend_supports_cuda": backend_supports_cuda,
         "monte_carlo_backend": monte_carlo_backend,
+        "score_backend": score_backend,
+        "score_backend_warning": score_backend_warning,
         "device_error": device_error,
         "warnings": warnings,
     }

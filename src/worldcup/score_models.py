@@ -7,7 +7,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,7 @@ from src.worldcup.model import (
 DEFAULT_SCORE_MODEL = "independent_poisson"
 STAT_MODEL_ROOT = Path("storage") / "worldcup" / "stat_models"
 LOCAL_XG_FILE = Path("storage") / "worldcup" / "xg" / "manual_xg.csv"
+_CUPY_BACKEND_STATUS: Dict[str, Any] | None = None
 
 SCORE_MODEL_OPTIONS = [
     {
@@ -152,6 +153,21 @@ class AdvancedScoreWorldCupModel:
             max_goals=int(max_goals if max_goals is not None else self.max_goals),
         )
 
+    def score_grids_from_lambdas(
+            self,
+            lambda1_values: Sequence[float] | np.ndarray,
+            lambda2_values: Sequence[float] | np.ndarray,
+            max_goals: int | None = None,
+            backend: Any = "auto",
+    ) -> Tuple[np.ndarray, str, List[str]]:
+        return score_grids_from_lambdas_with_backend(
+            self.state,
+            lambda1_values=lambda1_values,
+            lambda2_values=lambda2_values,
+            max_goals=int(max_goals if max_goals is not None else self.max_goals),
+            backend=backend,
+        )
+
     def match_probabilities(self, team1: str, team2: str, max_goals: int | None = None) -> Dict[str, float]:
         return self.match_probabilities_for_match(team1, team2, match=None, max_goals=max_goals)
 
@@ -266,9 +282,31 @@ def fit_score_model_state(
             fingerprint=fingerprint,
         )
     elif key == "dixon_coles_mle":
-        state = ScoreModelState(key, label, True, {"rho": _estimate_dixon_coles_rho(rows)}, fingerprint=fingerprint)
+        rho, fit_backend, fit_warnings = _estimate_dixon_coles_rho(
+            rows,
+            backend=config.get("score_backend") or config.get("sota_device", "auto"),
+        )
+        state = ScoreModelState(
+            key,
+            label,
+            True,
+            {"rho": rho, "fit_backend": fit_backend},
+            warnings=tuple(fit_warnings),
+            fingerprint=fingerprint,
+        )
     elif key == "bivariate_poisson_mle":
-        state = ScoreModelState(key, label, True, {"corr_share": _estimate_bivariate_corr_share(rows)}, fingerprint=fingerprint)
+        corr_share, fit_backend, fit_warnings = _estimate_bivariate_corr_share(
+            rows,
+            backend=config.get("score_backend") or config.get("sota_device", "auto"),
+        )
+        state = ScoreModelState(
+            key,
+            label,
+            True,
+            {"corr_share": corr_share, "fit_backend": fit_backend},
+            warnings=tuple(fit_warnings),
+            fingerprint=fingerprint,
+        )
     else:
         state = ScoreModelState(
             key=DEFAULT_SCORE_MODEL,
@@ -296,6 +334,90 @@ def score_grid_from_lambdas(state: ScoreModelState | Dict[str, Any], lambda1: fl
     if key == "bivariate_poisson_mle":
         return bivariate_poisson_score_grid(lambda1, lambda2, float(params.get("corr_share", 0.0)), max_goals=max_goals)
     return poisson_score_grid(lambda1=lambda1, lambda2=lambda2, max_goals=max_goals)
+
+
+def score_grids_from_lambdas_with_backend(
+        state: ScoreModelState | Dict[str, Any],
+        lambda1_values: Sequence[float] | np.ndarray,
+        lambda2_values: Sequence[float] | np.ndarray,
+        max_goals: int = 10,
+        backend: Any = "auto",
+) -> Tuple[np.ndarray, str, List[str]]:
+    if not isinstance(state, ScoreModelState):
+        state = ScoreModelState.from_dict(dict(state or {}))
+    max_goals = int(min(max(int(max_goals or 10), 4), 14))
+    lambda1_array = np.asarray(lambda1_values, dtype=float).reshape(-1)
+    lambda2_array = np.asarray(lambda2_values, dtype=float).reshape(-1)
+    if lambda1_array.shape != lambda2_array.shape:
+        raise ValueError("lambda1_values y lambda2_values deben tener la misma longitud.")
+    if lambda1_array.size == 0:
+        return np.zeros((0, max_goals + 1, max_goals + 1), dtype=float), "numpy", []
+    key = state.key if state.available else DEFAULT_SCORE_MODEL
+    params = state.params or {}
+    requested = _normalize_backend_request(backend)
+    warnings: List[str] = []
+    if requested in {"auto", "cuda", "cupy"}:
+        status = score_backend_status("cuda" if requested in {"cuda", "cupy"} else "auto")
+        if status.get("score_backend") == "cupy":
+            try:
+                cp = _import_cupy()
+                grids = _score_grids_from_lambdas_xp(
+                    cp,
+                    key,
+                    params,
+                    lambda1_array,
+                    lambda2_array,
+                    max_goals=max_goals,
+                )
+                return cp.asnumpy(grids).astype(float), "cupy", []
+            except Exception as exc:
+                warnings.append(f"CuPy scoring fallo ({exc.__class__.__name__}: {exc}); se usa NumPy.")
+        elif requested in {"cuda", "cupy"} and status.get("warning"):
+            warnings.append(str(status.get("warning")))
+    grids = _score_grids_from_lambdas_xp(
+        np,
+        key,
+        params,
+        lambda1_array,
+        lambda2_array,
+        max_goals=max_goals,
+    )
+    return np.asarray(grids, dtype=float), "numpy", warnings
+
+
+def score_grids_from_lambdas(
+        state: ScoreModelState | Dict[str, Any],
+        lambda1_values: Sequence[float] | np.ndarray,
+        lambda2_values: Sequence[float] | np.ndarray,
+        max_goals: int = 10,
+        backend: Any = "auto",
+) -> np.ndarray:
+    grids, _, _ = score_grids_from_lambdas_with_backend(
+        state,
+        lambda1_values=lambda1_values,
+        lambda2_values=lambda2_values,
+        max_goals=max_goals,
+        backend=backend,
+    )
+    return grids
+
+
+def probabilities_from_score_grids(
+        grids: np.ndarray,
+        lambda1_values: Sequence[float] | np.ndarray,
+        lambda2_values: Sequence[float] | np.ndarray,
+) -> List[Dict[str, float]]:
+    lambda1_array = np.asarray(lambda1_values, dtype=float).reshape(-1)
+    lambda2_array = np.asarray(lambda2_values, dtype=float).reshape(-1)
+    grid_array = np.asarray(grids, dtype=float)
+    if grid_array.ndim != 3:
+        raise ValueError("grids debe ser un arreglo con forma (n, goles, goles).")
+    if grid_array.shape[0] != lambda1_array.size or lambda1_array.size != lambda2_array.size:
+        raise ValueError("grids y lambdas deben tener la misma longitud.")
+    return [
+        probabilities_from_score_grid(grid_array[index], lambda1=float(lambda1_array[index]), lambda2=float(lambda2_array[index]))
+        for index in range(grid_array.shape[0])
+    ]
 
 
 def probabilities_from_score_grid(grid: np.ndarray, lambda1: float, lambda2: float) -> Dict[str, float]:
@@ -362,6 +484,141 @@ def bivariate_poisson_score_grid(lambda1: float, lambda2: float, corr_share: flo
                 )
             grid[home_goals, away_goals] = _logsumexp(terms)
     return _normalize_grid(grid)
+
+
+def score_backend_status(requested_device: Any = "auto") -> Dict[str, Any]:
+    requested = _normalize_backend_request(requested_device)
+    if requested in {"cpu", "numpy"}:
+        return {
+            "score_backend": "numpy",
+            "actual_device": "cpu",
+            "backend_supports_cuda": False,
+            "cuda_available": False,
+            "cuda_device_names": [],
+            "warning": "",
+        }
+    status = _cupy_backend_status()
+    if status.get("available"):
+        return {
+            "score_backend": "cupy",
+            "actual_device": "cuda",
+            "backend_supports_cuda": True,
+            "cuda_available": True,
+            "cuda_device_names": list(status.get("device_names") or []),
+            "warning": "",
+        }
+    return {
+        "score_backend": "numpy",
+        "actual_device": "cpu",
+        "backend_supports_cuda": False,
+        "cuda_available": False,
+        "cuda_device_names": [],
+        "warning": str(status.get("warning") or "CuPy/CUDA no disponible"),
+    }
+
+
+def _score_grids_from_lambdas_xp(
+        xp: Any,
+        key: str,
+        params: Dict[str, Any],
+        lambda1_values: np.ndarray,
+        lambda2_values: np.ndarray,
+        max_goals: int,
+) -> Any:
+    lambda1 = xp.clip(xp.asarray(lambda1_values, dtype=xp.float64), 0.05, 6.5)
+    lambda2 = xp.clip(xp.asarray(lambda2_values, dtype=xp.float64), 0.05, 6.5)
+    if key == "dixon_coles_mle":
+        return _dixon_coles_score_grids_xp(
+            xp,
+            lambda1,
+            lambda2,
+            rho=float(params.get("rho", 0.0)),
+            max_goals=max_goals,
+        )
+    if key == "bivariate_poisson_mle":
+        return _bivariate_poisson_score_grids_xp(
+            xp,
+            lambda1,
+            lambda2,
+            corr_share=float(params.get("corr_share", 0.0)),
+            max_goals=max_goals,
+        )
+    return _poisson_score_grids_xp(xp, lambda1, lambda2, max_goals=max_goals)
+
+
+def _poisson_score_grids_xp(xp: Any, lambda1: Any, lambda2: Any, max_goals: int) -> Any:
+    goals_np = np.arange(max_goals + 1, dtype=float)
+    log_factorials_np = np.asarray([math.lgamma(int(goal) + 1) for goal in goals_np], dtype=float)
+    goals = xp.asarray(goals_np, dtype=xp.float64)
+    log_factorials = xp.asarray(log_factorials_np, dtype=xp.float64)
+    lambda1 = xp.asarray(lambda1, dtype=xp.float64).reshape(-1)
+    lambda2 = xp.asarray(lambda2, dtype=xp.float64).reshape(-1)
+    log_p1 = -lambda1[:, None] + goals[None, :] * xp.log(xp.maximum(lambda1[:, None], xp.float64(1e-12))) - log_factorials[None, :]
+    log_p2 = -lambda2[:, None] + goals[None, :] * xp.log(xp.maximum(lambda2[:, None], xp.float64(1e-12))) - log_factorials[None, :]
+    probs1 = xp.exp(log_p1)
+    probs2 = xp.exp(log_p2)
+    grids = probs1[:, :, None] * probs2[:, None, :]
+    return _normalize_batched_grids_xp(xp, grids)
+
+
+def _dixon_coles_score_grids_xp(xp: Any, lambda1: Any, lambda2: Any, rho: float, max_goals: int) -> Any:
+    grids = _poisson_score_grids_xp(xp, lambda1, lambda2, max_goals=max_goals)
+    adjusted = grids.copy()
+    rho = float(np.clip(rho, -0.25, 0.25))
+    low_factors = xp.empty((int(adjusted.shape[0]), 2, 2), dtype=xp.float64)
+    low_factors[:, 0, 0] = xp.maximum(1.0 - lambda1 * lambda2 * rho, 1e-6)
+    low_factors[:, 0, 1] = xp.maximum(1.0 + lambda1 * rho, 1e-6)
+    low_factors[:, 1, 0] = xp.maximum(1.0 + lambda2 * rho, 1e-6)
+    low_factors[:, 1, 1] = xp.maximum(1.0 - rho, 1e-6)
+    adjusted[:, :2, :2] *= low_factors
+    return _normalize_batched_grids_xp(xp, adjusted)
+
+
+def _bivariate_poisson_score_grids_xp(xp: Any, lambda1: Any, lambda2: Any, corr_share: Any, max_goals: int) -> Any:
+    lambda1 = xp.asarray(lambda1, dtype=xp.float64).reshape(-1)
+    lambda2 = xp.asarray(lambda2, dtype=xp.float64).reshape(-1)
+    corr = xp.clip(xp.asarray(corr_share, dtype=xp.float64), 0.0, 0.65)
+    if int(corr.size) == 1:
+        corr = xp.ones_like(lambda1, dtype=xp.float64) * corr.reshape(-1)[0]
+    else:
+        corr = corr.reshape(-1)
+    lambda_common = xp.minimum(corr * xp.sqrt(xp.maximum(lambda1 * lambda2, 1e-9)), 0.95 * xp.minimum(lambda1, lambda2))
+    mu1 = xp.maximum(lambda1 - lambda_common, 1e-9)
+    mu2 = xp.maximum(lambda2 - lambda_common, 1e-9)
+    goals_np = np.arange(max_goals + 1, dtype=int)
+    log_factorials_np = np.asarray([math.lgamma(int(goal) + 1) for goal in goals_np], dtype=float)
+    goals = xp.asarray(goals_np, dtype=xp.int64)
+    home_goals, away_goals = xp.meshgrid(goals, goals, indexing="ij")
+    log_factorials = xp.asarray(log_factorials_np, dtype=xp.float64)
+    grids = xp.zeros((int(lambda1.size), max_goals + 1, max_goals + 1), dtype=xp.float64)
+    log_norm = -(mu1 + mu2 + lambda_common)
+    log_mu1 = xp.log(xp.maximum(mu1, 1e-12))
+    log_mu2 = xp.log(xp.maximum(mu2, 1e-12))
+    log_common = xp.log(xp.maximum(lambda_common, 1e-12))
+    for shared in range(max_goals + 1):
+        home_private = home_goals - shared
+        away_private = away_goals - shared
+        valid = (home_private >= 0) & (away_private >= 0)
+        safe_home = xp.maximum(home_private, 0)
+        safe_away = xp.maximum(away_private, 0)
+        term = (
+            log_norm[:, None, None]
+            + safe_home[None, :, :] * log_mu1[:, None, None]
+            - log_factorials[safe_home][None, :, :]
+            + safe_away[None, :, :] * log_mu2[:, None, None]
+            - log_factorials[safe_away][None, :, :]
+            + shared * log_common[:, None, None]
+            - float(math.lgamma(shared + 1))
+        )
+        grids += xp.where(valid[None, :, :], xp.exp(term), 0.0)
+    return _normalize_batched_grids_xp(xp, grids)
+
+
+def _normalize_batched_grids_xp(xp: Any, grids: Any) -> Any:
+    grids = xp.maximum(xp.nan_to_num(grids, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+    totals = xp.sum(grids, axis=(1, 2), keepdims=True)
+    uniform = xp.full_like(grids, 1.0 / max(int(grids.shape[1]) * int(grids.shape[2]), 1))
+    return xp.where(totals > 0.0, grids / xp.maximum(totals, 1e-12), uniform)
 
 
 def _fit_bayesian_state(
@@ -561,19 +818,198 @@ def _row_periods(rows: List[Dict[str, Any]]) -> List[int]:
     return periods
 
 
-def _estimate_dixon_coles_rho(rows: List[Dict[str, Any]]) -> float:
+def _estimate_dixon_coles_rho(rows: List[Dict[str, Any]], backend: Any = "auto") -> Tuple[float, str, List[str]]:
+    candidates = np.linspace(-0.24, 0.24, 121, dtype=float)
+    try:
+        value, backend_name, warnings = _estimate_dixon_coles_rho_batched(rows, candidates, backend=backend)
+        step = float(candidates[1] - candidates[0])
+        fine_candidates = np.linspace(max(-0.24, value - step), min(0.24, value + step), 81, dtype=float)
+        value, backend_name, fine_warnings = _estimate_dixon_coles_rho_batched(rows, fine_candidates, backend=backend_name)
+        return float(np.clip(value, -0.24, 0.24)), backend_name, _merge_warnings(warnings, fine_warnings)
+    except Exception as exc:
+        warnings = [f"MLE Dixon-Coles batched fallo ({exc.__class__.__name__}: {exc}); se usa optimizacion CPU."]
+
     def objective(rho: float) -> float:
         return -sum(_grid_log_probability(dixon_coles_score_grid(row["lambda1"], row["lambda2"], rho=rho, max_goals=10), row) for row in rows)
 
     result = _minimize_scalar(objective, -0.24, 0.24)
-    return float(np.clip(result, -0.24, 0.24))
+    return float(np.clip(result, -0.24, 0.24)), "numpy", warnings
 
 
-def _estimate_bivariate_corr_share(rows: List[Dict[str, Any]]) -> float:
+def _estimate_bivariate_corr_share(rows: List[Dict[str, Any]], backend: Any = "auto") -> Tuple[float, str, List[str]]:
+    candidates = np.linspace(0.0, 0.55, 111, dtype=float)
+    try:
+        value, backend_name, warnings = _estimate_bivariate_corr_share_batched(rows, candidates, backend=backend)
+        step = float(candidates[1] - candidates[0])
+        fine_candidates = np.linspace(max(0.0, value - step), min(0.55, value + step), 81, dtype=float)
+        value, backend_name, fine_warnings = _estimate_bivariate_corr_share_batched(rows, fine_candidates, backend=backend_name)
+        return float(np.clip(value, 0.0, 0.55)), backend_name, _merge_warnings(warnings, fine_warnings)
+    except Exception as exc:
+        warnings = [f"MLE bivariado batched fallo ({exc.__class__.__name__}: {exc}); se usa optimizacion CPU."]
+
     def objective(share: float) -> float:
         return -sum(_grid_log_probability(bivariate_poisson_score_grid(row["lambda1"], row["lambda2"], share, max_goals=10), row) for row in rows)
 
-    return float(np.clip(_minimize_scalar(objective, 0.0, 0.55), 0.0, 0.55))
+    return float(np.clip(_minimize_scalar(objective, 0.0, 0.55), 0.0, 0.55)), "numpy", warnings
+
+
+def _estimate_dixon_coles_rho_batched(
+        rows: List[Dict[str, Any]],
+        candidates: np.ndarray,
+        backend: Any,
+) -> Tuple[float, str, List[str]]:
+    row_arrays = _row_arrays_for_mle(rows, max_goals=10)
+    xp, backend_name, warnings = _array_module_for_backend(backend)
+    lambda1 = xp.asarray(row_arrays["lambda1"], dtype=xp.float64)[None, :]
+    lambda2 = xp.asarray(row_arrays["lambda2"], dtype=xp.float64)[None, :]
+    goals_home = xp.asarray(row_arrays["g1"], dtype=xp.int64)
+    goals_away = xp.asarray(row_arrays["g2"], dtype=xp.int64)
+    candidate_array = xp.asarray(candidates, dtype=xp.float64)[:, None]
+    base_grids = _poisson_score_grids_xp(
+        xp,
+        xp.asarray(row_arrays["lambda1"], dtype=xp.float64),
+        xp.asarray(row_arrays["lambda2"], dtype=xp.float64),
+        max_goals=10,
+    )
+    row_index = xp.arange(int(goals_home.size), dtype=xp.int64)
+    base_observed = base_grids[row_index, goals_home, goals_away][None, :]
+    base_low = base_grids[:, :2, :2]
+    factors = xp.ones((int(candidate_array.shape[0]), int(goals_home.size)), dtype=xp.float64)
+    factors = xp.where((goals_home[None, :] == 0) & (goals_away[None, :] == 0), xp.maximum(1.0 - lambda1 * lambda2 * candidate_array, 1e-6), factors)
+    factors = xp.where((goals_home[None, :] == 0) & (goals_away[None, :] == 1), xp.maximum(1.0 + lambda1 * candidate_array, 1e-6), factors)
+    factors = xp.where((goals_home[None, :] == 1) & (goals_away[None, :] == 0), xp.maximum(1.0 + lambda2 * candidate_array, 1e-6), factors)
+    factors = xp.where((goals_home[None, :] == 1) & (goals_away[None, :] == 1), xp.maximum(1.0 - candidate_array, 1e-6), factors)
+    low_factors = xp.empty((int(candidate_array.shape[0]), int(goals_home.size), 2, 2), dtype=xp.float64)
+    low_factors[:, :, 0, 0] = xp.maximum(1.0 - lambda1 * lambda2 * candidate_array, 1e-6)
+    low_factors[:, :, 0, 1] = xp.maximum(1.0 + lambda1 * candidate_array, 1e-6)
+    low_factors[:, :, 1, 0] = xp.maximum(1.0 + lambda2 * candidate_array, 1e-6)
+    low_factors[:, :, 1, 1] = xp.maximum(1.0 - candidate_array, 1e-6)
+    adjusted_totals = 1.0 + xp.sum(base_low[None, :, :, :] * (low_factors - 1.0), axis=(2, 3))
+    probabilities = base_observed * factors / xp.maximum(adjusted_totals, 1e-12)
+    likelihoods = xp.sum(xp.log(xp.maximum(probabilities, 1e-12)), axis=1)
+    index = int(_scalar_from_xp(xp, xp.argmax(likelihoods)))
+    return float(candidates[index]), backend_name, warnings
+
+
+def _estimate_bivariate_corr_share_batched(
+        rows: List[Dict[str, Any]],
+        candidates: np.ndarray,
+        backend: Any,
+) -> Tuple[float, str, List[str]]:
+    row_arrays = _row_arrays_for_mle(rows, max_goals=10)
+    xp, backend_name, warnings = _array_module_for_backend(backend)
+    lambda1 = xp.asarray(row_arrays["lambda1"], dtype=xp.float64)
+    lambda2 = xp.asarray(row_arrays["lambda2"], dtype=xp.float64)
+    goals_home = xp.asarray(row_arrays["g1"], dtype=xp.int64)
+    goals_away = xp.asarray(row_arrays["g2"], dtype=xp.int64)
+    row_index = xp.arange(int(goals_home.size), dtype=xp.int64)
+    likelihoods = []
+    chunk_size = 32
+    for start in range(0, len(candidates), chunk_size):
+        chunk = np.asarray(candidates[start:start + chunk_size], dtype=float)
+        repeated_lambda1 = xp.tile(lambda1, int(chunk.size))
+        repeated_lambda2 = xp.tile(lambda2, int(chunk.size))
+        repeated_share = xp.repeat(xp.asarray(chunk, dtype=xp.float64), int(lambda1.size))
+        grids = _bivariate_poisson_score_grids_xp(
+            xp,
+            repeated_lambda1,
+            repeated_lambda2,
+            corr_share=repeated_share,
+            max_goals=10,
+        ).reshape(int(chunk.size), int(lambda1.size), 11, 11)
+        observed = grids[:, row_index, goals_home, goals_away]
+        likelihoods.append(xp.sum(xp.log(xp.maximum(observed, 1e-12)), axis=1))
+    all_likelihoods = xp.concatenate(likelihoods)
+    index = int(_scalar_from_xp(xp, xp.argmax(all_likelihoods)))
+    return float(candidates[index]), backend_name, warnings
+
+
+def _row_arrays_for_mle(rows: List[Dict[str, Any]], max_goals: int) -> Dict[str, np.ndarray]:
+    if not rows:
+        raise ValueError("Sin filas para ajuste MLE.")
+    return {
+        "lambda1": np.asarray([_clamp_rate(row["lambda1"]) for row in rows], dtype=float),
+        "lambda2": np.asarray([_clamp_rate(row["lambda2"]) for row in rows], dtype=float),
+        "g1": np.asarray([min(max(int(row["g1"]), 0), max_goals) for row in rows], dtype=int),
+        "g2": np.asarray([min(max(int(row["g2"]), 0), max_goals) for row in rows], dtype=int),
+    }
+
+
+def _merge_warnings(*groups: Iterable[Any]) -> List[str]:
+    seen = set()
+    output: List[str] = []
+    for group in groups:
+        for item in group:
+            text = str(item or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                output.append(text)
+    return output
+
+
+def _array_module_for_backend(backend: Any) -> Tuple[Any, str, List[str]]:
+    requested = _normalize_backend_request(backend)
+    warnings: List[str] = []
+    if requested in {"auto", "cuda", "cupy"}:
+        status = score_backend_status("cuda" if requested in {"cuda", "cupy"} else "auto")
+        if status.get("score_backend") == "cupy":
+            try:
+                return _import_cupy(), "cupy", warnings
+            except Exception as exc:
+                warnings.append(f"CuPy no disponible para MLE ({exc.__class__.__name__}: {exc}); se usa NumPy.")
+        elif requested in {"cuda", "cupy"}:
+            warnings.append(f"CuPy no disponible para MLE ({status.get('warning')}); se usa NumPy.")
+    return np, "numpy", warnings
+
+
+def _normalize_backend_request(value: Any) -> str:
+    requested = str(value or "auto").strip().lower()
+    if requested in {"gpu"}:
+        return "cuda"
+    if requested in {"cpu"}:
+        return "numpy"
+    if requested not in {"auto", "cuda", "cupy", "numpy"}:
+        return "auto"
+    return requested
+
+
+def _cupy_backend_status() -> Dict[str, Any]:
+    global _CUPY_BACKEND_STATUS
+    if _CUPY_BACKEND_STATUS is not None:
+        return dict(_CUPY_BACKEND_STATUS)
+    try:
+        cp = _import_cupy()
+        device_count = int(cp.cuda.runtime.getDeviceCount())
+        if device_count <= 0:
+            _CUPY_BACKEND_STATUS = {"available": False, "warning": "CuPy sin dispositivos CUDA", "device_names": []}
+            return dict(_CUPY_BACKEND_STATUS)
+        device_names: List[str] = []
+        for index in range(device_count):
+            try:
+                props = cp.cuda.runtime.getDeviceProperties(index)
+                raw_name = props.get("name", "") if isinstance(props, dict) else ""
+                if isinstance(raw_name, bytes):
+                    raw_name = raw_name.decode("utf-8", errors="ignore")
+                device_names.append(str(raw_name or f"CUDA device {index}").strip())
+            except Exception:
+                device_names.append(f"CUDA device {index}")
+        _CUPY_BACKEND_STATUS = {"available": True, "warning": "", "device_names": device_names}
+        return dict(_CUPY_BACKEND_STATUS)
+    except Exception as exc:
+        _CUPY_BACKEND_STATUS = {"available": False, "warning": f"CuPy no disponible: {exc.__class__.__name__}: {exc}", "device_names": []}
+        return dict(_CUPY_BACKEND_STATUS)
+
+
+def _import_cupy() -> Any:
+    import cupy as cp  # type: ignore
+
+    return cp
+
+
+def _scalar_from_xp(xp: Any, value: Any) -> float:
+    if xp is np:
+        return float(value)
+    return float(value.get())
 
 
 def _fit_xg_local_state(label: str, fingerprint: str) -> ScoreModelState:
@@ -670,6 +1106,8 @@ def _fit_fingerprint(key: str, history_df: pd.DataFrame | None, teams: Iterable[
         "bayes_draws": config.get("bayes_draws"),
         "bayes_tune": config.get("bayes_tune"),
         "bayes_chains": config.get("bayes_chains"),
+        "score_backend_generation": "cupy-batched-v1",
+        "sota_device": config.get("sota_device"),
     }
     digest.update(json.dumps(relevant, sort_keys=True, default=str).encode("utf-8"))
     if history_df is not None and not history_df.empty:
