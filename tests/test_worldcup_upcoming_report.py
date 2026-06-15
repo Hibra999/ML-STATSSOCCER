@@ -1639,12 +1639,53 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
         {"No.": 1, "Fecha": "2026-06-11", "Hora": "18:00 UTC+0", "Grupo": "Group A", "Equipo 1": "Mexico", "Equipo 2": "Canada", "Sede": "A"},
     ])
 
+    class FakeFeatureSource:
+        warnings = []
+
+        def context_for_match(self, model, fixture, model_key, history_df=None):
+            feature_row = {
+                "rating_diff": 25.0,
+                "recent15_goal_diff_avg_diff": 0.4,
+                "stage_group": 1.0,
+                "market_home_prob": 0.0,
+            }
+            return {
+                "available": True,
+                "model_key": model_key,
+                "reference_date": "2026-06-11",
+                "cutoff": "strictly_before_match",
+                "history_rows": 12,
+                "usage_counts": {
+                    "rating": 1,
+                    "form": 1,
+                    "odds": 0,
+                    "xg_shots": 0,
+                    "api_football": 0,
+                    "xi_players": 0,
+                    "h2h": 0,
+                    "fixture": 1,
+                    "score_grid": 0,
+                },
+                "available_families": ["rating", "form", "fixture"],
+                "feature_count": 4,
+                "feature_list": [
+                    {"name": "rating_diff", "family": "rating", "value": 25.0, "present": True},
+                    {"name": "recent15_goal_diff_avg_diff", "family": "form", "value": 0.4, "present": True},
+                    {"name": "stage_group", "family": "fixture", "value": 1.0, "present": True},
+                    {"name": "market_home_prob", "family": "odds", "value": 0.0, "present": False},
+                ],
+                "sample": {"rating_diff": 25.0, "recent15_goal_diff_avg_diff": 0.4},
+                "warnings": [],
+                "_feature_row": feature_row,
+            }
+
     monkeypatch.setattr(services, "REPORTS_ROOT", tmp_path)
     monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: ({}, "fixture-test"))
     monkeypatch.setattr(services, "build_model", lambda tournament, config: (FakeModel(), "history-test"))
     monkeypatch.setattr(services, "upcoming_fixture_rows", lambda tournament, group_filter="": fixtures)
     monkeypatch.setattr(services, "groups_from_tournament", lambda tournament: {"Group A": ["Mexico", "Canada"]})
     monkeypatch.setattr(services, "load_historical_matches", lambda refresh=False: (pd.DataFrame(), "history-test"))
+    monkeypatch.setattr(services, "benchmark_feature_source", lambda tournament, history_df, config: FakeFeatureSource())
     monkeypatch.setattr(services, "contextual_poisson_for_match", lambda *args, **kwargs: {})
 
     def fake_build_score_model(base_model, history_df, teams, config):
@@ -1660,7 +1701,11 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
         progress_callback=progress.append,
     )
 
-    assert prediction_order == services.SOTA_SCORE_MODEL_SEQUENCE
+    compact_prediction_order = []
+    for key in prediction_order:
+        if not compact_prediction_order or compact_prediction_order[-1] != key:
+            compact_prediction_order.append(key)
+    assert compact_prediction_order == services.SOTA_SCORE_MODEL_SEQUENCE
     assert fit_order == services.SOTA_SCORE_MODEL_SEQUENCE[1:]
     assert result["summary"]["sota_calculation_mode"] == "exact"
     assert "use_ml_model" not in result["summary"]
@@ -1669,8 +1714,15 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     assert result["fixture_reports"][0]["consensus"]["eligible_models"] == len(services.SOTA_SCORE_MODEL_SEQUENCE)
     assert len(result["fixture_reports"][0]["top_models_1x2"]) == min(4, len(services.SOTA_SCORE_MODEL_SEQUENCE))
     assert result["fixture_reports"][0]["consensus_score_distribution"]["available"] is True
+    assert result["fixture_reports"][0]["consensus_score_distribution"]["score_matrix"]
+    assert result["fixture_reports"][0]["consensus_score_distribution"]["score_matrix_home_goals"][0] == 0
+    assert result["fixture_reports"][0]["consensus_score_distribution"]["score_matrix_away_goals"][0] == 0
     assert result["fixture_reports"][0]["model_statistics"]["model_count"] == len(services.SOTA_SCORE_MODEL_SEQUENCE)
     assert result["fixture_reports"][0]["models"][0]["score_distribution"]["top_scores"]
+    assert result["fixture_reports"][0]["models"][0]["score_distribution"]["score_matrix"]
+    assert result["fixture_reports"][0]["models"][0]["feature_context"]["feature_list"]
+    assert result["fixture_reports"][0]["models"][0]["feature_context"]["feature_list"][0]["name"]
+    assert result["summary"]["pipeline_steps"]
     assert (tmp_path / "latest.json").exists()
     latest = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
     assert latest["report_id"] == result["report_id"]

@@ -535,6 +535,7 @@ function renderUpcomingReport(report) {
     </div>
     ${reportDownloadButtonsHtml(report.downloads || {}, false)}
     ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${sotaPipelineListHtml(summary)}
     ${clientReportHtml(fixtures)}
     <details class="technical-report-drawer">
       <summary>Vista técnica completa</summary>
@@ -544,6 +545,17 @@ function renderUpcomingReport(report) {
     </details>`;
   refreshCountdowns();
   renderTable("upcoming-predictions-table", report.table);
+}
+
+function sotaPipelineListHtml(summary) {
+  const steps = summary.pipeline_steps || [];
+  if (!steps.length) return "";
+  return `<section class="report-panel sota-pipeline-panel">
+    <header><strong>Pipeline SOTA</strong><small>Procedimiento usado para estas predicciones</small></header>
+    <ol class="sota-pipeline-list">
+      ${steps.map((step) => `<li><strong>${escapeHtml(step.name || "")}</strong><span>${escapeHtml(step.detail || "")}</span></li>`).join("")}
+    </ol>
+  </section>`;
 }
 
 function renderXgLightgbmReport(report) {
@@ -1650,6 +1662,7 @@ function clientScorePanelHtml(distribution, primary) {
     <div class="top-scores compact">
       ${topScores.slice(0, 3).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
     </div>
+    ${scoreMatrixDrawerHtml(payload, "Matriz P marcador")}
     ${scoreHeatmapDrawerHtml(payload)}
   </section>`;
 }
@@ -1691,6 +1704,7 @@ function reportFixtureCardHtml(report) {
     ${reportConsensusScoreHtml(scoreDistribution)}
     ${reportTotalsStatsHtml(stats, consensus)}
     ${recentMatches15DrawerHtml(report.recent_matches_15, fixture)}
+    ${fixtureFeatureListHtml(report)}
     ${allModelsDetailsHtml(models)}
     ${warnings.length ? `<div class="warning-list compact">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
   </article>`;
@@ -1761,8 +1775,41 @@ function reportConsensusScoreHtml(distribution) {
     <div class="top-scores compact">
       ${topScores.slice(0, 3).map((score) => `<span>${escapeHtml(score.score)} <b>${escapeHtml(formatNumber(score.probability ?? 0))}%</b></span>`).join("")}
     </div>
+    ${scoreMatrixDrawerHtml(payload, "Matriz P marcador")}
     ${scoreHeatmapDrawerHtml(payload)}
   </section>`;
+}
+
+function scoreMatrixDrawerHtml(distribution, title) {
+  const payload = distribution || {};
+  const matrix = payload.score_matrix || [];
+  if (!matrix.length) return "";
+  const homeGoals = payload.score_matrix_home_goals || matrix.map((_, index) => index);
+  const awayGoals = payload.score_matrix_away_goals || ((matrix[0] || []).map((_, index) => index));
+  const maxValue = Math.max(0.001, ...matrix.flat().map((value) => Number(value) || 0));
+  return `<details class="score-matrix-drawer">
+    <summary>${escapeHtml(title || "Matriz P marcador")}</summary>
+    <div class="score-matrix-scroll">
+      <table class="score-matrix-table">
+        <thead>
+          <tr>
+            <th>Local / Visita</th>
+            ${awayGoals.map((goal) => `<th>${escapeHtml(goal)}</th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${matrix.map((row, rowIndex) => `<tr>
+            <th>${escapeHtml(homeGoals[rowIndex] ?? rowIndex)}</th>
+            ${(row || []).map((value) => {
+              const number = Number(value) || 0;
+              const heat = Math.max(0.04, Math.min(1, number / maxValue));
+              return `<td style="--heat:${escapeAttr(heat)}"><b>${escapeHtml(formatNumber(number))}%</b></td>`;
+            }).join("")}
+          </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  </details>`;
 }
 
 function reportTotalsStatsHtml(stats, consensus) {
@@ -1839,7 +1886,46 @@ function modelConsensusRowHtml(model) {
     <span>${escapeHtml(model.top_score || "-")}</span>
     <span>λ ${escapeHtml(expected.home ?? "-")} / ${escapeHtml(expected.away ?? "-")}</span>
     <span>${escapeHtml(model.consensus_eligible ? "Cuenta" : "Excluido")}${warnings.length ? ` · ${escapeHtml(warnings[0])}` : ""}</span>
+    ${modelFeatureListHtml(model)}
   </div>`;
+}
+
+function fixtureFeatureListHtml(report) {
+  const models = (report && report.models) || [];
+  const withFeatures = models.filter((model) => (((model.feature_context || {}).feature_list || []).length));
+  if (!withFeatures.length) return "";
+  const firstContext = withFeatures[0].feature_context || {};
+  const count = firstContext.feature_count || (firstContext.feature_list || []).length;
+  return `<details class="features-drawer">
+    <summary>Features generadas (${escapeHtml(count)})</summary>
+    <div class="feature-model-list">
+      ${withFeatures.map((model) => modelFeatureListHtml(model, true)).join("")}
+    </div>
+  </details>`;
+}
+
+function modelFeatureListHtml(model, expanded) {
+  const context = ((model || {}).feature_context) || {};
+  const features = context.feature_list || [];
+  if (!features.length) return "";
+  const counts = context.usage_counts || {};
+  const familyBadges = Object.entries(counts).filter(([, count]) => Number(count || 0) > 0);
+  const label = (model || {}).model_label || (model || {}).model_key || "Modelo";
+  return `<details class="model-feature-drawer" ${expanded ? "open" : ""}>
+    <summary>${escapeHtml(label)} · ${escapeHtml(features.length)} features</summary>
+    <div class="technical-meta-row">
+      ${familyBadges.map(([family, count]) => `<span>${escapeHtml(family)} ${escapeHtml(count)}</span>`).join("")}
+      <span>cutoff ${escapeHtml(context.cutoff || "-")}</span>
+      <span>fecha ref ${escapeHtml(context.reference_date || "-")}</span>
+      <span>histórico ${escapeHtml(context.history_rows ?? "-")}</span>
+    </div>
+    <div class="feature-list-grid">
+      ${features.map((feature) => `<span class="${escapeAttr(feature.present ? "present" : "zero")}">
+        <b>${escapeHtml(feature.name || "")}</b>
+        <small>${escapeHtml(feature.family || "other")} · ${escapeHtml(formatNumber(feature.value ?? 0))}</small>
+      </span>`).join("")}
+    </div>
+  </details>`;
 }
 
 function renderUpcomingPredictions(result) {

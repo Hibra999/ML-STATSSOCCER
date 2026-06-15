@@ -660,6 +660,7 @@ def public_feature_context(
     counts = feature_usage_counts(feature_row)
     available_families = [key for key, count in counts.items() if int(count or 0) > 0]
     sample = feature_context_sample(feature_row)
+    feature_list = feature_context_list(feature_row)
     return {
         "available": bool(available_families),
         "model_key": str(model_key),
@@ -668,6 +669,8 @@ def public_feature_context(
         "history_rows": int(history_rows),
         "usage_counts": counts,
         "available_families": available_families,
+        "feature_count": len(feature_list),
+        "feature_list": feature_list,
         "sample": sample,
         "warnings": unique_strings(source_warnings),
         "_feature_row": feature_row,
@@ -689,6 +692,32 @@ def feature_usage_counts(feature_row: Dict[str, Any]) -> Dict[str, int]:
                 counts[family] += 1
                 break
     return counts
+
+
+def feature_family_for_key(key: Any) -> str:
+    key_text = str(key or "")
+    for family, prefixes in FEATURE_FAMILY_PREFIXES.items():
+        if key_text.startswith(prefixes):
+            return family
+    return "other"
+
+
+def feature_context_list(feature_row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for key, value in (feature_row or {}).items():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(number):
+            continue
+        rows.append({
+            "name": str(key),
+            "family": feature_family_for_key(key),
+            "value": round(float(number), 6),
+            "present": feature_value_is_present(number),
+        })
+    return sorted(rows, key=lambda item: (item["family"], item["name"]))
 
 
 def combined_feature_usage_counts(rows: Iterable[Dict[str, Any]]) -> Dict[str, int]:
@@ -1400,6 +1429,8 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     base_model, history_source = build_model(tournament, config)
+    feature_history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    feature_source = benchmark_feature_source(tournament, feature_history_df, config)
     limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
     group_filter = str(payload.get("group") or "").strip()
     fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter).head(limit).copy()
@@ -1413,6 +1444,8 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         start_time=start_time,
         hardware=hardware,
         model_sequence=model_sequence,
+        history_df=feature_history_df,
+        feature_source=feature_source,
         progress_callback=progress_callback,
     )
     monte_carlo_seed_rng = (
@@ -1457,9 +1490,11 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         "sota_calculation_label": sota_calculation_summary(config),
         "monte_carlo_iterations": config["iterations"] if config.get("sota_calculation_mode") == "monte_carlo" else 0,
         "score_models": model_sequence,
+        "pipeline_steps": sota_pipeline_steps(config),
+        "feature_source_warnings": unique_strings(feature_source.warnings),
         "hardware": hardware,
         "results_autorefresh": results_autorefresh,
-        "warnings": unique_strings(hardware.get("warnings", [])),
+        "warnings": unique_strings([*hardware.get("warnings", []), *feature_source.warnings]),
         "config": config,
     }
     report = persist_upcoming_report({
@@ -1808,6 +1843,47 @@ def xg_lightgbm_training_procedure() -> Dict[str, Any]:
             {"name": "Activacion", "detail": "Guarda el bundle dual_markets como modelo activo para el pipeline de predicciones xG-LightGBM."},
         ],
     }
+
+
+def sota_pipeline_steps(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "name": "Fixtures futuros",
+            "detail": "Carga calendario Mundial 2026, resultados confirmados y filtro de grupo/limite solicitado.",
+        },
+        {
+            "name": "Poisson base",
+            "detail": (
+                f"Construye rating ofensivo/defensivo con historico mundialista y max_goals={int(config.get('max_goals') or DEFAULT_CONFIG['max_goals'])}."
+            ),
+        },
+        {
+            "name": "Contexto recent15",
+            "detail": (
+                f"Ajusta lambdas con ultimos {int(config.get('poisson_recent_matches') or DEFAULT_CONFIG['poisson_recent_matches'])} partidos disponibles antes del fixture."
+            ),
+        },
+        {
+            "name": "Features as-of",
+            "detail": "Genera historial, H2H, mercado, xG/API-Football, recent15, XI/jugadores y stage sin usar datos posteriores al partido.",
+        },
+        {
+            "name": "Modelos SOTA",
+            "detail": "Evalua Poisson independiente, Dixon-Coles MLE y bivariado Poisson MLE sobre el mismo fixture.",
+        },
+        {
+            "name": "Matriz de marcador",
+            "detail": "Calcula P(goles_local, goles_visita), 1X2, U/O 0.5-3.5 y top marcadores por modelo.",
+        },
+        {
+            "name": "Consenso",
+            "detail": "Promedia matrices/probabilidades elegibles; si se elige Monte Carlo, simula sobre la matriz consenso.",
+        },
+        {
+            "name": "Reporte",
+            "detail": "Entrega tarjetas cliente, detalle tecnico, matrices P, lista de features y trazabilidad de fuentes.",
+        },
+    ]
 
 
 def xg_lightgbm_training_payload(payload: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -4226,6 +4302,8 @@ def score_distribution_payload(grid: np.ndarray, lambda_home: float, lambda_away
             [round(float(grid[home_goals, away_goals]) * 100.0, 3) for away_goals in range(grid.shape[1])]
             for home_goals in range(grid.shape[0])
         ],
+        "score_matrix_home_goals": list(range(grid.shape[0])),
+        "score_matrix_away_goals": list(range(grid.shape[1])),
         "heatmap": {
             "home_goals": list(range(visible_goals + 1)),
             "away_goals": list(range(visible_goals + 1)),

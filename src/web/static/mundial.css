@@ -1824,6 +1824,108 @@ h3 { font-size: 16px; }
   font-size: 11px;
   font-weight: 800;
 }
+.sota-pipeline-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+}
+.sota-pipeline-list li {
+  color: var(--muted);
+  font-size: 12px;
+}
+.sota-pipeline-list strong {
+  display: block;
+  color: var(--ink);
+  font-size: 13px;
+}
+.features-drawer,
+.model-feature-drawer,
+.score-matrix-drawer {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.features-drawer summary,
+.model-feature-drawer summary,
+.score-matrix-drawer summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+}
+.feature-model-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 8px 8px;
+}
+.model-feature-drawer {
+  min-width: 0;
+}
+.model-feature-drawer .technical-meta-row {
+  padding: 0 8px 8px;
+}
+.feature-list-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 6px;
+  max-height: 360px;
+  overflow: auto;
+  padding: 0 8px 8px;
+}
+.feature-list-grid span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #f8fafb;
+}
+.feature-list-grid b {
+  color: var(--ink);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.feature-list-grid small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+.feature-list-grid span.zero {
+  opacity: 0.56;
+}
+.score-matrix-scroll {
+  overflow: auto;
+  padding: 0 8px 8px;
+}
+.score-matrix-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: separate;
+  border-spacing: 2px;
+  font-size: 10px;
+}
+.score-matrix-table th,
+.score-matrix-table td {
+  min-width: 42px;
+  padding: 6px;
+  border-radius: 4px;
+  text-align: center;
+}
+.score-matrix-table th {
+  background: #eef3f2;
+  color: var(--muted);
+  font-weight: 900;
+}
+.score-matrix-table td {
+  background: rgba(15, 122, 95, calc(0.08 + (var(--heat, 0) * 0.42)));
+  color: var(--ink);
+}
+.score-matrix-table td b {
+  font-weight: 900;
+}
 .consensus-badge {
   display: inline-flex;
   align-items: center;
@@ -1866,6 +1968,9 @@ h3 { font-size: 16px; }
 }
 .model-consensus-row.fallback {
   background: #fff8f0;
+}
+.model-consensus-row .model-feature-drawer {
+  grid-column: 1 / -1;
 }
 .alternative-model-list {
   display: grid;
