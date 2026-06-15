@@ -78,11 +78,16 @@ from src.worldcup.training import (
     XG_LIGHTGBM_PROFILE,
     build_history_feature_table,
     build_matchup_feature_table,
+    dataset_status as worldcup_training_dataset_status,
     default_model_id,
     json_safe,
+    list_worldcup_models,
     match_feature_row,
+    prepare_training_dataset,
     predict_match_payload,
     read_model_metadata,
+    train_hybrid_model,
+    training_options,
 )
 from src.worldcup.lanus_provider import (
     LINEUPS_ROOT,
@@ -1717,6 +1722,166 @@ def xg_lightgbm_report_table_rows(fixture_reports: List[Dict[str, Any]]) -> List
             "Warnings": " | ".join(report.get("warnings", [])),
         })
     return rows
+
+
+def xg_lightgbm_training_status() -> Dict[str, Any]:
+    dataset = worldcup_training_dataset_status()
+    options = training_options()
+    catalog = list_worldcup_models()
+    default_id = default_model_id(XG_LIGHTGBM_PROFILE, "dual_markets")
+    active_model = read_model_metadata()
+    default_model = read_model_metadata(model_id=default_id)
+    xg_models = [
+        model for model in catalog.get("models", [])
+        if model.get("model_profile") == XG_LIGHTGBM_PROFILE
+    ]
+    selected_model = active_model if active_model.get("model_profile") == XG_LIGHTGBM_PROFILE else default_model
+    if not selected_model.get("trained") and xg_models:
+        selected_model = xg_models[0]
+    required_markets = [
+        {"key": "result", "label": "1X2"},
+        {"key": "over_under_05", "label": "U/O 0.5"},
+        {"key": "over_under_15", "label": "U/O 1.5"},
+        {"key": "over_under_25", "label": "U/O 2.5"},
+        {"key": "over_under_35", "label": "U/O 3.5"},
+    ]
+    optional_markets = [{"key": "goals_distribution", "label": "Distribucion goles"}] if dataset.get("prepared_goals_distribution_ready") else []
+    defaults = xg_lightgbm_training_payload({})
+    split = {
+        "policy": dataset.get("split_policy") or "temporal_80_10_10",
+        "train_rows": int(dataset.get("train_rows", 0) or 0),
+        "validation_rows": int(dataset.get("validation_rows", 0) or 0),
+        "test_rows": int(dataset.get("test_rows", 0) or 0),
+        "eval_strategy": dataset.get("eval_strategy", ""),
+        "training_start_year": dataset.get("training_start_year", ""),
+        "max_label_date": dataset.get("max_label_date", ""),
+        "label_source": dataset.get("prepared_label_source", ""),
+    }
+    planned_market_count = len(required_markets) + len(optional_markets)
+    trials_per_market = int(defaults.get("n_trials", 12) or 12) if defaults.get("tuning_enabled") else 0
+    can_train = bool(dataset.get("etl_ready") and not dataset.get("etl_stale") and dataset.get("trainable") and split["train_rows"] and split["validation_rows"] and split["test_rows"])
+    return json_safe({
+        "title": XG_LIGHTGBM_PIPELINE_LABEL,
+        "pipeline_mode": XG_LIGHTGBM_PIPELINE_MODE,
+        "procedure": xg_lightgbm_training_procedure(),
+        "dataset": dataset,
+        "split": split,
+        "can_train": can_train,
+        "defaults": defaults,
+        "options": {
+            "profile": next((profile for profile in options.get("model_profiles", []) if profile.get("key") == XG_LIGHTGBM_PROFILE), {}),
+            "feature_profiles": options.get("feature_profiles", []),
+            "hardware": options.get("hardware", {}),
+            "samplers": ["tpe", "random", "cmaes"],
+            "pruners": ["none", "median", "successive-halving"],
+            "objectives": ["F1", "Accuracy", "Precision", "Recall"],
+            "required_markets": required_markets,
+            "optional_markets": optional_markets,
+            "planned_market_count": planned_market_count,
+            "default_trials_per_market": trials_per_market,
+            "default_total_trial_budget": planned_market_count * trials_per_market,
+        },
+        "model": xg_lightgbm_model_summary(selected_model),
+        "models": xg_models,
+        "active_model_is_xg": bool(active_model.get("model_profile") == XG_LIGHTGBM_PROFILE),
+        "default_model_id": default_id,
+        "anti_leakage": "Features historicas, recent15, API/xG y mercados se calculan as-of antes de la fecha del partido; Optuna usa validation temporal y test queda bloqueado.",
+    })
+
+
+def xg_lightgbm_training_procedure() -> Dict[str, Any]:
+    return {
+        "title": "Procedimiento xG-LightGBM Mundial 2026",
+        "steps": [
+            {"name": "Preparar ETL", "detail": "Construye artifact internacional con labels 1X2, U/O 0.5-3.5 y split temporal 80/10/10."},
+            {"name": "Features sin leakage", "detail": "Calcula Elo, forma recent15, xG, tiros, mercado y API-Football solo con informacion anterior al partido."},
+            {"name": "Fine-tuning Optuna", "detail": "Optimiza LightGBM por mercado usando exclusivamente validation temporal; el test no participa en seleccion."},
+            {"name": "Fit final", "detail": "Reentrena cada mercado con train + validation y conserva test para reporte final."},
+            {"name": "Reporte profesional", "detail": "Guarda metricas, matrices de confusion, top features, device usado y warnings por mercado."},
+            {"name": "Activacion", "detail": "Guarda el bundle dual_markets como modelo activo para el pipeline de predicciones xG-LightGBM."},
+        ],
+    }
+
+
+def xg_lightgbm_training_payload(payload: Dict[str, Any] | None) -> Dict[str, Any]:
+    payload = payload or {}
+    sampler = str(payload.get("optuna_sampler") or "tpe").strip().lower()
+    if sampler not in {"tpe", "random", "cmaes"}:
+        sampler = "tpe"
+    pruner = str(payload.get("optuna_pruner") or "none").strip().lower()
+    if pruner not in {"none", "median", "successive-halving"}:
+        pruner = "none"
+    objective = str(payload.get("objective") or "F1").strip() or "F1"
+    if objective not in {"F1", "Accuracy", "Precision", "Recall"}:
+        objective = "F1"
+    device = str(payload.get("device") or "auto").strip().lower()
+    if device not in {"auto", "cpu", "cuda"}:
+        device = "auto"
+    default_id = default_model_id(XG_LIGHTGBM_PROFILE, "dual_markets")
+    return {
+        "model_profile": XG_LIGHTGBM_PROFILE,
+        "model_type": "lightgbm",
+        "model_id": str(payload.get("model_id") or default_id).strip() or default_id,
+        "model_name": str(payload.get("model_name") or "xG-LightGBM Mundial 2026").strip() or "xG-LightGBM Mundial 2026",
+        "training_target": "result",
+        "target": "result",
+        "market_mode": "dual_markets",
+        "feature_profile": str(payload.get("feature_profile") or "balanced").strip() or "balanced",
+        "max_features": int(_clamp_int(payload.get("max_features", 450), 120, 1200)),
+        "device": device,
+        "n_jobs": int(_clamp_int(payload.get("n_jobs", -1), -1, 128)),
+        "tuning_enabled": bool(payload.get("tuning_enabled", True)),
+        "n_trials": int(_clamp_int(payload.get("n_trials", 12), 1, 100)),
+        "optuna_sampler": sampler,
+        "optuna_pruner": pruner,
+        "objective": objective,
+        "tune_params": str(payload.get("tune_params") or "all").strip() or "all",
+        "seed": int(_clamp_int(payload.get("seed", 2026), 1, 999999)),
+        "refresh_history": bool(payload.get("refresh_history", False)),
+        "feature_progress_every": int(_clamp_int(payload.get("feature_progress_every", 1000), 100, 5000)),
+    }
+
+
+def xg_lightgbm_prepare_training(payload: Dict[str, Any] | None = None, progress_callback=None) -> Dict[str, Any]:
+    payload = payload or {}
+    start_time = time.monotonic()
+    emit_job_progress(progress_callback, "prepare_etl", 0, 2, "Preparando ETL xG-LightGBM")
+    prepare_training_dataset(
+        force=bool(payload.get("force", True)),
+        refresh_history=bool(payload.get("refresh_history", False)),
+    )
+    emit_job_progress(
+        progress_callback,
+        "prepare_etl",
+        1,
+        2,
+        "ETL preparado; recalculando estado",
+        elapsed_seconds=round(time.monotonic() - start_time, 1),
+    )
+    status = xg_lightgbm_training_status()
+    emit_job_progress(
+        progress_callback,
+        "complete",
+        2,
+        2,
+        "ETL xG-LightGBM listo",
+        elapsed_seconds=round(time.monotonic() - start_time, 1),
+    )
+    return status
+
+
+def xg_lightgbm_train_model(payload: Dict[str, Any] | None = None, progress_callback=None) -> Dict[str, Any]:
+    payload = xg_lightgbm_training_payload(payload)
+    tournament, fixture_source = load_tournament_2026(refresh=False)
+    result = train_hybrid_model(tournament, payload=payload, progress_callback=progress_callback)
+    status = xg_lightgbm_training_status()
+    return {
+        "fixture_source": fixture_source,
+        "payload": payload,
+        "training": result,
+        "status": status,
+        "model": status.get("model", {}),
+    }
 
 
 def alternatives_benchmark_report(

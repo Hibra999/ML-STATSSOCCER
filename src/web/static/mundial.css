@@ -821,6 +821,16 @@ h3 { font-size: 16px; }
 .clean-dock {
   grid-template-columns: minmax(220px, 1fr) minmax(190px, 230px) 110px 120px minmax(150px, 190px) minmax(240px, 1fr) auto;
 }
+.xg-training-dock {
+  grid-template-columns: minmax(230px, 1fr) minmax(220px, 260px) minmax(220px, 280px) minmax(150px, 180px) 120px 110px 90px;
+}
+.xg-training-dock .inline-control-row,
+.xg-training-dock .actions-row {
+  grid-column: 1 / -1;
+}
+.xg-training-dock .inline-control-row {
+  grid-template-columns: minmax(190px, 1.2fr) repeat(4, minmax(130px, 1fr));
+}
 .inline-control-row {
   display: grid;
   grid-template-columns: minmax(150px, 1fr) auto;
@@ -3150,7 +3160,8 @@ th {
   }
   .hardware-compact,
   .training-main-grid,
-  .simulation-grid {
+  .simulation-grid,
+  .xg-training-dock .inline-control-row {
     grid-template-columns: repeat(2, minmax(130px, 1fr));
   }
   .model-state-grid {
@@ -3200,6 +3211,9 @@ th {
   .simulation-grid,
   .simulation-layout,
   .training-inline-grid {
+    grid-template-columns: 1fr;
+  }
+  .xg-training-dock .inline-control-row {
     grid-template-columns: 1fr;
   }
   .metric-card-grid,

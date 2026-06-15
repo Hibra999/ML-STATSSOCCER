@@ -92,6 +92,9 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/fixtures/{fixture_id}/player-stats" not in paths
     assert "/api/mundial/player-features" not in paths
     assert not any(path.startswith("/api/mundial/training") for path in paths)
+    assert "/api/mundial/xg-lightgbm/training/status" in paths
+    assert "/api/mundial/xg-lightgbm/training/prepare" in paths
+    assert "/api/mundial/xg-lightgbm/training/train" in paths
     assert "/api/mundial/models" not in paths
     assert "/api/mundial/models/train" not in paths
     assert "/api/mundial/models/select" not in paths
@@ -262,11 +265,17 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-use-ml-model" not in html_source
     assert "training-train" not in html_source
     assert "worldcup-training-progress" not in html_source
+    assert "worldcup-xg-progress" in html_source
     assert "worldcup-simulation-progress" in html_source
     assert "training-retrain-base" not in html_source
     assert "training-retrain-players" not in html_source
     assert "training-walkforward-notice" not in html_source
     assert "worldcup-model-type" not in html_source
+    assert "xg-model-id" in html_source
+    assert "xg-train" in html_source
+    assert "xg-tuning-enabled" in html_source
+    assert "xg-n-trials" in html_source
+    assert "xg-device" in html_source
     assert "worldcup-tuning-enabled" not in html_source
     assert "worldcup-device" not in html_source
     assert "worldcup-n-jobs" not in html_source
@@ -310,6 +319,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "worldcup-target" not in html_source
     assert "lineup-features-table" not in html_source
     assert "/api/mundial/simulate" in app_source
+    assert "/api/mundial/xg-lightgbm/training/status" in app_source
+    assert "/api/mundial/xg-lightgbm/training/prepare" in app_source
+    assert "/api/mundial/xg-lightgbm/training/train" in app_source
     assert "/api/mundial/player-features" not in app_source
     assert "/api/mundial/models" not in app_source
     assert "/api/mundial/models/train" not in app_source
@@ -328,17 +340,17 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Benchmark histórico" not in app_source
     assert "benchmark historico" not in app_source
     assert "ultimo Mundial test" not in app_source
-    assert "Test final bloqueado" not in app_source
-    assert "model.warnings" not in app_source
+    assert "test bloqueado" in app_source
+    assert "model.warnings" in app_source
     assert "holdout temporal" not in app_source
     assert "renderConfusionMatrix" not in app_source
     assert "confusionSummaryHtml" not in app_source
     assert "FP/FN por clase" not in app_source
     assert "renderEtlFlow" not in app_source
     assert "renderTuningFlow" not in app_source
-    assert "dual_markets" not in app_source
-    assert "hibrido" not in app_source
-    assert "market-panel" not in app_source
+    assert "dual_markets" in app_source
+    assert "hibrido" in html_source
+    assert "market-panel" in app_source
     assert "renderWalkForwardNotice" not in app_source
     assert "renderHeroHardware" in app_source
     assert "hardwareChip(\"CUDA\"" in app_source
@@ -406,8 +418,46 @@ def test_mundial_training_and_model_endpoints_are_removed():
     client = TestClient(create_mundial_app())
 
     assert client.get("/api/mundial/training/status").status_code == 404
+    assert client.get("/api/mundial/xg-lightgbm/training/status").status_code == 200
     assert client.get("/api/mundial/models").status_code == 404
     assert client.post("/api/mundial/models/train", json={}).status_code == 404
+
+
+def test_mundial_xg_lightgbm_training_endpoint_returns_job_and_progress(monkeypatch):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    from src.web import mundial_services
+    from src.web.mundial import create_mundial_app
+
+    def fake_train(payload, progress_callback=None):
+        assert payload["model_type"] == "xgboost"
+        if progress_callback:
+            progress_callback({
+                "stage": "tuning",
+                "current": 1,
+                "total": 2,
+                "current_trial": 1,
+                "total_trials": 24,
+                "percent": 50,
+                "message": "Fine-tuning 1X2",
+                "market": "1X2",
+                "best_value": 0.8,
+            })
+        return {"status": {"pipeline_mode": "xg_lightgbm", "model": {"model_profile": "xg_lightgbm"}}}
+
+    monkeypatch.setattr(mundial_services, "xg_lightgbm_train_model", fake_train)
+    client = TestClient(create_mundial_app())
+
+    response = client.post("/api/mundial/xg-lightgbm/training/train", json={"model_type": "xgboost"})
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    job = wait_for_job(client, payload["data"]["job_id"])
+    assert job["status"] == "succeeded"
+    assert job["progress"]["stage"] == "tuning"
+    assert job["progress"]["market"] == "1X2"
+    assert job["result"]["status"]["model"]["model_profile"] == "xg_lightgbm"
 
 
 def test_mundial_upcoming_report_endpoint_returns_job_and_progress(monkeypatch):
@@ -600,6 +650,31 @@ def test_worldcup_xg_lightgbm_profile_defaults_and_targets():
     assert training.normalize_training_target("over_under_15") == "over_under_15"
     assert training.normalize_training_target("over_under_25") == "over_under_25"
     assert training.normalize_training_target("over_under_35") == "over_under_35"
+
+
+def test_worldcup_xg_lightgbm_training_service_payload_is_locked():
+    from src.web import mundial_services as services
+
+    payload = services.xg_lightgbm_training_payload({
+        "model_type": "xgboost",
+        "model_profile": "",
+        "market_mode": "single",
+        "training_target": "over_under_25",
+        "device": "cuda",
+        "n_trials": 24,
+        "optuna_sampler": "random",
+        "optuna_pruner": "median",
+    })
+
+    assert payload["model_type"] == "lightgbm"
+    assert payload["model_profile"] == "xg_lightgbm"
+    assert payload["market_mode"] == "dual_markets"
+    assert payload["training_target"] == "result"
+    assert payload["device"] == "cuda"
+    assert payload["tuning_enabled"] is True
+    assert payload["n_trials"] == 24
+    assert payload["optuna_sampler"] == "random"
+    assert payload["optuna_pruner"] == "median"
 
 
 def test_worldcup_detect_hardware_uses_nvidia_smi_from_path(monkeypatch):

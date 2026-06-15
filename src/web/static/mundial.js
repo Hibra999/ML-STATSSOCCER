@@ -6,12 +6,14 @@ const state = {
   players: [],
   teamAssets: new Map(),
   defaultsApplied: false,
+  xgDefaultsApplied: false,
   countdownTimer: null,
   jobs: new Map(),
   jobTimer: null,
   jobPollingInFlight: false,
   lastSimulation: null,
   lastUpcomingReport: null,
+  xgLightgbm: null,
 };
 
 const jobLabels = {
@@ -45,6 +47,9 @@ function bindEvents() {
   bind("players-refresh", "click", () => loadPlayers(true));
   bind("upcoming-predict-btn", "click", runUpcomingPredictions);
   bind("upcoming-pipeline-mode", "change", syncUpcomingPipelineControls);
+  bind("xg-refresh-status", "click", () => loadXgLightgbmStatus(true));
+  bind("xg-prepare-etl", "click", runXgLightgbmPrepare);
+  bind("xg-train", "click", runXgLightgbmTraining);
   poissonRecentInputIds.forEach((id) => {
     const input = document.getElementById(id);
     if (input) input.addEventListener("change", () => syncPoissonRecentInputs(input));
@@ -67,13 +72,14 @@ async function loadAll(refresh) {
   clearAlert();
   setLoading();
   try {
-    const [overview, groups, fixtures, teams, players, procedure] = await Promise.all([
+    const [overview, groups, fixtures, teams, players, procedure, xgStatus] = await Promise.all([
       api(`/api/mundial/overview?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/groups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/fixtures?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/teams?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/players?refresh=${refresh ? "true" : "false"}`),
       api("/api/mundial/procedure"),
+      api("/api/mundial/xg-lightgbm/training/status"),
     ]);
     state.overview = overview;
     state.groups = groups.groups || [];
@@ -93,6 +99,7 @@ async function loadAll(refresh) {
     fillSimulationGroupFilter();
     renderPlayers(players);
     renderProcedure(procedure);
+    renderXgLightgbmTrainingStatus(xgStatus);
   } catch (error) {
     showError(error.message);
   }
@@ -106,6 +113,11 @@ function setLoading() {
   document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones pendientes");
   document.getElementById("upcoming-report").innerHTML = loadingHtml("Reporte pendiente");
   renderWorldcupJobProgress("upcoming-report");
+  const xgSummary = document.getElementById("xg-lightgbm-summary");
+  if (xgSummary) xgSummary.textContent = "Cargando pipeline xG-LightGBM";
+  const xgStatus = document.getElementById("xg-status-cards");
+  if (xgStatus) xgStatus.innerHTML = loadingHtml("Cargando entrenamiento xG-LightGBM");
+  renderWorldcupJobProgress("xg-training");
   document.getElementById("match-simulation-grid").innerHTML = loadingHtml("Monte Carlo pendiente");
   document.getElementById("match-simulation-table").innerHTML = "";
   document.getElementById("simulation-summary").innerHTML = "";
@@ -657,6 +669,258 @@ function xgLightgbmModelMetadataHtml(model) {
     </div>
     ${marketKeys.length ? `<div class="technical-meta-row">${marketKeys.map((key) => `<span>${escapeHtml(key)}</span>`).join("")}</div>` : ""}
   </section>`;
+}
+
+async function loadXgLightgbmStatus(manual = false) {
+  clearAlert();
+  if (manual) document.getElementById("xg-lightgbm-summary").textContent = "Actualizando estado xG-LightGBM...";
+  try {
+    const status = await api("/api/mundial/xg-lightgbm/training/status");
+    renderXgLightgbmTrainingStatus(status);
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function runXgLightgbmPrepare() {
+  clearAlert();
+  document.getElementById("xg-lightgbm-summary").textContent = "Preparando ETL xG-LightGBM...";
+  try {
+    const job = await api("/api/mundial/xg-lightgbm/training/prepare", jsonOptions({
+      force: true,
+      refresh_history: false,
+    }));
+    trackWorldcupJob(job, "xg-prepare");
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function runXgLightgbmTraining() {
+  clearAlert();
+  document.getElementById("xg-lightgbm-summary").textContent = "Entrenando bundle xG-LightGBM...";
+  try {
+    const job = await api("/api/mundial/xg-lightgbm/training/train", jsonOptions(xgLightgbmTrainingPayload()));
+    trackWorldcupJob(job, "xg-training");
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+function xgLightgbmTrainingPayload() {
+  return {
+    model_id: (document.getElementById("xg-model-id") || {}).value || "mundial-xg-lightgbm-hibrido",
+    model_name: (document.getElementById("xg-model-name") || {}).value || "xG-LightGBM Mundial 2026",
+    feature_profile: (document.getElementById("xg-feature-profile") || {}).value || "balanced",
+    max_features: Number((document.getElementById("xg-max-features") || {}).value || 450),
+    device: (document.getElementById("xg-device") || {}).value || "auto",
+    n_jobs: Number((document.getElementById("xg-n-jobs") || {}).value || -1),
+    tuning_enabled: Boolean((document.getElementById("xg-tuning-enabled") || {}).checked),
+    n_trials: Number((document.getElementById("xg-n-trials") || {}).value || 12),
+    optuna_sampler: (document.getElementById("xg-optuna-sampler") || {}).value || "tpe",
+    optuna_pruner: (document.getElementById("xg-optuna-pruner") || {}).value || "none",
+    objective: (document.getElementById("xg-objective") || {}).value || "F1",
+    tune_params: "all",
+    seed: Number((document.getElementById("sim-seed") || {}).value || 2026),
+    refresh_history: false,
+  };
+}
+
+function renderXgLightgbmTrainingStatus(payload) {
+  state.xgLightgbm = payload || {};
+  const status = state.xgLightgbm;
+  const dataset = status.dataset || {};
+  const split = status.split || {};
+  const model = status.model || {};
+  const options = status.options || {};
+  applyXgLightgbmDefaults(status);
+  const etlLabel = dataset.etl_ready && !dataset.etl_stale ? "Listo" : dataset.etl_stale ? "Desactualizado" : "Pendiente";
+  const modelLabel = model.trained ? (model.model_name || model.model_id || "Entrenado") : "No entrenado";
+  const budget = Number(options.default_total_trial_budget || 0);
+  document.getElementById("xg-lightgbm-summary").textContent =
+    `xG-LightGBM - ETL ${etlLabel} - train/val/test ${split.train_rows || 0}/${split.validation_rows || 0}/${split.test_rows || 0} - ${modelLabel}`;
+  document.getElementById("xg-status-cards").innerHTML = `
+    ${reportSummaryCard("ETL", etlLabel)}
+    ${reportSummaryCard("Train/Val/Test", `${split.train_rows || 0}/${split.validation_rows || 0}/${split.test_rows || 0}`)}
+    ${reportSummaryCard("Labels", split.label_source || dataset.prepared_label_source || "-")}
+    ${reportSummaryCard("Optuna default", budget ? `${options.default_trials_per_market || 0} x ${options.planned_market_count || 0} = ${budget}` : "Off")}
+    ${reportSummaryCard("Modelo", modelLabel)}
+    ${reportSummaryCard("Device", `${((model.hardware || {}).actual_device) || ((options.hardware || {}).device_default) || "auto"}`)}
+  `;
+  document.getElementById("xg-etl-subtitle").textContent = `${split.policy || "temporal_80_10_10"} · max label ${split.max_label_date || "-"}`;
+  document.getElementById("xg-model-subtitle").textContent = model.trained ? `${model.model_id || ""} · ${formatReportDateTime(model.trained_at || "")}` : status.default_model_id || "Sin bundle entrenado";
+  document.getElementById("xg-market-subtitle").textContent = `${(options.required_markets || []).length} mercados requeridos${(options.optional_markets || []).length ? " + distribución goles" : ""}`;
+  document.getElementById("xg-tuning-subtitle").textContent = status.anti_leakage || "Validation temporal";
+  document.getElementById("xg-procedure-list").innerHTML = xgProcedureHtml(status.procedure || {});
+  document.getElementById("xg-etl-flow").innerHTML = xgEtlFlowHtml(dataset);
+  document.getElementById("xg-model-state").innerHTML = xgModelStateHtml(model, status);
+  document.getElementById("xg-market-metrics").innerHTML = xgMarketMetricsHtml(model);
+  document.getElementById("xg-tuning-flow").innerHTML = xgTrainingTuningHtml(model, options);
+  document.getElementById("xg-feature-importance").innerHTML = xgFeatureImportanceHtml(model);
+  renderTable("xg-preview-table", (dataset.preview || {}));
+}
+
+function applyXgLightgbmDefaults(status) {
+  if (state.xgDefaultsApplied) return;
+  const defaults = status.defaults || {};
+  const pairs = {
+    "xg-model-id": defaults.model_id,
+    "xg-model-name": defaults.model_name,
+    "xg-feature-profile": defaults.feature_profile,
+    "xg-max-features": defaults.max_features,
+    "xg-device": defaults.device,
+    "xg-n-jobs": defaults.n_jobs,
+    "xg-n-trials": defaults.n_trials,
+    "xg-optuna-sampler": defaults.optuna_sampler,
+    "xg-optuna-pruner": defaults.optuna_pruner,
+    "xg-objective": defaults.objective,
+  };
+  Object.entries(pairs).forEach(([id, value]) => {
+    const input = document.getElementById(id);
+    if (input && value !== undefined && value !== "") input.value = value;
+  });
+  const tuning = document.getElementById("xg-tuning-enabled");
+  if (tuning) tuning.checked = defaults.tuning_enabled !== false;
+  state.xgDefaultsApplied = true;
+}
+
+function xgProcedureHtml(procedure) {
+  return ((procedure || {}).steps || []).map((step, index) => `
+    <article class="etl-step">
+      <span>${escapeHtml(index + 1)}</span>
+      <div><strong>${escapeHtml(step.name || "")}</strong><small>${escapeHtml(step.detail || "")}</small></div>
+      <b>OK</b>
+    </article>`).join("") || loadingHtml("Procedimiento pendiente");
+}
+
+function xgEtlFlowHtml(dataset) {
+  const steps = dataset.etl_steps || [];
+  if (!steps.length) return loadingHtml("ETL pendiente");
+  return steps.map((step, index) => {
+    const status = step.status || (step.count ? "ok" : "pending");
+    return `<article class="etl-step ${escapeAttr(status)}">
+      <span>${escapeHtml(index + 1)}</span>
+      <div><strong>${escapeHtml(step.name || "")}</strong><small>${escapeHtml(step.detail || "")}</small></div>
+      <b>${escapeHtml(step.count ?? "")}</b>
+    </article>`;
+  }).join("");
+}
+
+function xgModelStateHtml(model, status) {
+  const hardware = model.hardware || {};
+  const dataset = (status || {}).dataset || {};
+  const warnings = [...(model.warnings || []), ...(dataset.prepared_warnings || [])];
+  return `
+    <div class="metric-card-grid">
+      ${reportSummaryCard("Entrenado", model.trained ? "Si" : "No")}
+      ${reportSummaryCard("Perfil", model.model_profile || "xg_lightgbm")}
+      ${reportSummaryCard("Mercado", model.market_mode || "dual_markets")}
+      ${reportSummaryCard("CUDA", hardware.cuda_available ? "Si" : "No")}
+      ${reportSummaryCard("Device usado", hardware.actual_device || hardware.requested_device || "-")}
+      ${reportSummaryCard("Features", model.feature_count || ((model.top_features || []).length ? "Top cargadas" : "-"))}
+    </div>
+    ${warnings.length ? `<div class="warning-list compact">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+  `;
+}
+
+function xgMarketMetricsHtml(model) {
+  const markets = model.markets || {};
+  const keys = Object.keys(markets);
+  if (!keys.length) return loadingHtml("Entrena el bundle para ver métricas por mercado");
+  return keys.map((key) => xgMarketPanelHtml(key, markets[key] || {})).join("");
+}
+
+function xgMarketPanelHtml(key, market) {
+  const metrics = market.metrics || {};
+  const evalMetrics = metrics.eval || {};
+  const trainMetrics = metrics.train || {};
+  return `<section class="market-panel">
+    <header><strong>${escapeHtml(market.label || key)}</strong><small>${escapeHtml(market.model_id || "")}</small></header>
+    <div class="confusion-summary">
+      ${xgMetricCard("Eval Accuracy", evalMetrics.Accuracy)}
+      ${xgMetricCard("Eval F1", evalMetrics.F1)}
+      ${xgMetricCard("Precision", evalMetrics.Precision)}
+      ${xgMetricCard("Recall", evalMetrics.Recall)}
+      ${xgMetricCard("LogLoss", evalMetrics.LogLoss)}
+      ${xgMetricCard("Brier", evalMetrics.Brier)}
+      ${xgMetricCard("Train rows", market.train_rows)}
+      ${xgMetricCard("Val/Test", `${market.validation_rows || 0}/${market.eval_rows || 0}`)}
+    </div>
+    ${xgConfusionMatrixHtml(market.confusion_matrix || {})}
+    <details>
+      <summary>Train metrics</summary>
+      <div class="technical-meta-row">
+        ${Object.entries(trainMetrics).map(([name, value]) => `<span>${escapeHtml(name)} ${escapeHtml(formatNumber(value))}</span>`).join("")}
+      </div>
+    </details>
+  </section>`;
+}
+
+function xgMetricCard(label, value) {
+  return `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value === undefined || value === null || value === "" ? "-" : formatNumber(value))}</strong></article>`;
+}
+
+function xgConfusionMatrixHtml(confusion) {
+  const labels = confusion.labels || [];
+  const matrix = confusion.matrix || [];
+  if (!labels.length || !matrix.length) return "";
+  const maxValue = Math.max(1, ...matrix.flat().map((value) => Number(value) || 0));
+  return `<div class="confusion-wrap">
+    <div class="confusion-grid" style="grid-template-columns: 90px repeat(${escapeAttr(labels.length)}, minmax(64px, 1fr));">
+      <strong></strong>
+      ${labels.map((label) => `<strong>${escapeHtml(label)}</strong>`).join("")}
+      ${labels.map((actual, rowIndex) => `
+        <strong class="confusion-axis">${escapeHtml(actual)}</strong>
+        ${labels.map((predicted, columnIndex) => {
+          const value = Number((matrix[rowIndex] || [])[columnIndex] || 0);
+          const intensity = value / maxValue;
+          return `<div class="confusion-cell ${rowIndex === columnIndex ? "correct" : ""}" style="--intensity:${escapeAttr(intensity)}"><b>${escapeHtml(value)}</b><small>${escapeHtml(predicted)}</small></div>`;
+        }).join("")}
+      `).join("")}
+    </div>
+  </div>`;
+}
+
+function xgTrainingTuningHtml(model, options) {
+  const markets = model.markets || {};
+  const trace = model.tuning_trace || {};
+  const marketKeys = Object.keys(markets);
+  const budget = options.default_total_trial_budget || 0;
+  if (!model.trained && !budget) return loadingHtml("Fine-tuning pendiente");
+  const head = `<article class="tuning-head">
+    <strong>${escapeHtml(trace.enabled ? "Optuna ejecutado" : "Optuna configurado")}</strong>
+    <small>${escapeHtml(trace.trials || budget || 0)} trials · ${escapeHtml(trace.sampler || "tpe")} · test bloqueado</small>
+  </article>`;
+  const marketRows = marketKeys.map((key) => {
+    const market = markets[key] || {};
+    const tuning = market.tuning_trace || market.tuning || {};
+    const bestParams = tuning.best_params || {};
+    return `<article class="tuning-step">
+      <strong>${escapeHtml(market.label || key)}</strong>
+      <small>${escapeHtml(tuning.enabled ? `${tuning.trials || 0} trials · best ${formatNumber(tuning.best_value ?? "-")}` : "Sin fine-tuning")}</small>
+      ${Object.keys(bestParams).length ? `<div class="technical-meta-row">${Object.entries(bestParams).map(([name, value]) => `<span>${escapeHtml(name)} ${escapeHtml(formatNumber(value))}</span>`).join("")}</div>` : ""}
+    </article>`;
+  }).join("");
+  return `${head}${marketRows || loadingHtml("Entrena el bundle para ver trazas por mercado")}`;
+}
+
+function xgFeatureImportanceHtml(model) {
+  const markets = model.markets || {};
+  let features = model.top_features || [];
+  if (!features.length) {
+    features = Object.values(markets).flatMap((market) => (market && market.top_features) || []).slice(0, 20);
+  }
+  if (!features.length) return loadingHtml("Sin importancias disponibles");
+  const maxValue = Math.max(1, ...features.map((item) => Number(item.importance ?? item.value ?? item.gain ?? 0) || 0));
+  return features.slice(0, 18).map((item) => {
+    const name = item.feature || item.name || item.column || "";
+    const value = Number(item.importance ?? item.value ?? item.gain ?? 0) || 0;
+    return `<div class="feature-bar">
+      <span title="${escapeAttr(name)}">${escapeHtml(name)}</span>
+      <div><i style="width:${escapeAttr(clampPercent((value / maxValue) * 100))}%"></i></div>
+      <b>${escapeHtml(formatNumber(value))}</b>
+    </div>`;
+  }).join("");
 }
 
 function renderAlternativesBenchmarkReport(report) {
@@ -1985,6 +2249,7 @@ function worldcupJobPollDelay(job) {
   const kind = job.kind || "";
   const stage = progress.stage || "";
   if (kind === "upcoming-report") return 1000;
+  if (kind === "xg-prepare" || kind === "xg-training") return 1500;
   const base = kind === "simulation" ? 2000 : 3000;
   const idleCount = Number(job.pollIdleCount || 0);
   if (idleCount >= 4) return 10000;
@@ -2006,6 +2271,12 @@ async function handleWorldcupJobComplete(job) {
   if (job.kind === "upcoming-report") {
     renderUpcomingReport(result);
   }
+  if (job.kind === "xg-prepare") {
+    renderXgLightgbmTrainingStatus(result);
+  }
+  if (job.kind === "xg-training") {
+    renderXgLightgbmTrainingStatus((result.status || result));
+  }
 }
 
 function renderWorldcupJobProgress(kind) {
@@ -2013,6 +2284,8 @@ function renderWorldcupJobProgress(kind) {
       ? "worldcup-simulation-progress"
       : kind === "upcoming-report"
         ? "worldcup-upcoming-progress"
+        : kind === "xg-prepare" || kind === "xg-training"
+          ? "worldcup-xg-progress"
         : "";
   if (!targetId) return;
   const target = document.getElementById(targetId);
@@ -2104,6 +2377,10 @@ function setWorldcupJobBusy(kind, busy) {
     ? ["simulate-poisson-btn"]
     : kind === "upcoming-report"
       ? ["upcoming-predict-btn"]
+      : kind === "xg-prepare"
+        ? ["xg-prepare-etl", "xg-train"]
+        : kind === "xg-training"
+          ? ["xg-prepare-etl", "xg-train"]
       : [];
   ids.forEach((id) => {
     const button = document.getElementById(id);

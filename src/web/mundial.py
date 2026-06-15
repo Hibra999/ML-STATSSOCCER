@@ -95,6 +95,18 @@ def create_mundial_app() -> FastAPI:
     def predict_upcoming_report(payload: Dict[str, Any] = Body(default={})):
         return _submit("Generando reporte de predicciones Mundial", services.predict_upcoming_report, payload, with_progress=True, lock_key="mundial-report")
 
+    @app.get("/api/mundial/xg-lightgbm/training/status")
+    def xg_lightgbm_training_status():
+        return _wrap(services.xg_lightgbm_training_status)
+
+    @app.post("/api/mundial/xg-lightgbm/training/prepare")
+    def xg_lightgbm_training_prepare(payload: Dict[str, Any] = Body(default={})):
+        return _submit("Preparando ETL xG-LightGBM Mundial", services.xg_lightgbm_prepare_training, payload, with_progress=True, lock_key="mundial-xg-lightgbm-prepare")
+
+    @app.post("/api/mundial/xg-lightgbm/training/train")
+    def xg_lightgbm_training_train(payload: Dict[str, Any] = Body(default={})):
+        return _submit("Entrenando xG-LightGBM Mundial", services.xg_lightgbm_train_model, payload, with_progress=True, lock_key="mundial-xg-lightgbm-training")
+
     @app.get("/api/mundial/reports/{report_id}/download")
     def download_report(report_id: str, kind: str = "predictions", format: str = "html"):
         try:
