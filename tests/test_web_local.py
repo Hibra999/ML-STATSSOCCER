@@ -629,6 +629,7 @@ def test_worldcup_training_options_expose_boosting_models_and_hardware():
     assert options["defaults"]["model_type"] == "xgboost"
     assert options["defaults"]["training_target"] == "result"
     assert options["defaults"]["market_mode"] == "dual_markets"
+    assert {"BalancedAccuracy", "LogLoss", "Brier", "PredictiveScore"}.issubset(set(options["objectives"]))
     assert [target["key"] for target in options["targets"]] == ["dual_markets"]
     assert options["targets"][0]["label"] == "1X2 + U/O 0.5-3.5 ML"
     assert default_model_id("xgboost", "dual_markets") == "mundial-xgb-hibrido"
@@ -646,6 +647,9 @@ def test_worldcup_xg_lightgbm_profile_defaults_and_targets():
     assert config["market_mode"] == "dual_markets"
     assert config["training_target"] == "result"
     assert config["device"] == "auto"
+    assert config["calibration_enabled"] is True
+    assert config["calibration_method"] == "sigmoid"
+    assert config["feature_selection_mode"] == "family_balanced"
     assert training.normalize_training_target("over_under_05") == "over_under_05"
     assert training.normalize_training_target("over_under_15") == "over_under_15"
     assert training.normalize_training_target("over_under_25") == "over_under_25"
@@ -675,6 +679,10 @@ def test_worldcup_xg_lightgbm_training_service_payload_is_locked():
     assert payload["n_trials"] == 24
     assert payload["optuna_sampler"] == "random"
     assert payload["optuna_pruner"] == "median"
+    assert payload["objective"] == "PredictiveScore"
+    assert payload["calibration_enabled"] is True
+    assert payload["calibration_method"] == "sigmoid"
+    assert payload["feature_selection_mode"] == "family_balanced"
 
 
 def test_worldcup_detect_hardware_uses_nvidia_smi_from_path(monkeypatch):

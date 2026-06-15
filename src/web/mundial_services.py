@@ -75,7 +75,10 @@ from src.worldcup.market_provider import load_market_data, normalize_market_fram
 from src.worldcup.training import (
     HISTORY_REFERENCE_DATE,
     TARGET_WORLDCUP_YEAR,
+    TRAINING_OBJECTIVES,
     XG_LIGHTGBM_PROFILE,
+    FEATURE_SELECTION_FAMILY_BALANCED,
+    FEATURE_SELECTION_SUPERVISED_MODEL,
     build_history_feature_table,
     build_matchup_feature_table,
     dataset_status as worldcup_training_dataset_status,
@@ -1816,7 +1819,9 @@ def xg_lightgbm_training_status() -> Dict[str, Any]:
             "hardware": options.get("hardware", {}),
             "samplers": ["tpe", "random", "cmaes"],
             "pruners": ["none", "median", "successive-halving"],
-            "objectives": ["F1", "Accuracy", "Precision", "Recall"],
+            "objectives": options.get("objectives", list(TRAINING_OBJECTIVES)),
+            "calibration_methods": options.get("calibration_methods", ["sigmoid", "isotonic"]),
+            "feature_selection_modes": options.get("feature_selection_modes", [FEATURE_SELECTION_FAMILY_BALANCED, FEATURE_SELECTION_SUPERVISED_MODEL]),
             "required_markets": required_markets,
             "optional_markets": optional_markets,
             "planned_market_count": planned_market_count,
@@ -1838,8 +1843,8 @@ def xg_lightgbm_training_procedure() -> Dict[str, Any]:
             {"name": "Preparar ETL", "detail": "Construye artifact internacional con labels 1X2, U/O 0.5-3.5 y split temporal 80/10/10."},
             {"name": "Features sin leakage", "detail": "Calcula Elo, forma recent15, xG, tiros, mercado y API-Football solo con informacion anterior al partido."},
             {"name": "Fine-tuning Optuna", "detail": "Optimiza LightGBM por mercado usando exclusivamente validation temporal; el test no participa en seleccion."},
-            {"name": "Fit final", "detail": "Reentrena cada mercado con train + validation y conserva test para reporte final."},
-            {"name": "Reporte profesional", "detail": "Guarda metricas, matrices de confusion, top features, device usado y warnings por mercado."},
+            {"name": "Fit final", "detail": "Reentrena cada mercado con train + validation, calibra solo con datos pre-test y conserva test para reporte final."},
+            {"name": "Reporte profesional", "detail": "Guarda metricas raw/calibradas, matrices de confusion, top features, device usado y warnings por mercado."},
             {"name": "Activacion", "detail": "Guarda el bundle dual_markets como modelo activo para el pipeline de predicciones xG-LightGBM."},
         ],
     }
@@ -1894,9 +1899,15 @@ def xg_lightgbm_training_payload(payload: Dict[str, Any] | None) -> Dict[str, An
     pruner = str(payload.get("optuna_pruner") or "none").strip().lower()
     if pruner not in {"none", "median", "successive-halving"}:
         pruner = "none"
-    objective = str(payload.get("objective") or "F1").strip() or "F1"
-    if objective not in {"F1", "Accuracy", "Precision", "Recall"}:
-        objective = "F1"
+    objective = str(payload.get("objective") or "PredictiveScore").strip() or "PredictiveScore"
+    if objective not in set(TRAINING_OBJECTIVES):
+        objective = "PredictiveScore"
+    calibration_method = str(payload.get("calibration_method") or "sigmoid").strip().lower()
+    if calibration_method not in {"sigmoid", "isotonic"}:
+        calibration_method = "sigmoid"
+    feature_selection_mode = str(payload.get("feature_selection_mode") or FEATURE_SELECTION_FAMILY_BALANCED).strip().lower().replace("-", "_")
+    if feature_selection_mode not in {FEATURE_SELECTION_FAMILY_BALANCED, FEATURE_SELECTION_SUPERVISED_MODEL}:
+        feature_selection_mode = FEATURE_SELECTION_FAMILY_BALANCED
     device = str(payload.get("device") or "auto").strip().lower()
     if device not in {"auto", "cpu", "cuda"}:
         device = "auto"
@@ -1919,6 +1930,9 @@ def xg_lightgbm_training_payload(payload: Dict[str, Any] | None) -> Dict[str, An
         "optuna_pruner": pruner,
         "objective": objective,
         "tune_params": str(payload.get("tune_params") or "all").strip() or "all",
+        "calibration_enabled": bool(payload.get("calibration_enabled", True)),
+        "calibration_method": calibration_method,
+        "feature_selection_mode": feature_selection_mode,
         "seed": int(_clamp_int(payload.get("seed", 2026), 1, 999999)),
         "refresh_history": bool(payload.get("refresh_history", False)),
         "feature_progress_every": int(_clamp_int(payload.get("feature_progress_every", 1000), 100, 5000)),

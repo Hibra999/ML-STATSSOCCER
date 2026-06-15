@@ -17,7 +17,14 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, log_loss, precision_score, recall_score
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import SelectFromModel
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix, f1_score, log_loss, precision_score, recall_score
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
 from src.models.classifiers.boosting import catboost_device_params, lightgbm_device_params, xgboost_cuda_params
@@ -145,6 +152,12 @@ FEATURE_PROFILE_BALANCED = "balanced"
 DEFAULT_FEATURE_PROFILE = FEATURE_PROFILE_BALANCED
 DEFAULT_MAX_FEATURES = 480
 FEATURE_PROFILES = {FEATURE_PROFILE_FULL, FEATURE_PROFILE_BALANCED}
+FEATURE_SELECTION_FAMILY_BALANCED = "family_balanced"
+FEATURE_SELECTION_SUPERVISED_MODEL = "supervised_model"
+FEATURE_SELECTION_MODES = {FEATURE_SELECTION_FAMILY_BALANCED, FEATURE_SELECTION_SUPERVISED_MODEL}
+CALIBRATION_METHODS = {"sigmoid", "isotonic"}
+PROBABILITY_OBJECTIVES = {"LogLoss", "Brier", "PredictiveScore"}
+TRAINING_OBJECTIVES = ("F1", "Accuracy", "Precision", "Recall", "BalancedAccuracy", "LogLoss", "Brier", "PredictiveScore")
 HISTORY_FEATURE_WINDOWS = (3, 5, 10, 15)
 HISTORY_REFERENCE_DATE = "2026-06-11"
 WALK_FORWARD_ROOT = Path("storage") / "worldcup" / "walk_forward"
@@ -495,6 +508,9 @@ def training_options() -> Dict[str, Any]:
             {"key": FEATURE_PROFILE_BALANCED, "label": "Balanceado", "max_features": DEFAULT_MAX_FEATURES},
             {"key": FEATURE_PROFILE_FULL, "label": "Completo", "max_features": 0},
         ],
+        "objectives": list(TRAINING_OBJECTIVES),
+        "calibration_methods": sorted(CALIBRATION_METHODS),
+        "feature_selection_modes": [FEATURE_SELECTION_FAMILY_BALANCED, FEATURE_SELECTION_SUPERVISED_MODEL],
         "hardware": detect_hardware(),
         "defaults": default_training_payload(),
     }
@@ -648,6 +664,9 @@ def default_training_payload() -> Dict[str, Any]:
         "optuna_pruner": "none",
         "objective": "F1",
         "tune_params": "all",
+        "calibration_enabled": False,
+        "calibration_method": "sigmoid",
+        "feature_selection_mode": FEATURE_SELECTION_FAMILY_BALANCED,
         **worldcup_model_defaults("xgboost"),
     }
 
@@ -669,6 +688,25 @@ def normalize_max_features(value: Any, feature_profile: str = DEFAULT_FEATURE_PR
     return max(120, min(number, 1200))
 
 
+def normalize_feature_selection_mode(value: Any) -> str:
+    key = str(value or FEATURE_SELECTION_FAMILY_BALANCED).strip().lower().replace("-", "_")
+    aliases = {
+        "balanced": FEATURE_SELECTION_FAMILY_BALANCED,
+        "family": FEATURE_SELECTION_FAMILY_BALANCED,
+        "family_balanced": FEATURE_SELECTION_FAMILY_BALANCED,
+        "supervised": FEATURE_SELECTION_SUPERVISED_MODEL,
+        "model": FEATURE_SELECTION_SUPERVISED_MODEL,
+        "supervised_model": FEATURE_SELECTION_SUPERVISED_MODEL,
+    }
+    key = aliases.get(key, key)
+    return key if key in FEATURE_SELECTION_MODES else FEATURE_SELECTION_FAMILY_BALANCED
+
+
+def normalize_calibration_method(value: Any) -> str:
+    key = str(value or "sigmoid").strip().lower().replace("-", "_")
+    return key if key in CALIBRATION_METHODS else "sigmoid"
+
+
 def worldcup_model_defaults(model_key: str) -> Dict[str, Any]:
     defaults = dict(MODEL_SPECS[model_key].defaults)
     if model_key == "xgboost":
@@ -686,6 +724,9 @@ def xg_lightgbm_defaults() -> Dict[str, Any]:
         "feature_profile": DEFAULT_FEATURE_PROFILE,
         "max_features": DEFAULT_MAX_FEATURES,
         "device": "auto",
+        "calibration_enabled": True,
+        "calibration_method": "sigmoid",
+        "feature_selection_mode": FEATURE_SELECTION_FAMILY_BALANCED,
     })
     return defaults
 
@@ -1164,11 +1205,28 @@ def train_single_hybrid_model(
         )
         emit_training_progress(progress_callback, "features_eval", 6, single_total_steps, f"Features eval {label} listas", market=label, model_id=model_id, rows=int(x_eval.shape[0]), features=int(x_eval.shape[1]), progress_every=eval_progress_every, feature_cache=feature_cache.summary())
 
+    if x_train.empty or pd.Series(y_train).dropna().empty:
+        raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
+    has_validation_matrix = isinstance(x_validation, pd.DataFrame) and not x_validation.empty and not pd.Series(y_validation).dropna().empty
+    label_seed = pd.concat([pd.Series(y_train), pd.Series(y_validation)], ignore_index=True) if has_validation_matrix else pd.Series(y_train)
+    _, label_classes = encode_target_labels(label_seed, effective_target)
+    y_train_encoded = encode_existing_labels(y_train, label_classes)
+    y_eval_encoded = encode_existing_labels(y_eval, label_classes)
+    y_validation_encoded = encode_existing_labels(y_validation, label_classes) if has_validation_matrix else pd.Series(dtype=int)
+    base_train_sample_weight = align_sample_weights(sample_weights_for_rows(fit_train_rows, effective_target), len(y_train))
+
     feature_selection = select_feature_columns_for_profile(
         feature_columns=feature_columns,
         x_train=x_train,
         feature_profile=feature_profile,
         max_features=max_features,
+        mode=train_config.get("feature_selection_mode", FEATURE_SELECTION_FAMILY_BALANCED),
+        y_train=y_train_encoded,
+        x_validation=x_validation if has_validation_matrix else None,
+        y_validation=y_validation_encoded if has_validation_matrix else None,
+        sample_weight=base_train_sample_weight,
+        config=train_config,
+        classes=list(range(len(label_classes))),
     )
     feature_columns = list(feature_selection["feature_columns"])
     x_train = align_matrix_to_feature_columns(x_train, feature_columns)
@@ -1188,17 +1246,9 @@ def train_single_hybrid_model(
         dropped_features=int(feature_selection.get("dropped_feature_count", 0)),
         feature_profile=feature_profile,
         max_features=max_features,
+        feature_selection_mode=feature_selection.get("selected_mode", feature_selection.get("mode", "")),
     )
 
-    if x_train.empty or pd.Series(y_train).dropna().empty:
-        raise WorldCupTrainingError("No hay filas entrenables para el objetivo seleccionado.")
-    has_validation_matrix = isinstance(x_validation, pd.DataFrame) and not x_validation.empty and not pd.Series(y_validation).dropna().empty
-    label_seed = pd.concat([pd.Series(y_train), pd.Series(y_validation)], ignore_index=True) if has_validation_matrix else pd.Series(y_train)
-    _, label_classes = encode_target_labels(label_seed, effective_target)
-    y_train_encoded = encode_existing_labels(y_train, label_classes)
-    y_eval_encoded = encode_existing_labels(y_eval, label_classes)
-    y_validation_encoded = encode_existing_labels(y_validation, label_classes) if has_validation_matrix else pd.Series(dtype=int)
-    base_train_sample_weight = align_sample_weights(sample_weights_for_rows(fit_train_rows, effective_target), len(y_train))
     tuned = tune_model_if_requested(
         train_config,
         x_train,
@@ -1231,37 +1281,108 @@ def train_single_hybrid_model(
         num_classes=len(label_classes),
         sample_weight=fit_sample_weight,
     )
-    clf = fit_result["classifier"]
-    y_train_pred = classifier_predict(clf, x_fit_final)
-    y_eval_pred = classifier_predict(clf, x_eval)
-    y_train_proba = classifier_predict_proba(clf, x_fit_final)
-    y_eval_proba = classifier_predict_proba(clf, x_eval)
+    raw_clf = fit_result["classifier"]
+    raw_top_features = top_feature_importances(raw_clf, feature_columns)
+    raw_train_pred = classifier_predict(raw_clf, x_fit_final)
+    raw_eval_pred = classifier_predict(raw_clf, x_eval)
+    raw_train_proba = classifier_predict_proba(raw_clf, x_fit_final)
+    raw_eval_proba = classifier_predict_proba(raw_clf, x_eval)
     emit_training_progress(progress_callback, "metrics", 7, single_total_steps, f"Calculando metricas {label}", market=label, model_id=model_id)
-    metrics = classification_metrics_from_predictions(
+    raw_metrics = classification_metrics_from_predictions(
         y_fit_final,
-        y_train_pred,
+        raw_train_pred,
         y_eval_encoded,
-        y_eval_pred,
-        y_train_proba=y_train_proba,
-        y_eval_proba=y_eval_proba,
+        raw_eval_pred,
+        y_train_proba=raw_train_proba,
+        y_eval_proba=raw_eval_proba,
         classes=label_classes,
         target=effective_target,
         x_train=x_fit_final,
         x_eval=x_eval,
     )
-    calibration = calibration_payload(
+    raw_calibration = calibration_payload(
         y_fit_final,
-        y_train_proba,
+        raw_train_proba,
         y_eval_encoded,
-        y_eval_proba,
+        raw_eval_proba,
         classes=label_classes,
         target=effective_target,
         x_train=x_fit_final,
         x_eval=x_eval,
+    )
+    calibration_result = calibrate_classifier_if_requested(
+        config=train_config,
+        x_fit=x_fit_final,
+        y_fit=y_fit_final,
+        sample_weight=fit_sample_weight,
+        classes=label_classes,
+    )
+    clf = calibration_result.get("classifier") or raw_clf
+    calibrated_metrics: Dict[str, Any] = {}
+    if calibration_result.get("applied"):
+        y_train_pred = classifier_predict(clf, x_fit_final)
+        y_eval_pred = classifier_predict(clf, x_eval)
+        y_train_proba = classifier_predict_proba(clf, x_fit_final)
+        y_eval_proba = classifier_predict_proba(clf, x_eval)
+        metrics = classification_metrics_from_predictions(
+            y_fit_final,
+            y_train_pred,
+            y_eval_encoded,
+            y_eval_pred,
+            y_train_proba=y_train_proba,
+            y_eval_proba=y_eval_proba,
+            classes=label_classes,
+            target=effective_target,
+            x_train=x_fit_final,
+            x_eval=x_eval,
+        )
+        calibrated_metrics = metrics
+        final_calibration = calibration_payload(
+            y_fit_final,
+            y_train_proba,
+            y_eval_encoded,
+            y_eval_proba,
+            classes=label_classes,
+            target=effective_target,
+            x_train=x_fit_final,
+            x_eval=x_eval,
+        )
+    else:
+        y_train_pred = raw_train_pred
+        y_eval_pred = raw_eval_pred
+        y_train_proba = raw_train_proba
+        y_eval_proba = raw_eval_proba
+        metrics = raw_metrics
+        final_calibration = raw_calibration
+    calibration = calibration_report_payload(
+        config=train_config,
+        target=effective_target,
+        classes=label_classes,
+        raw_calibration=raw_calibration,
+        final_calibration=final_calibration,
+        raw_metrics=raw_metrics,
+        calibrated_metrics=calibrated_metrics,
+        result=calibration_result,
+    )
+    train_config["_active_metrics"] = metrics
+    baseline = sklearn_baseline_audit(
+        config=train_config,
+        x_fit=x_fit_final,
+        y_fit=y_fit_final,
+        x_eval=x_eval,
+        y_eval=y_eval_encoded,
+        sample_weight=fit_sample_weight,
+        classes=label_classes,
+        target=effective_target,
     )
     y_fit_labels = pd.concat([pd.Series(y_train), pd.Series(y_validation)], ignore_index=True) if has_validation_matrix else pd.Series(y_train)
     metrics["split_support"] = split_support_payload(y_fit_labels, y_eval, effective_target)
     metrics["validation_rows"] = int(x_validation.shape[0]) if isinstance(x_validation, pd.DataFrame) else 0
+    raw_metrics["split_support"] = metrics["split_support"]
+    raw_metrics["validation_rows"] = metrics["validation_rows"]
+    if calibrated_metrics:
+        calibrated_metrics["split_support"] = metrics["split_support"]
+        calibrated_metrics["validation_rows"] = metrics["validation_rows"]
     confusion = confusion_matrix_payload(y_eval_encoded, y_eval_pred, label_classes, target=effective_target)
     derived_total_markets = derived_total_market_metrics(
         y_train=y_fit_labels,
@@ -1315,8 +1436,11 @@ def train_single_hybrid_model(
         "kaggle_files": [],
         "history_source": normalized.get("history_source", history_source),
         "metrics": metrics,
+        "raw_metrics": raw_metrics,
+        "calibrated_metrics": calibrated_metrics,
         "confusion_matrix": confusion,
         "calibration": calibration,
+        "baseline": baseline,
         "derived_total_markets": derived_total_markets,
         "classes": label_classes,
         "encoded_classes": list(range(len(label_classes))),
@@ -1340,8 +1464,8 @@ def train_single_hybrid_model(
         "tuning_trace": tuning_trace(tuned),
         "etl_steps": etl,
         "hardware": hardware,
-        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *normalized.get("api_football_warnings", []), *fit_result.get("warnings", [])] if warning]),
-        "top_features": top_feature_importances(clf, feature_columns),
+        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *normalized.get("api_football_warnings", []), *fit_result.get("warnings", []), *calibration_result.get("warnings", []), *baseline.get("warnings", [])] if warning]),
+        "top_features": raw_top_features,
         "feature_inventory": feature_inventory_payload(feature_columns, x_train=x_fit_final, x_eval=x_eval, feature_selection=feature_selection),
         "feature_cache": feature_cache.summary(),
         "walk_forward_mode": walk_forward_mode,
@@ -1365,8 +1489,11 @@ def train_single_hybrid_model(
     return {
         "model": read_model_metadata(),
         "metrics": metrics,
+        "raw_metrics": raw_metrics,
+        "calibrated_metrics": calibrated_metrics,
         "confusion_matrix": confusion,
         "calibration": calibration,
+        "baseline": baseline,
         "features": feature_columns,
         "feature_inventory": record["feature_inventory"],
         "train_rows": int(len(y_fit_final)),
@@ -1556,8 +1683,11 @@ def train_dual_market_model(
         "kaggle_files": [],
         "history_source": result_record.get("history_source", ""),
         "metrics": result_record.get("metrics", {}),
+        "raw_metrics": result_record.get("raw_metrics", {}),
+        "calibrated_metrics": result_record.get("calibrated_metrics", {}),
         "confusion_matrix": result_record.get("confusion_matrix", {}),
         "calibration": result_record.get("calibration", {}),
+        "baseline": result_record.get("baseline", {}),
         "classes": result_record.get("classes", []),
         "mode": normalized["training_mode"],
         "eval_strategy": result_record.get("eval_strategy", ""),
@@ -1607,8 +1737,11 @@ def train_dual_market_model(
     return {
         "model": model_meta,
         "metrics": bundle_record["metrics"],
+        "raw_metrics": bundle_record["raw_metrics"],
+        "calibrated_metrics": bundle_record["calibrated_metrics"],
         "confusion_matrix": bundle_record["confusion_matrix"],
         "calibration": bundle_record["calibration"],
+        "baseline": bundle_record["baseline"],
         "features": bundle_record["feature_columns"],
         "feature_inventory": bundle_record["feature_inventory"],
         "train_rows": int(result_result.get("train_rows", 0)),
@@ -5045,6 +5178,7 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     default_target = "dual_markets" if market_mode == "dual_markets" else target
     model_id = normalize_worldcup_model_id(payload.get("model_id") or default_model_id(model_profile or model_key, default_target))
     feature_profile = normalize_feature_profile(payload.get("feature_profile", DEFAULT_FEATURE_PROFILE))
+    default_calibration_enabled = model_profile == XG_LIGHTGBM_PROFILE
     return {
         "model_id": model_id,
         "model_name": str(payload.get("model_name") or model_id).strip() or model_id,
@@ -5063,8 +5197,11 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "n_trials": max(int(float(payload.get("n_trials", payload.get("trials", 12)) or 12)), 1),
         "optuna_sampler": str(payload.get("optuna_sampler") or "tpe"),
         "optuna_pruner": str(payload.get("optuna_pruner") or "none"),
-        "objective": str(payload.get("objective") or "F1"),
+        "objective": normalize_metric_name(payload.get("objective") or "F1"),
         "tune_params": payload.get("tune_params", payload.get("tune", "all")),
+        "calibration_enabled": bool(payload.get("calibration_enabled", default_calibration_enabled)),
+        "calibration_method": normalize_calibration_method(payload.get("calibration_method", "sigmoid")),
+        "feature_selection_mode": normalize_feature_selection_mode(payload.get("feature_selection_mode")),
         "market_index": int(payload.get("market_index") or 0),
         "market_total": int(payload.get("market_total") or 0),
         "trials_per_market": int(payload.get("trials_per_market") or 0),
@@ -5573,6 +5710,233 @@ def fit_classifier(classifier, x_train: pd.DataFrame, y_train: pd.Series, sample
         return ["El clasificador seleccionado no acepta sample_weight; se entreno sin ponderacion de filas."]
 
 
+def calibrate_classifier_if_requested(
+        config: Dict[str, Any],
+        x_fit: pd.DataFrame,
+        y_fit: pd.Series,
+        sample_weight: Optional[pd.Series],
+        classes: List[Any],
+) -> Dict[str, Any]:
+    enabled = bool(config.get("calibration_enabled", False))
+    requested_method = normalize_calibration_method(config.get("calibration_method", "sigmoid"))
+    if not enabled:
+        return {"enabled": False, "applied": False, "method": requested_method, "source": "disabled", "warnings": []}
+    y_series = pd.Series(y_fit).reset_index(drop=True)
+    class_count = len(classes)
+    if class_count < 2 or y_series.dropna().nunique() < 2:
+        return {
+            "enabled": True,
+            "applied": False,
+            "method": requested_method,
+            "source": "pre_test_time_series_cv",
+            "warnings": ["Calibracion desactivada: el bloque pre-test no contiene clases suficientes."],
+        }
+    method = effective_calibration_method(requested_method, y_series, class_count)
+    warnings: List[str] = []
+    if method != requested_method:
+        warnings.append("Calibracion isotonic requiere mas soporte por clase; se uso sigmoid.")
+    cv = calibration_time_series_cv(y_series, class_count)
+    if cv is None:
+        return {
+            "enabled": True,
+            "applied": False,
+            "method": method,
+            "source": "pre_test_time_series_cv",
+            "warnings": [*warnings, "Calibracion desactivada: TimeSeriesSplit no pudo formar folds con clases suficientes."],
+        }
+    try:
+        estimator = build_worldcup_classifier(
+            model_key=config["model_type"],
+            params=config["params"],
+            n_jobs=config["n_jobs"],
+            device=resolve_device(config["model_type"], config["device"])[0],
+            seed=config["seed"],
+            num_classes=class_count,
+        )
+        try:
+            calibrator = CalibratedClassifierCV(estimator=estimator, method=method, cv=cv, n_jobs=config["n_jobs"], ensemble=False)
+        except TypeError:
+            calibrator = CalibratedClassifierCV(estimator=estimator, method=method, cv=cv, n_jobs=config["n_jobs"])
+        weights = align_sample_weights(sample_weight, len(y_series)) if sample_weight is not None else None
+        if weights is not None and not weights.empty:
+            try:
+                calibrator.fit(x_fit, y_series, sample_weight=weights.to_numpy(dtype=float))
+            except TypeError:
+                calibrator.fit(x_fit, y_series)
+                warnings.append("CalibratedClassifierCV no acepto sample_weight; calibracion ajustada sin ponderacion.")
+        else:
+            calibrator.fit(x_fit, y_series)
+        return {
+            "enabled": True,
+            "applied": True,
+            "method": method,
+            "requested_method": requested_method,
+            "source": "pre_test_time_series_cv",
+            "cv_splits": int(getattr(cv, "n_splits", 0) or 0),
+            "classifier": calibrator,
+            "warnings": warnings,
+        }
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "applied": False,
+            "method": method,
+            "requested_method": requested_method,
+            "source": "pre_test_time_series_cv",
+            "warnings": [*warnings, f"Calibracion fallo ({exc.__class__.__name__}: {exc}); se conserva el modelo raw."],
+        }
+
+
+def effective_calibration_method(method: str, y_fit: pd.Series, class_count: int) -> str:
+    if method != "isotonic":
+        return "sigmoid"
+    counts = pd.Series(y_fit).value_counts()
+    if len(y_fit) >= max(80, class_count * 20) and not counts.empty and int(counts.min()) >= 10:
+        return "isotonic"
+    return "sigmoid"
+
+
+def calibration_time_series_cv(y_fit: pd.Series, class_count: int) -> Optional[TimeSeriesSplit]:
+    y_series = pd.to_numeric(pd.Series(y_fit).reset_index(drop=True), errors="coerce").dropna().astype(int)
+    row_count = int(y_series.shape[0])
+    if row_count < 8:
+        return None
+    required_classes = set(range(int(class_count)))
+    for n_splits in range(min(5, row_count - 1), 1, -1):
+        splitter = TimeSeriesSplit(n_splits=n_splits)
+        viable = True
+        for train_index, test_index in splitter.split(np.arange(row_count)):
+            train_classes = set(y_series.iloc[train_index].astype(int).tolist())
+            test_classes = set(y_series.iloc[test_index].astype(int).tolist())
+            if len(train_classes) < 2 or not required_classes.issubset(train_classes) or len(test_classes) < 1:
+                viable = False
+                break
+        if viable:
+            return splitter
+    return None
+
+
+def calibration_report_payload(
+        config: Dict[str, Any],
+        target: str,
+        classes: List[Any],
+        raw_calibration: Dict[str, Any],
+        final_calibration: Dict[str, Any],
+        raw_metrics: Dict[str, Any],
+        calibrated_metrics: Dict[str, Any],
+        result: Dict[str, Any],
+) -> Dict[str, Any]:
+    applied = bool(result.get("applied"))
+    active_calibration = final_calibration if applied else raw_calibration
+    return {
+        **active_calibration,
+        "enabled": bool(result.get("enabled", False)),
+        "applied": applied,
+        "method": result.get("method", normalize_calibration_method(config.get("calibration_method", "sigmoid"))),
+        "requested_method": result.get("requested_method", normalize_calibration_method(config.get("calibration_method", "sigmoid"))),
+        "source": result.get("source", "disabled"),
+        "cv_splits": int(result.get("cv_splits", 0) or 0),
+        "target": target,
+        "classes": [str(item) for item in classes],
+        "raw": {
+            "metrics": raw_metrics,
+            "calibration": raw_calibration,
+        },
+        "calibrated": {
+            "metrics": calibrated_metrics,
+            "calibration": final_calibration,
+        } if applied else {},
+        "comparison": calibration_comparison(raw_metrics, calibrated_metrics),
+        "warnings": result.get("warnings", []),
+    }
+
+
+def calibration_comparison(raw_metrics: Dict[str, Any], calibrated_metrics: Dict[str, Any]) -> Dict[str, Any]:
+    if not calibrated_metrics:
+        return {}
+    output: Dict[str, Any] = {}
+    for split in ("train", "eval"):
+        raw_row = raw_metrics.get(split, {}) or {}
+        calibrated_row = calibrated_metrics.get(split, {}) or {}
+        output[split] = {
+            "BrierDelta": round(float(calibrated_row.get("Brier", 0.0)) - float(raw_row.get("Brier", 0.0)), 4),
+            "LogLossDelta": round(float(calibrated_row.get("LogLoss", 0.0)) - float(raw_row.get("LogLoss", 0.0)), 4),
+            "ECEDelta": round(float(calibrated_row.get("ECE", 0.0)) - float(raw_row.get("ECE", 0.0)), 4),
+        }
+    return output
+
+
+def sklearn_baseline_audit(
+        config: Dict[str, Any],
+        x_fit: pd.DataFrame,
+        y_fit: pd.Series,
+        x_eval: pd.DataFrame,
+        y_eval: pd.Series,
+        sample_weight: Optional[pd.Series],
+        classes: List[Any],
+        target: str,
+) -> Dict[str, Any]:
+    if config.get("model_profile") != XG_LIGHTGBM_PROFILE:
+        return {"enabled": False}
+    y_series = pd.Series(y_fit).reset_index(drop=True)
+    if y_series.dropna().nunique() < 2:
+        return {"enabled": True, "available": False, "warnings": ["Baseline sklearn omitido: clases insuficientes."]}
+    warnings: List[str] = []
+    try:
+        estimator = make_pipeline(
+            StandardScaler(),
+            LogisticRegression(
+                class_weight="balanced",
+                max_iter=700,
+                random_state=int(config.get("seed", 2026) or 2026),
+            ),
+        )
+        cv = calibration_time_series_cv(y_series, len(classes))
+        if cv is not None:
+            try:
+                estimator = CalibratedClassifierCV(estimator=estimator, method="sigmoid", cv=cv, n_jobs=config.get("n_jobs", -1), ensemble=False)
+            except TypeError:
+                estimator = CalibratedClassifierCV(estimator=estimator, method="sigmoid", cv=cv, n_jobs=config.get("n_jobs", -1))
+            source = "pre_test_time_series_cv"
+        else:
+            source = "raw_logistic_regression"
+            warnings.append("Baseline sklearn sin calibracion: TimeSeriesSplit no fue viable.")
+        estimator.fit(x_fit, y_series)
+        train_pred = classifier_predict(estimator, x_fit)
+        eval_pred = classifier_predict(estimator, x_eval)
+        train_proba = classifier_predict_proba(estimator, x_fit)
+        eval_proba = classifier_predict_proba(estimator, x_eval)
+        metrics = classification_metrics_from_predictions(
+            y_series,
+            train_pred,
+            y_eval,
+            eval_pred,
+            y_train_proba=train_proba,
+            y_eval_proba=eval_proba,
+            classes=classes,
+            target=target,
+            x_train=x_fit,
+            x_eval=x_eval,
+        )
+        model_brier = float(((config.get("_active_metrics") or {}).get("eval") or {}).get("Brier", 0.0) or 0.0)
+        baseline_brier = float((metrics.get("eval") or {}).get("Brier", 0.0) or 0.0)
+        return {
+            "enabled": True,
+            "available": True,
+            "model": 'LogisticRegression(class_weight="balanced")',
+            "calibration": {"enabled": cv is not None, "method": "sigmoid", "source": source},
+            "metrics": metrics,
+            "brier_delta_vs_model": round(model_brier - baseline_brier, 4) if model_brier else None,
+            "warnings": warnings,
+        }
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "available": False,
+            "warnings": [f"Baseline sklearn fallo ({exc.__class__.__name__}: {exc})."],
+        }
+
+
 def finalize_classifier_for_inference(classifier, model_key: str, trained_device: str) -> None:
     if model_key != "xgboost":
         return
@@ -5731,6 +6095,10 @@ def tune_model_if_requested(
         weight_fit = split_weights_like_safe_train_eval(sample_weight, len(y_train), len(y_fit)) if sample_weight is not None else None
         validation_source = "internal_split"
     objective_name = normalize_metric_name(config["objective"])
+    uses_predict_proba = objective_name in PROBABILITY_OBJECTIVES
+    objective_values = pd.concat([pd.Series(y_fit), pd.Series(y_eval), pd.Series(y_train)], ignore_index=True).dropna()
+    objective_values = pd.to_numeric(objective_values, errors="coerce").dropna().astype(int)
+    objective_classes = list(range(int(objective_values.max()) + 1)) if not objective_values.empty else []
 
     def objective(trial):
         trial_params = dict(config["params"])
@@ -5745,14 +6113,25 @@ def tune_model_if_requested(
                 n_jobs=config["n_jobs"],
                 requested_device=config["device"],
                 seed=config["seed"],
-                num_classes=int(pd.Series(y_train).nunique()),
+                num_classes=max(len(objective_classes), int(pd.Series(y_train).nunique())),
                 sample_weight=weight_fit,
             )
             pred = classifier_predict(fit_result["classifier"], x_eval)
-            return metric_score(y_eval, pred, objective_name)
+            proba = classifier_predict_proba(fit_result["classifier"], x_eval) if uses_predict_proba else None
+            score = metric_score(
+                y_eval,
+                pred,
+                objective_name,
+                y_proba=proba,
+                classes=objective_classes,
+                target=config.get("training_target", "result"),
+            )
+            trial.set_user_attr("metric_value", objective_value_for_display(score, objective_name))
+            trial.set_user_attr("uses_predict_proba", uses_predict_proba)
+            return score
         except Exception as exc:
             trial.set_user_attr("error", f"{exc.__class__.__name__}: {exc}")
-            return 0.0
+            return -99.0 if objective_name in PROBABILITY_OBJECTIVES else 0.0
 
     study = optuna.create_study(
         direction="maximize",
@@ -5770,7 +6149,7 @@ def tune_model_if_requested(
         overall_current = trial_offset + current
         elapsed_seconds = int((datetime.now(timezone.utc) - tuning_started_at).total_seconds())
         try:
-            best_value = round(float(study_obj.best_value), 4)
+            best_value = round(objective_value_for_display(float(study_obj.best_value), objective_name), 4)
             best_trial = int(study_obj.best_trial.number + 1)
         except ValueError:
             best_value = None
@@ -5811,10 +6190,12 @@ def tune_model_if_requested(
     )
     study.optimize(objective, n_trials=total_trials, show_progress_bar=False, callbacks=[progress_after_trial])
     try:
-        best_value = round(float(study.best_value), 4)
+        best_objective_score = round(float(study.best_value), 6)
+        best_value = round(objective_value_for_display(float(study.best_value), objective_name), 4)
         best_trial = int(study.best_trial.number + 1)
         best_params = dict(study.best_params)
     except ValueError:
+        best_objective_score = 0.0
         best_value = 0.0
         best_trial = 0
         best_params = {}
@@ -5825,8 +6206,10 @@ def tune_model_if_requested(
         "pruner": config["optuna_pruner"],
         "objective": objective_name,
         "best_value": best_value,
+        "best_objective_score": best_objective_score,
         "best_trial": best_trial,
         "best_params": best_params,
+        "uses_predict_proba": uses_predict_proba,
         "market_index": config.get("market_index"),
         "market_total": config.get("market_total"),
         "trials_per_market": config.get("trials_per_market") or total_trials,
@@ -5886,24 +6269,83 @@ def build_optuna_pruner(optuna, name: str):
 
 
 def normalize_metric_name(value: Any) -> str:
-    key = str(value or "F1").strip().lower()
-    if key == "accuracy":
+    key = re.sub(r"[^a-z0-9]+", "", str(value or "F1").strip().lower())
+    if key in {"accuracy", "acc"}:
         return "Accuracy"
-    if key == "precision":
+    if key in {"precision", "prec"}:
         return "Precision"
-    if key == "recall":
+    if key in {"recall"}:
         return "Recall"
+    if key in {"balancedaccuracy", "balancedacc", "balanced"}:
+        return "BalancedAccuracy"
+    if key in {"logloss", "neglogloss", "crossentropy"}:
+        return "LogLoss"
+    if key in {"brier", "brierscore"}:
+        return "Brier"
+    if key in {"predictivescore", "predictive", "score"}:
+        return "PredictiveScore"
     return "F1"
 
 
-def metric_score(y_true, y_pred, metric: str) -> float:
+def metric_score(
+        y_true,
+        y_pred,
+        metric: str,
+        y_proba: Optional[np.ndarray] = None,
+        classes: Optional[List[Any]] = None,
+        target: str = "result",
+) -> float:
+    metric = normalize_metric_name(metric)
     if metric == "Accuracy":
         return float(accuracy_score(y_true, y_pred))
     if metric == "Precision":
         return float(precision_score(y_true, y_pred, average="macro", zero_division=0.0))
     if metric == "Recall":
         return float(recall_score(y_true, y_pred, average="macro", zero_division=0.0))
+    if metric == "BalancedAccuracy":
+        return float(balanced_accuracy_score(y_true, y_pred))
+    if metric in PROBABILITY_OBJECTIVES:
+        return probability_objective_score(y_true, y_pred, metric, y_proba=y_proba, classes=classes, target=target)
     return float(f1_score(y_true, y_pred, average="macro", zero_division=0.0))
+
+
+def probability_objective_score(
+        y_true,
+        y_pred,
+        metric: str,
+        y_proba: Optional[np.ndarray],
+        classes: Optional[List[Any]],
+        target: str = "result",
+) -> float:
+    class_count = len(classes or [])
+    if y_proba is None or class_count <= 0:
+        if metric == "PredictiveScore":
+            return float(0.5 * balanced_accuracy_score(y_true, y_pred) + 0.5 * f1_score(y_true, y_pred, average="macro", zero_division=0.0))
+        return -99.0
+    summary = probability_calibration_summary(y_true, y_proba, list(classes or range(class_count)))
+    if not summary.get("available"):
+        return -99.0
+    if metric == "LogLoss":
+        return -float(summary.get("log_loss", 99.0))
+    if metric == "Brier":
+        return -float(summary.get("brier", 99.0))
+    balanced = float(balanced_accuracy_score(y_true, y_pred))
+    f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0.0))
+    loss = float(summary.get("log_loss", 99.0))
+    brier = float(summary.get("brier", 99.0))
+    normalized_loss = 1.0 - min(loss / max(math.log(max(class_count, 2)), 1e-9), 1.0)
+    brier_baseline = max((class_count - 1.0) / max(class_count, 1.0), 1e-9)
+    normalized_brier = 1.0 - min(brier / brier_baseline, 1.0)
+    market = market_calibration_summary(y_true, list(classes or []), target=target, x=None)
+    market_bonus = 0.0 if not market.get("available") else max(min(float(market.get("brier", brier)) - brier, 1.0), -1.0)
+    score = (0.35 * balanced) + (0.25 * f1) + (0.25 * normalized_loss) + (0.15 * normalized_brier) + (0.05 * market_bonus)
+    return float(score)
+
+
+def objective_value_for_display(score: float, metric: str) -> float:
+    metric = normalize_metric_name(metric)
+    value = -float(score) if metric in {"LogLoss", "Brier"} else float(score)
+    return value if np.isfinite(value) else 0.0
 
 
 def feature_profile_family_cap(family: str, max_features: int) -> int:
@@ -5933,21 +6375,34 @@ def select_feature_columns_for_profile(
         x_train: pd.DataFrame,
         feature_profile: str,
         max_features: int,
+        mode: str = FEATURE_SELECTION_FAMILY_BALANCED,
+        y_train: Optional[pd.Series] = None,
+        x_validation: Optional[pd.DataFrame] = None,
+        y_validation: Optional[pd.Series] = None,
+        sample_weight: Optional[pd.Series] = None,
+        config: Optional[Dict[str, Any]] = None,
+        classes: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     original_columns = list(dict.fromkeys(feature_columns or list(x_train.columns)))
     profile = normalize_feature_profile(feature_profile)
     limit = normalize_max_features(max_features, profile)
     original_count = len(original_columns)
+    mode = normalize_feature_selection_mode(mode)
     if profile == FEATURE_PROFILE_FULL or limit <= 0 or original_count <= limit:
         return {
+            "mode": mode,
+            "selected_mode": "none" if profile == FEATURE_PROFILE_FULL else FEATURE_SELECTION_FAMILY_BALANCED,
             "feature_profile": profile,
             "max_features": limit,
             "original_feature_count": original_count,
             "selected_feature_count": original_count,
             "dropped_feature_count": 0,
             "feature_columns": original_columns,
+            "selected_features": original_columns,
             "dropped_features": [],
             "dropped_families": [],
+            "validation_score": None,
+            "fallback_used": False,
         }
     candidates = []
     for index, column in enumerate(original_columns):
@@ -6016,19 +6471,265 @@ def select_feature_columns_for_profile(
     for column in dropped:
         family = feature_family(column)
         dropped_family_counts[family] = dropped_family_counts.get(family, 0) + 1
-    return {
+    family_selection = {
+        "mode": mode,
+        "selected_mode": FEATURE_SELECTION_FAMILY_BALANCED,
         "feature_profile": profile,
         "max_features": limit,
         "original_feature_count": original_count,
         "selected_feature_count": len(selected),
         "dropped_feature_count": len(dropped),
         "feature_columns": selected,
+        "selected_features": selected,
         "dropped_features": dropped[:120],
         "dropped_families": [
             {"family": family, "count": count}
             for family, count in sorted(dropped_family_counts.items())
         ],
+        "validation_score": None,
+        "fallback_used": False,
     }
+    if mode != FEATURE_SELECTION_SUPERVISED_MODEL:
+        return family_selection
+    return supervised_feature_selection_or_fallback(
+        family_selection=family_selection,
+        original_columns=original_columns,
+        x_train=x_train,
+        y_train=y_train,
+        x_validation=x_validation,
+        y_validation=y_validation,
+        sample_weight=sample_weight,
+        config=config or {},
+        classes=classes or [],
+        target=(config or {}).get("training_target", "result"),
+    )
+
+
+def supervised_feature_selection_or_fallback(
+        family_selection: Dict[str, Any],
+        original_columns: List[str],
+        x_train: pd.DataFrame,
+        y_train: Optional[pd.Series],
+        x_validation: Optional[pd.DataFrame],
+        y_validation: Optional[pd.Series],
+        sample_weight: Optional[pd.Series],
+        config: Dict[str, Any],
+        classes: List[Any],
+        target: str,
+) -> Dict[str, Any]:
+    if y_train is None or y_validation is None or x_validation is None or x_validation.empty:
+        family_selection.update({
+            "fallback_used": True,
+            "fallback_reason": "validation_unavailable",
+        })
+        return family_selection
+    y_train_series = pd.Series(y_train).reset_index(drop=True)
+    y_validation_series = pd.Series(y_validation).reset_index(drop=True)
+    if y_train_series.dropna().nunique() < 2 or y_validation_series.dropna().empty:
+        family_selection.update({
+            "fallback_used": True,
+            "fallback_reason": "insufficient_classes",
+        })
+        return family_selection
+    limit = int(family_selection.get("max_features", 0) or len(original_columns))
+    supervised_columns, selector_summary = supervised_model_selected_columns(
+        original_columns=original_columns,
+        x_train=x_train,
+        y_train=y_train_series,
+        sample_weight=sample_weight,
+        limit=limit,
+        seed=int(config.get("seed", 2026) or 2026),
+        model_key=str(config.get("model_type") or "lightgbm"),
+        params=config.get("params", {}),
+        n_jobs=int(config.get("n_jobs", -1) or -1),
+    )
+    if not supervised_columns:
+        family_selection.update({
+            "fallback_used": True,
+            "fallback_reason": selector_summary.get("warning", "selector_empty"),
+            "supervised": selector_summary,
+        })
+        return family_selection
+    family_columns = list(family_selection.get("feature_columns", []))
+    objective_name = normalize_metric_name(config.get("objective", "F1"))
+    family_score = validation_score_for_feature_subset(
+        feature_columns=family_columns,
+        x_train=x_train,
+        y_train=y_train_series,
+        x_validation=x_validation,
+        y_validation=y_validation_series,
+        sample_weight=sample_weight,
+        config=config,
+        classes=classes,
+        target=target,
+        metric=objective_name,
+    )
+    supervised_score = validation_score_for_feature_subset(
+        feature_columns=supervised_columns,
+        x_train=x_train,
+        y_train=y_train_series,
+        x_validation=x_validation,
+        y_validation=y_validation_series,
+        sample_weight=sample_weight,
+        config=config,
+        classes=classes,
+        target=target,
+        metric=objective_name,
+    )
+    family_selection["validation_score"] = family_score
+    family_selection["supervised"] = {
+        **selector_summary,
+        "candidate_feature_count": len(supervised_columns),
+        "validation_score": supervised_score,
+    }
+    if supervised_score is None or family_score is None or supervised_score < family_score - 1e-9:
+        family_selection.update({
+            "fallback_used": True,
+            "fallback_reason": "validation_not_improved",
+        })
+        return family_selection
+    dropped = [column for column in original_columns if column not in set(supervised_columns)]
+    dropped_family_counts: Dict[str, int] = {}
+    for column in dropped:
+        family = feature_family(column)
+        dropped_family_counts[family] = dropped_family_counts.get(family, 0) + 1
+    return {
+        **family_selection,
+        "selected_mode": FEATURE_SELECTION_SUPERVISED_MODEL,
+        "selected_feature_count": len(supervised_columns),
+        "dropped_feature_count": len(dropped),
+        "feature_columns": supervised_columns,
+        "selected_features": supervised_columns,
+        "dropped_features": dropped[:120],
+        "dropped_families": [
+            {"family": family, "count": count}
+            for family, count in sorted(dropped_family_counts.items())
+        ],
+        "validation_score": supervised_score,
+        "family_validation_score": family_score,
+        "fallback_used": False,
+    }
+
+
+def supervised_model_selected_columns(
+        original_columns: List[str],
+        x_train: pd.DataFrame,
+        y_train: pd.Series,
+        sample_weight: Optional[pd.Series],
+        limit: int,
+        seed: int,
+        model_key: str,
+        params: Dict[str, Any],
+        n_jobs: int,
+) -> Tuple[List[str], Dict[str, Any]]:
+    available_columns = [column for column in original_columns if column in x_train.columns]
+    if not available_columns:
+        return [], {"method": "SelectFromModel", "warning": "no_columns"}
+    x_fit = align_matrix_to_feature_columns(x_train, available_columns)
+    y_fit = pd.Series(y_train).reset_index(drop=True)
+    try:
+        estimator = supervised_feature_selector_estimator(
+            model_key=model_key,
+            params=params,
+            seed=seed,
+            n_jobs=n_jobs,
+            num_classes=max(int(y_fit.nunique()), 2),
+        )
+        weights = align_sample_weights(sample_weight, len(y_fit)) if sample_weight is not None else None
+        if weights is not None and not weights.empty:
+            try:
+                estimator.fit(x_fit, y_fit, sample_weight=weights.to_numpy(dtype=float))
+            except TypeError:
+                estimator.fit(x_fit, y_fit)
+        else:
+            estimator.fit(x_fit, y_fit)
+        selector = SelectFromModel(estimator=estimator, threshold="median", max_features=max(int(limit), 1), prefit=True)
+        mask = selector.get_support()
+        selected = [column for column, keep in zip(available_columns, mask) if keep]
+        selected = merge_required_feature_columns(selected, available_columns, limit)
+        return selected, {
+            "method": "SelectFromModel",
+            "estimator": estimator.__class__.__name__,
+            "threshold": "median",
+        }
+    except Exception as exc:
+        return [], {
+            "method": "SelectFromModel",
+            "warning": f"{exc.__class__.__name__}: {exc}",
+        }
+
+
+def supervised_feature_selector_estimator(
+        model_key: str,
+        params: Dict[str, Any],
+        seed: int,
+        n_jobs: int,
+        num_classes: int,
+):
+    if model_key == "lightgbm":
+        try:
+            return build_worldcup_classifier(
+                model_key="lightgbm",
+                params={**params, "n_estimators": min(int(params.get("n_estimators", 120) or 120), 180)},
+                n_jobs=n_jobs,
+                device="cpu",
+                seed=seed,
+                num_classes=num_classes,
+            )
+        except Exception:
+            pass
+    return RandomForestClassifier(
+        n_estimators=140,
+        max_depth=8,
+        min_samples_leaf=2,
+        class_weight="balanced_subsample",
+        random_state=seed,
+        n_jobs=n_jobs,
+    )
+
+
+def merge_required_feature_columns(selected: List[str], available_columns: List[str], limit: int) -> List[str]:
+    output = list(dict.fromkeys([column for column in BASE_FEATURE_COLUMNS if column in available_columns] + list(selected)))
+    if len(output) > limit:
+        output = output[:limit]
+    if not output:
+        output = available_columns[:max(int(limit), 1)]
+    return output
+
+
+def validation_score_for_feature_subset(
+        feature_columns: List[str],
+        x_train: pd.DataFrame,
+        y_train: pd.Series,
+        x_validation: pd.DataFrame,
+        y_validation: pd.Series,
+        sample_weight: Optional[pd.Series],
+        config: Dict[str, Any],
+        classes: List[Any],
+        target: str,
+        metric: str,
+) -> Optional[float]:
+    if not feature_columns:
+        return None
+    try:
+        x_fit = align_matrix_to_feature_columns(x_train, feature_columns)
+        x_eval = align_matrix_to_feature_columns(x_validation, feature_columns)
+        fit_result = fit_configured_classifier(
+            x_train=x_fit,
+            y_train=y_train,
+            model_key=str(config.get("model_type") or "lightgbm"),
+            params=config.get("params", {}),
+            n_jobs=int(config.get("n_jobs", -1) or -1),
+            requested_device=str(config.get("device") or "auto"),
+            seed=int(config.get("seed", 2026) or 2026),
+            num_classes=max(len(classes), int(pd.Series(y_train).nunique())),
+            sample_weight=sample_weight,
+        )
+        pred = classifier_predict(fit_result["classifier"], x_eval)
+        proba = classifier_predict_proba(fit_result["classifier"], x_eval) if normalize_metric_name(metric) in PROBABILITY_OBJECTIVES else None
+        return metric_score(y_validation, pred, metric, y_proba=proba, classes=classes, target=target)
+    except Exception:
+        return None
 
 
 def align_matrix_to_feature_columns(x: pd.DataFrame, feature_columns: List[str]) -> pd.DataFrame:
@@ -6560,8 +7261,11 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "effective_target": record.get("effective_target", result.get("effective_target", "")),
         "requested_target": record.get("requested_target", result.get("requested_target", "")),
         "metrics": record.get("metrics", result.get("metrics", {})),
+        "raw_metrics": record.get("raw_metrics", result.get("raw_metrics", {})),
+        "calibrated_metrics": record.get("calibrated_metrics", result.get("calibrated_metrics", {})),
         "confusion_matrix": record.get("confusion_matrix", result.get("confusion_matrix", {})),
         "calibration": record.get("calibration", result.get("calibration", {})),
+        "baseline": record.get("baseline", result.get("baseline", {})),
         "classes": record.get("classes", []),
         "eval_strategy": record.get("eval_strategy", result.get("eval_strategy", "")),
         "train_rows": int(result.get("train_rows", 0) or 0),
@@ -6574,6 +7278,7 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "hardware": record.get("hardware", result.get("hardware", {})),
         "feature_count": len(record.get("feature_columns", result.get("features", [])) or []),
         "feature_profile": record.get("feature_profile", result.get("feature_profile", "")),
+        "feature_selection": record.get("feature_selection", result.get("feature_selection", {})),
         "max_features": int(record.get("max_features", result.get("max_features", 0)) or 0),
         "target_worldcup_year": record.get("target_worldcup_year", result.get("target_worldcup_year", "")),
         "benchmark_worldcup_year": record.get("benchmark_worldcup_year", result.get("benchmark_worldcup_year", result.get("final_test_year", ""))),
@@ -6707,6 +7412,7 @@ def classification_metrics_from_predictions(
 def metric_row(y_true, y_pred) -> Dict[str, float]:
     return {
         "Accuracy": round(float(accuracy_score(y_true, y_pred)), 3),
+        "BalancedAccuracy": round(float(balanced_accuracy_score(y_true, y_pred)), 3),
         "F1": round(float(f1_score(y_true, y_pred, average="macro", zero_division=0.0)), 3),
         "Precision": round(float(precision_score(y_true, y_pred, average="macro", zero_division=0.0)), 3),
         "Recall": round(float(recall_score(y_true, y_pred, average="macro", zero_division=0.0)), 3),
@@ -7164,8 +7870,11 @@ def tuning_trace(tuned: Dict[str, Any]) -> Dict[str, Any]:
         "pruner": tuned.get("pruner", ""),
         "objective": tuned.get("objective", ""),
         "best_value": tuned.get("best_value", ""),
+        "best_objective_score": tuned.get("best_objective_score", ""),
         "best_trial": tuned.get("best_trial", ""),
         "best_params": best_params,
+        "validation_source": tuned.get("validation_source", ""),
+        "uses_predict_proba": bool(tuned.get("uses_predict_proba", False)),
         "market_index": tuned.get("market_index", ""),
         "market_total": tuned.get("market_total", ""),
         "trials_per_market": tuned.get("trials_per_market", ""),
@@ -7175,6 +7884,8 @@ def tuning_trace(tuned: Dict[str, Any]) -> Dict[str, Any]:
             {"name": "Sampler", "status": "ok", "detail": str(tuned.get("sampler", ""))},
             {"name": "Pruner", "status": "ok", "detail": str(tuned.get("pruner", ""))},
             {"name": "Trials", "status": "ok", "detail": str(tuned.get("trials", 0))},
+            {"name": "Objetivo", "status": "ok", "detail": str(tuned.get("objective", ""))},
+            {"name": "Validacion", "status": "ok", "detail": str(tuned.get("validation_source", ""))},
             {"name": "Presupuesto total", "status": "ok", "detail": str(tuned.get("total_trial_budget") or tuned.get("trials", 0))},
             {"name": "Mejor valor", "status": "ok", "detail": str(tuned.get("best_value", ""))},
             {"name": "Parametros", "status": "ok" if best_params else "info", "detail": ", ".join(best_params.keys()) or "Sin cambios"},
@@ -7232,8 +7943,11 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "feature_count": len(record.get("feature_columns", [])),
         "classes": record.get("classes", []),
         "metrics": record.get("metrics", {}),
+        "raw_metrics": record.get("raw_metrics", {}),
+        "calibrated_metrics": record.get("calibrated_metrics", {}),
         "confusion_matrix": record.get("confusion_matrix", {}),
         "calibration": record.get("calibration", {}),
+        "baseline": record.get("baseline", {}),
         "mode": record.get("mode", ""),
         "eval_strategy": record.get("eval_strategy", ""),
         "prediction_rows": record.get("prediction_rows", 0),
@@ -7326,8 +8040,11 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "feature_count": 0,
         "classes": [],
         "metrics": {},
+        "raw_metrics": {},
+        "calibrated_metrics": {},
         "confusion_matrix": {},
         "calibration": {},
+        "baseline": {},
         "model_type": "",
         "model_profile": "",
         "model_label": "",

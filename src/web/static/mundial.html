@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mundial 2026 | ML-STATSSOCCER</title>
-  <link rel="stylesheet" href="/static/mundial.css?v=20260615-hide-feature-panel">
+  <link rel="stylesheet" href="/static/mundial.css?v=20260615-sklearn-calibration">
 </head>
 <body>
   <header class="topbar">
@@ -169,7 +169,10 @@
           <label>Trials/mercado<input id="xg-n-trials" type="number" min="1" max="100" step="1" value="12"></label>
           <label>Sampler<select id="xg-optuna-sampler"><option value="tpe">TPE</option><option value="random">Random</option><option value="cmaes">CMA-ES</option></select></label>
           <label>Pruner<select id="xg-optuna-pruner"><option value="none">None</option><option value="median">Median</option><option value="successive-halving">Successive Halving</option></select></label>
-          <label>Objetivo<select id="xg-objective"><option value="F1">F1</option><option value="Accuracy">Accuracy</option><option value="Precision">Precision</option><option value="Recall">Recall</option></select></label>
+          <label>Objetivo<select id="xg-objective"><option value="PredictiveScore">PredictiveScore</option><option value="F1">F1</option><option value="Accuracy">Accuracy</option><option value="Precision">Precision</option><option value="Recall">Recall</option><option value="BalancedAccuracy">BalancedAccuracy</option><option value="LogLoss">LogLoss</option><option value="Brier">Brier</option></select></label>
+          <label class="check"><input id="xg-calibration-enabled" type="checkbox" checked> Calibración</label>
+          <label>Método<select id="xg-calibration-method"><option value="sigmoid">Sigmoid</option><option value="isotonic">Isotonic</option></select></label>
+          <label>Selección<select id="xg-feature-selection-mode"><option value="family_balanced">Familias</option><option value="supervised_model">Supervisada</option></select></label>
         </div>
         <div class="actions-row training-actions">
           <button id="xg-refresh-status" type="button">Actualizar estado</button>
@@ -238,6 +241,6 @@
     </section>
   </main>
 
-  <script src="/static/mundial.js?v=20260615-hide-feature-panel"></script>
+  <script src="/static/mundial.js?v=20260615-sklearn-calibration"></script>
 </body>
 </html>

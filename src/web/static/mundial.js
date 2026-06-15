@@ -731,8 +731,11 @@ function xgLightgbmTrainingPayload() {
     n_trials: Number((document.getElementById("xg-n-trials") || {}).value || 12),
     optuna_sampler: (document.getElementById("xg-optuna-sampler") || {}).value || "tpe",
     optuna_pruner: (document.getElementById("xg-optuna-pruner") || {}).value || "none",
-    objective: (document.getElementById("xg-objective") || {}).value || "F1",
+    objective: (document.getElementById("xg-objective") || {}).value || "PredictiveScore",
     tune_params: "all",
+    calibration_enabled: Boolean((document.getElementById("xg-calibration-enabled") || {}).checked),
+    calibration_method: (document.getElementById("xg-calibration-method") || {}).value || "sigmoid",
+    feature_selection_mode: (document.getElementById("xg-feature-selection-mode") || {}).value || "family_balanced",
     seed: Number((document.getElementById("sim-seed") || {}).value || 2026),
     refresh_history: false,
   };
@@ -797,6 +800,8 @@ function applyXgLightgbmDefaults(status) {
     "xg-optuna-sampler": defaults.optuna_sampler,
     "xg-optuna-pruner": defaults.optuna_pruner,
     "xg-objective": defaults.objective,
+    "xg-calibration-method": defaults.calibration_method,
+    "xg-feature-selection-mode": defaults.feature_selection_mode,
   };
   Object.entries(pairs).forEach(([id, value]) => {
     const input = document.getElementById(id);
@@ -804,6 +809,8 @@ function applyXgLightgbmDefaults(status) {
   });
   const tuning = document.getElementById("xg-tuning-enabled");
   if (tuning) tuning.checked = defaults.tuning_enabled !== false;
+  const calibration = document.getElementById("xg-calibration-enabled");
+  if (calibration) calibration.checked = defaults.calibration_enabled !== false;
   state.xgDefaultsApplied = true;
 }
 
@@ -857,19 +864,53 @@ function xgMarketPanelHtml(key, market) {
   const metrics = market.metrics || {};
   const evalMetrics = metrics.eval || {};
   const trainMetrics = metrics.train || {};
+  const calibration = market.calibration || {};
+  const rawEval = ((market.raw_metrics || {}).eval) || (((calibration.raw || {}).metrics || {}).eval) || {};
+  const calibratedEval = ((market.calibrated_metrics || {}).eval) || (((calibration.calibrated || {}).metrics || {}).eval) || {};
+  const comparisonEval = (calibration.comparison || {}).eval || {};
+  const baselineEval = (((market.baseline || {}).metrics || {}).eval) || {};
+  const featureSelection = market.feature_selection || {};
   return `<section class="market-panel">
-    <header><strong>${escapeHtml(market.label || key)}</strong><small>${escapeHtml(market.model_id || "")}</small></header>
+    <header><strong>${escapeHtml(market.label || key)}</strong><small>${escapeHtml(market.model_id || "")} · ${escapeHtml(calibration.applied ? `cal ${calibration.method || ""}` : "raw")}</small></header>
     <div class="confusion-summary">
       ${xgMetricCard("Eval Accuracy", evalMetrics.Accuracy)}
+      ${xgMetricCard("BalancedAcc", evalMetrics.BalancedAccuracy)}
       ${xgMetricCard("Eval F1", evalMetrics.F1)}
       ${xgMetricCard("Precision", evalMetrics.Precision)}
       ${xgMetricCard("Recall", evalMetrics.Recall)}
       ${xgMetricCard("LogLoss", evalMetrics.LogLoss)}
       ${xgMetricCard("Brier", evalMetrics.Brier)}
+      ${xgMetricCard("ECE", evalMetrics.ECE)}
+      ${xgMetricCard("Model-Market Brier", evalMetrics.ModelMinusMarketBrier)}
       ${xgMetricCard("Train rows", market.train_rows)}
       ${xgMetricCard("Val/Test", `${market.validation_rows || 0}/${market.eval_rows || 0}`)}
     </div>
     ${xgConfusionMatrixHtml(market.confusion_matrix || {})}
+    <details>
+      <summary>Raw vs calibrado</summary>
+      <div class="technical-meta-row">
+        <span>enabled ${escapeHtml(calibration.enabled ? "si" : "no")}</span>
+        <span>applied ${escapeHtml(calibration.applied ? "si" : "no")}</span>
+        <span>method ${escapeHtml(calibration.method || "-")}</span>
+        <span>source ${escapeHtml(calibration.source || "-")}</span>
+        <span>raw Brier ${escapeHtml(formatNumber(rawEval.Brier))}</span>
+        <span>cal Brier ${escapeHtml(formatNumber(calibratedEval.Brier))}</span>
+        <span>ΔBrier ${escapeHtml(formatNumber(comparisonEval.BrierDelta))}</span>
+        <span>raw LogLoss ${escapeHtml(formatNumber(rawEval.LogLoss))}</span>
+        <span>cal LogLoss ${escapeHtml(formatNumber(calibratedEval.LogLoss))}</span>
+        <span>baseline Brier ${escapeHtml(formatNumber(baselineEval.Brier))}</span>
+      </div>
+    </details>
+    <details>
+      <summary>Selección features</summary>
+      <div class="technical-meta-row">
+        <span>mode ${escapeHtml(featureSelection.selected_mode || featureSelection.mode || "-")}</span>
+        <span>selected ${escapeHtml(featureSelection.selected_feature_count ?? market.feature_count ?? "-")}</span>
+        <span>dropped ${escapeHtml(featureSelection.dropped_feature_count ?? "-")}</span>
+        <span>val ${escapeHtml(formatNumber(featureSelection.validation_score))}</span>
+        <span>fallback ${escapeHtml(featureSelection.fallback_used ? "si" : "no")}</span>
+      </div>
+    </details>
     <details>
       <summary>Train metrics</summary>
       <div class="technical-meta-row">
@@ -912,7 +953,7 @@ function xgTrainingTuningHtml(model, options) {
   if (!model.trained && !budget) return loadingHtml("Fine-tuning pendiente");
   const head = `<article class="tuning-head">
     <strong>${escapeHtml(trace.enabled ? "Optuna ejecutado" : "Optuna configurado")}</strong>
-    <small>${escapeHtml(trace.trials || budget || 0)} trials · ${escapeHtml(trace.sampler || "tpe")} · test bloqueado</small>
+    <small>${escapeHtml(trace.trials || budget || 0)} trials · ${escapeHtml(trace.sampler || "tpe")} · ${escapeHtml(trace.objective || "por mercado")} · test bloqueado</small>
   </article>`;
   const marketRows = marketKeys.map((key) => {
     const market = markets[key] || {};
@@ -920,7 +961,7 @@ function xgTrainingTuningHtml(model, options) {
     const bestParams = tuning.best_params || {};
     return `<article class="tuning-step">
       <strong>${escapeHtml(market.label || key)}</strong>
-      <small>${escapeHtml(tuning.enabled ? `${tuning.trials || 0} trials · best ${formatNumber(tuning.best_value ?? "-")}` : "Sin fine-tuning")}</small>
+      <small>${escapeHtml(tuning.enabled ? `${tuning.objective || "F1"} · ${tuning.validation_source || "validation"} · best ${formatNumber(tuning.best_value ?? "-")}` : "Sin fine-tuning")}</small>
       ${Object.keys(bestParams).length ? `<div class="technical-meta-row">${Object.entries(bestParams).map(([name, value]) => `<span>${escapeHtml(name)} ${escapeHtml(formatNumber(value))}</span>`).join("")}</div>` : ""}
     </article>`;
   }).join("");
