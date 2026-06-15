@@ -626,40 +626,7 @@ function bestAlternativeHtml(best) {
 }
 
 function featureResearchHtml(featureResearch) {
-  const item = featureResearch || {};
-  const families = item.families || [];
-  const basis = item.research_basis || [];
-  if (!families.length) return "";
-  const active = item.active_or_cached_families || [];
-  return `<details class="report-panel feature-research-panel">
-    <summary><strong>Features para mejorar modelos</strong><small>${escapeHtml(active.length)} familias activas/cacheadas · sin leakage temporal</small></summary>
-    <div class="technical-meta-row">
-      <span>${escapeHtml(item.anti_leakage || "Corte temporal antes del partido")}</span>
-      <span>${escapeHtml(item.recommendation || "")}</span>
-    </div>
-    <div class="client-report-grid alternatives-model-grid">
-      ${families.map((family) => `<article class="benchmark-metric-card">
-        <header>
-          <span>${escapeHtml(family.status || "")}</span>
-          <strong>${escapeHtml(family.label || family.key || "")}</strong>
-        </header>
-        <small>${escapeHtml(family.impact || "")}</small>
-        <div class="technical-meta-row compact">
-          ${(family.features || []).slice(0, 4).map((feature) => `<span>${escapeHtml(feature)}</span>`).join("")}
-        </div>
-      </article>`).join("")}
-    </div>
-    ${basis.length ? `<div class="technical-meta-row research-basis-row">
-      ${basis.map((source) => {
-        const title = typeof source === "string" ? source : source.title || "";
-        const label = typeof source === "string" ? source : `${source.title || ""}: ${source.apply || source.finding || ""}`;
-        const url = typeof source === "string" ? "" : source.url || "";
-        return url
-          ? `<a href="${escapeAttr(url)}" target="_blank" rel="noopener" title="${escapeAttr((source.finding || "").trim())}">${escapeHtml(label)}</a>`
-          : `<span>${escapeHtml(title || label)}</span>`;
-      }).join("")}
-    </div>` : ""}
-  </details>`;
+  return "";
 }
 
 function benchmarkTuningHtml(tuning) {
