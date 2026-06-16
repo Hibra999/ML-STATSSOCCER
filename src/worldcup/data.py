@@ -402,12 +402,12 @@ def _worldcup_now_utc(value: Any | None = None) -> pd.Timestamp:
 def finalizable_worldcup_2026_fixtures(fixture_df: pd.DataFrame, now: Any | None = None) -> pd.DataFrame:
     working = fixture_df.copy()
     working["_date"] = pd.to_datetime(working["Fecha"], utc=True, errors="coerce")
-    working["_kickoff"] = [
+    working["_kickoff"] = pd.to_datetime([
         fixture_kickoff_timestamp(row.get("Fecha"), row.get("Hora"))
         for _, row in working.iterrows()
-    ]
+    ], utc=True, errors="coerce")
     now = _worldcup_now_utc(now)
-    today = now.normalize()
+    today = pd.Timestamp(now).tz_convert(timezone.utc).normalize()
     row_keys = [
         _worldcup_result_key(row.get("Fecha"), row.get("Equipo 1"), row.get("Equipo 2"))
         for _, row in working.iterrows()
@@ -417,8 +417,8 @@ def finalizable_worldcup_2026_fixtures(fixture_df: pd.DataFrame, now: Any | None
     available_by_verified = working["_date"].notna() & (working["_date"] <= today) & (
         verified_source | pd.Series([key in verified_keys for key in row_keys], index=working.index)
     )
-    has_time = pd.to_datetime(working["_kickoff"], utc=True, errors="coerce").notna()
-    available_by_time = has_time & (pd.to_datetime(working["_kickoff"], utc=True, errors="coerce") <= now)
+    has_time = working["_kickoff"].notna()
+    available_by_time = has_time & (working["_kickoff"] <= now)
     available_by_date = ~has_time & working["_date"].notna() & (working["_date"] <= today)
     return working[
         working["_date"].notna()

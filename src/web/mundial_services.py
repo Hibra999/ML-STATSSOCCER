@@ -881,6 +881,7 @@ _WORLD_CUP_RESULTS_AUTO_REFRESH_LOCK = threading.Lock()
 _WORLD_CUP_RESULTS_AUTO_REFRESHED = False
 _WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY: Dict[str, Any] = {}
 _WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT: datetime | None = None
+_WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT: datetime | None = None
 
 
 def _utcify_datetime(value: Any | None = None) -> datetime:
@@ -895,6 +896,14 @@ def _world_cup_results_autorefresh_stale(now: Any | None = None) -> bool:
     if _WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT is None:
         return True
     last = _utcify_datetime(_WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT)
+    return current.date() != last.date()
+
+
+def _world_cup_fixture_autorefresh_stale(now: Any | None = None) -> bool:
+    current = _utcify_datetime(now)
+    if _WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT is None:
+        return True
+    last = _utcify_datetime(_WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT)
     return current.date() != last.date()
 
 
@@ -2035,7 +2044,12 @@ def alternatives_benchmark_report(
         hardware: Dict[str, Any],
         progress_callback=None,
 ) -> Dict[str, Any]:
-    tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    global _WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT
+    now = _now_utc()
+    refresh_fixtures = bool(config["refresh"]) or _world_cup_fixture_autorefresh_stale(now)
+    if refresh_fixtures:
+        _WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT = _utcify_datetime(now)
+    tournament, fixture_source = load_tournament_2026(refresh=refresh_fixtures)
     ensure_worldcup_results_autorefreshed_once(tournament)
     results_refresh = refresh_worldcup_2026_results(tournament, refresh=True)
     history_df, history_source = score_history_for_tournament(tournament, config)
@@ -2538,10 +2552,12 @@ def confirmed_worldcup_2026_backtest_rows(tournament: Dict[str, Any]) -> pd.Data
     if working.empty:
         return pd.DataFrame(columns=["No.", "Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group", "Source"])
     working = attach_fixture_schedule(working)
-    now = _utcify_datetime(_now_utc())
-    today = pd.Timestamp(now).tz_convert(timezone.utc).normalize()
-    has_time = working["_has_kickoff_time"].astype(bool)
-    available_by_time = has_time & working["_kickoff"].notna() & (working["_kickoff"] <= now)
+    now = pd.Timestamp(_utcify_datetime(_now_utc())).tz_convert(timezone.utc)
+    today = now.normalize()
+    working["_date"] = pd.to_datetime(working["_date"], utc=True, errors="coerce")
+    working["_kickoff"] = pd.to_datetime(working["_kickoff"], utc=True, errors="coerce")
+    has_time = working["_kickoff"].notna()
+    available_by_time = has_time & (working["_kickoff"] <= now)
     available_by_date = ~has_time & working["_date"].notna() & (working["_date"] <= today)
     verified_source = working.get("Fuente Resultado", pd.Series("", index=working.index)).astype(str).str.lower().str.startswith("verified:")
     available_by_verified = verified_source & working["_date"].notna() & (working["_date"] <= today)
