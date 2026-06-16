@@ -1,6 +1,6 @@
 {
   "prepared_schema_version": "worldcup_2026_international_since_2014_v6_teams_scope_split_80_10_10",
-  "prepared_at": "2026-06-16T03:07:47.917267+00:00",
+  "prepared_at": "2026-06-16T03:41:45.903152+00:00",
   "training_mode": "match_result",
   "source_mode": "international_only",
   "source_files": [
@@ -36,7 +36,7 @@
     "sources": [
       "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
     ],
-    "loaded_at": "2026-06-16T03:07:37.486948+00:00"
+    "loaded_at": "2026-06-16T03:41:36.437643+00:00"
   },
   "market_warnings": [
     "Football-Data XLSX no disponible en cache: storage/worldcup/market/WorldCup2026.xlsx."
@@ -46,7 +46,7 @@
     "sources": [
       "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
     ],
-    "loaded_at": "2026-06-16T03:07:37.522546+00:00"
+    "loaded_at": "2026-06-16T03:41:36.469142+00:00"
   },
   "api_football_warnings": [],
   "api_football_fixture_rows": 63,
@@ -192,7 +192,7 @@
     "friendly": 0.6
   },
   "data_quality": {
-    "prepared_at": "2026-06-16T03:07:47.917267+00:00",
+    "prepared_at": "2026-06-16T03:41:45.903152+00:00",
     "strength": "debil",
     "sources": {
       "all_matches": {
@@ -207,7 +207,7 @@
         "rows": 0,
         "has_1x2": false,
         "has_ou25": false,
-        "updated_at": "2026-06-16T03:07:37.486948+00:00",
+        "updated_at": "2026-06-16T03:41:36.437643+00:00",
         "sources": [
           "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
         ]
@@ -219,7 +219,7 @@
         "team_stats": 126,
         "odds": 0,
         "market_rows": 0,
-        "updated_at": "2026-06-16T03:07:37.522546+00:00",
+        "updated_at": "2026-06-16T03:41:36.469142+00:00",
         "sources": [
           "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
         ]
@@ -227,17 +227,17 @@
       "lineups": {
         "available": false,
         "rows": 0,
-        "updated_at": "2026-06-16T03:07:37.522546+00:00"
+        "updated_at": "2026-06-16T03:41:36.469142+00:00"
       },
       "injuries": {
         "available": false,
         "rows": 0,
-        "updated_at": "2026-06-16T03:07:37.522546+00:00"
+        "updated_at": "2026-06-16T03:41:36.469142+00:00"
       },
       "player_stats": {
         "available": true,
         "rows": 126,
-        "updated_at": "2026-06-16T03:07:37.522546+00:00"
+        "updated_at": "2026-06-16T03:41:36.469142+00:00"
       }
     },
     "missing_sources": [
@@ -300,6 +300,7 @@
     "Uzbekistan"
   ],
   "max_label_date": "2026-06-16",
+  "max_label_cutoff": "2026-06-16T03:41:00",
   "removed_before_start_rows": 0,
   "removed_future_rows": 0,
   "raw_international_source_rows": 49417,

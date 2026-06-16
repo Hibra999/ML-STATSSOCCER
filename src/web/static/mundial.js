@@ -773,7 +773,7 @@ function renderXgLightgbmTrainingStatus(payload) {
     ${reportSummaryCard("Modelo", modelLabel)}
     ${reportSummaryCard("Device", `${((model.hardware || {}).actual_device) || ((options.hardware || {}).device_default) || "auto"}`)}
   `;
-  document.getElementById("xg-etl-subtitle").textContent = `${split.policy || "temporal_80_10_10"} · desde ${split.training_start_year || 2014} · scope ${teamScopeCount || 48} equipos · max label ${split.max_label_date || "-"}`;
+  document.getElementById("xg-etl-subtitle").textContent = `${split.policy || "temporal_80_10_10"} · desde ${split.training_start_year || 2014} · scope ${teamScopeCount || 48} equipos · corte ${split.max_label_cutoff || split.max_label_date || "-"}`;
   document.getElementById("xg-model-subtitle").textContent = model.trained ? `${model.model_id || ""} · ${formatReportDateTime(model.trained_at || "")}` : status.default_model_id || "Sin bundle entrenado";
   document.getElementById("xg-market-subtitle").textContent = `${(options.required_markets || []).length} mercados requeridos${(options.optional_markets || []).length ? " + distribución goles" : ""}`;
   document.getElementById("xg-tuning-subtitle").textContent = status.anti_leakage || "Validation temporal";

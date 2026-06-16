@@ -1,4 +1,5 @@
 import pickle
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -232,6 +233,43 @@ def test_international_training_scope_keeps_since_2014_and_drops_future_dates():
     assert pd.to_datetime(filtered["Date"]).dt.year.min() == 2014
     assert stats["removed_before_start"] == 1
     assert stats["removed_future"] == 1
+
+
+def test_international_training_scope_uses_current_minute_cutoff(monkeypatch):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            current = datetime(2026, 6, 16, 12, 34, 56, tzinfo=timezone.utc)
+            return current.astimezone(tz) if tz else current.replace(tzinfo=None)
+
+    monkeypatch.setattr(training, "datetime", FrozenDateTime)
+    rows = training.sanitize_match_rows(pd.DataFrame([
+        {"Date": "2013-12-31 23:59:00", "Home": "Mexico", "Away": "Canada", "HG": 1, "AG": 0, "Label": "H"},
+        {"Date": "2014-01-01 00:00:00", "Home": "Mexico", "Away": "Canada", "HG": 1, "AG": 0, "Label": "H"},
+        {"Date": "2026-06-16 12:33:59", "Home": "Canada", "Away": "Mexico", "HG": 0, "AG": 1, "Label": "A"},
+        {"Date": "2026-06-16 12:34:00", "Home": "Brazil", "Away": "France", "HG": 1, "AG": 1, "Label": "D"},
+        {"Date": "2026-06-16 12:35:00", "Home": "Japan", "Away": "Germany", "HG": 2, "AG": 2, "Label": "D"},
+    ]))
+
+    filtered, stats = training.filter_international_training_scope(rows)
+
+    assert filtered[["Home", "Away"]].to_dict(orient="records") == [
+        {"Home": "Mexico", "Away": "Canada"},
+        {"Home": "Canada", "Away": "Mexico"},
+    ]
+    assert stats["removed_before_start"] == 1
+    assert stats["removed_future"] == 2
+    assert stats["max_label_date"] == "2026-06-16"
+    assert stats["max_label_cutoff"] == "2026-06-16T12:34:00"
+
+    scoped = training.filter_training_scope_frame(
+        pd.DataFrame([
+            {"Date": "2026-06-16 12:33:00", "Team": "Mexico"},
+            {"Date": "2026-06-16 12:34:00", "Team": "Canada"},
+        ]),
+        keep_unknown_date=False,
+    )
+    assert scoped["Team"].tolist() == ["Mexico"]
 
 
 def test_training_scope_frame_filters_support_sources_since_2014():

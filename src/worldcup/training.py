@@ -805,6 +805,7 @@ def dataset_status() -> Dict[str, Any]:
         "training_scope_team_count": int(prepared.get("training_scope_team_count", 0) or 0),
         "training_scope_teams": prepared.get("training_scope_teams", []),
         "max_label_date": prepared.get("max_label_date", ""),
+        "max_label_cutoff": prepared.get("max_label_cutoff", ""),
         "raw_international_source_rows": int(prepared.get("raw_international_source_rows", 0) or 0),
         "date_scoped_international_source_rows": int(prepared.get("date_scoped_international_source_rows", 0) or 0),
         "team_scoped_international_source_rows": int(prepared.get("team_scoped_international_source_rows", 0) or 0),
@@ -1483,6 +1484,7 @@ def train_single_hybrid_model(
         "split_policy": normalized.get("split_policy", ""),
         "training_start_year": int(normalized.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
         "max_label_date": normalized.get("max_label_date", ""),
+        "max_label_cutoff": normalized.get("max_label_cutoff", ""),
         "validation_rows": int(x_validation.shape[0]) if isinstance(x_validation, pd.DataFrame) else 0,
     }
     if walk_forward_summary["warnings"]:
@@ -1530,6 +1532,7 @@ def train_single_hybrid_model(
         "split_policy": normalized.get("split_policy", ""),
         "training_start_year": record["training_start_year"],
         "max_label_date": record["max_label_date"],
+        "max_label_cutoff": record.get("max_label_cutoff", ""),
         "all_matches_rows": int(normalized.get("all_matches_rows", 0) or 0),
         "worldcup_rows": int(normalized.get("worldcup_rows", 0) or 0),
         "class_distribution": normalized.get("class_distribution", {}),
@@ -1735,6 +1738,7 @@ def train_dual_market_model(
         "split_policy": normalized.get("split_policy", ""),
         "training_start_year": int(normalized.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
         "max_label_date": normalized.get("max_label_date", ""),
+        "max_label_cutoff": normalized.get("max_label_cutoff", ""),
         "validation_rows": int(result_record.get("validation_rows", 0) or 0),
     }
     emit_training_progress(progress_callback, "saving", total_steps - 1, total_steps, "Guardando bundle de mercados", model_id=bundle_id)
@@ -1783,6 +1787,7 @@ def train_dual_market_model(
         "split_policy": bundle_record["split_policy"],
         "training_start_year": bundle_record["training_start_year"],
         "max_label_date": bundle_record["max_label_date"],
+        "max_label_cutoff": bundle_record.get("max_label_cutoff", ""),
         "all_matches_rows": bundle_record["all_matches_rows"],
         "worldcup_rows": bundle_record["worldcup_rows"],
         "class_distribution": bundle_record["class_distribution"],
@@ -2056,13 +2061,57 @@ def training_scope_dates(frame: pd.DataFrame, column: Any) -> pd.Series:
             )
         return year_dates.dt.normalize()
     dates = pd.to_datetime(frame.get(column), errors="coerce", utc=True)
-    return dates.dt.tz_convert(None).dt.normalize()
+    return dates.dt.tz_convert(None)
+
+
+def current_training_cutoff_timestamp() -> pd.Timestamp:
+    now = pd.Timestamp(datetime.now(timezone.utc)).floor("min")
+    return now.tz_convert(None) if now.tzinfo is not None else now
+
+
+def training_cutoff_timestamp(value: Optional[Any] = None) -> pd.Timestamp:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return current_training_cutoff_timestamp()
+    try:
+        if not isinstance(value, (pd.Series, pd.DataFrame, list, tuple, dict, np.ndarray)) and pd.isna(value):
+            return current_training_cutoff_timestamp()
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, pd.Timestamp):
+        ts = value
+    elif isinstance(value, datetime):
+        ts = pd.Timestamp(value)
+    elif isinstance(value, date):
+        return pd.Timestamp(value) + pd.Timedelta(days=1)
+    else:
+        text = str(value).strip()
+        parsed = pd.to_datetime(text, errors="coerce", utc=True)
+        if pd.isna(parsed):
+            return current_training_cutoff_timestamp()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return pd.Timestamp(parsed).tz_convert(None) + pd.Timedelta(days=1)
+        ts = pd.Timestamp(parsed)
+    return ts.tz_convert(None) if ts.tzinfo is not None else ts
+
+
+def training_cutoff_label_date(value: Optional[Any], cutoff_ts: pd.Timestamp) -> str:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return cutoff_ts.date().isoformat()
+    if isinstance(value, datetime):
+        return pd.Timestamp(value).date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    text = str(value).strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
+    return cutoff_ts.date().isoformat()
 
 
 def filter_training_scope_frame(
         frame: pd.DataFrame,
         *,
         start_year: int = INTERNATIONAL_TRAINING_START_YEAR,
+        max_timestamp: Optional[Any] = None,
         date_columns: Optional[Iterable[str]] = None,
         keep_unknown_date: bool = True,
 ) -> pd.DataFrame:
@@ -2075,7 +2124,8 @@ def filter_training_scope_frame(
         return frame.copy().reset_index(drop=True)
     dates = training_scope_dates(frame, column)
     start_ts = pd.Timestamp(f"{int(start_year)}-01-01")
-    keep = dates.ge(start_ts)
+    cutoff_ts = training_cutoff_timestamp(max_timestamp)
+    keep = dates.ge(start_ts) & dates.lt(cutoff_ts)
     if keep_unknown_date:
         keep = keep | dates.isna()
     return frame.loc[keep.fillna(False)].copy().reset_index(drop=True)
@@ -2263,7 +2313,7 @@ def build_prepared_dataset(
         )
     if scope_stats["removed_future"]:
         label_policy_notes.append(
-            f"{scope_stats['removed_future']} partidos posteriores a {scope_stats['max_label_date']} quedaron fuera por fecha futura."
+            f"{scope_stats['removed_future']} partidos en o despues del corte {scope_stats['max_label_cutoff']} quedaron fuera por fecha futura."
         )
     if removed_outside_team_scope or removed_outside_team_scope_labels:
         label_policy_notes.append(
@@ -2358,6 +2408,7 @@ def build_prepared_dataset(
         "training_scope_team_count": int(len(scope_teams)),
         "training_scope_teams": scope_teams,
         "max_label_date": scope_stats["max_label_date"],
+        "max_label_cutoff": scope_stats["max_label_cutoff"],
         "removed_before_start_rows": scope_stats["removed_before_start"],
         "removed_future_rows": scope_stats["removed_future"],
         "raw_international_source_rows": raw_international_source_rows,
@@ -2390,27 +2441,27 @@ def filter_international_training_scope(
         start_year: int = INTERNATIONAL_TRAINING_START_YEAR,
         max_date: Optional[Any] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    cutoff_ts = training_cutoff_timestamp(max_date)
+    label_date = training_cutoff_label_date(max_date, cutoff_ts)
     if rows.empty:
         return sanitize_match_rows(rows), {
             "removed_before_start": 0,
             "removed_future": 0,
-            "max_label_date": str(max_date or datetime.now(timezone.utc).date()),
+            "max_label_date": label_date,
+            "max_label_cutoff": cutoff_ts.isoformat(),
         }
     working = sort_match_rows(sanitize_match_rows(rows))
-    date_values = pd.to_datetime(working.get("Date"), errors="coerce")
+    date_values = pd.to_datetime(working.get("Date"), errors="coerce", utc=True).dt.tz_convert(None)
     start_ts = pd.Timestamp(f"{int(start_year)}-01-01")
-    max_ts = pd.Timestamp(max_date if max_date is not None else datetime.now(timezone.utc).date())
-    if max_ts.tzinfo is not None:
-        max_ts = max_ts.tz_convert(None)
-    date_only = date_values.dt.normalize()
-    before_start = date_only.notna() & date_only.lt(start_ts)
-    future = date_only.notna() & date_only.gt(max_ts.normalize())
-    keep = date_only.notna() & ~before_start & ~future
+    before_start = date_values.notna() & date_values.lt(start_ts)
+    future = date_values.notna() & date_values.ge(cutoff_ts)
+    keep = date_values.notna() & ~before_start & ~future
     filtered = sort_match_rows(working[keep].copy()).reset_index(drop=True)
     return filtered, {
         "removed_before_start": int(before_start.sum()),
         "removed_future": int(future.sum()),
-        "max_label_date": max_ts.date().isoformat(),
+        "max_label_date": label_date,
+        "max_label_cutoff": cutoff_ts.isoformat(),
     }
 
 
@@ -2916,6 +2967,7 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
             "training_scope_team_count": len(default_scope_teams),
             "training_scope_teams": default_scope_teams,
             "max_label_date": "",
+            "max_label_cutoff": "",
             "raw_international_source_rows": 0,
             "date_scoped_international_source_rows": 0,
             "team_scoped_international_source_rows": 0,
@@ -2969,6 +3021,7 @@ def prepared_dataset_status(files: List[Path], normalized: Dict[str, Any]) -> Di
         "training_scope_team_count": len(default_scope_teams) if schema_stale else int(dataset.get("training_scope_team_count", len(default_scope_teams)) or len(default_scope_teams)),
         "training_scope_teams": default_scope_teams if schema_stale else dataset.get("training_scope_teams", default_scope_teams),
         "max_label_date": "" if schema_stale else str(dataset.get("max_label_date") or ""),
+        "max_label_cutoff": "" if schema_stale else str(dataset.get("max_label_cutoff") or ""),
         "raw_international_source_rows": 0 if schema_stale else int(dataset.get("raw_international_source_rows", 0) or 0),
         "date_scoped_international_source_rows": 0 if schema_stale else int(dataset.get("date_scoped_international_source_rows", 0) or 0),
         "team_scoped_international_source_rows": 0 if schema_stale else int(dataset.get("team_scoped_international_source_rows", 0) or 0),
@@ -3018,6 +3071,7 @@ def prepared_dataset_metadata(dataset: Dict[str, Any]) -> Dict[str, Any]:
         "training_scope_team_count": int(dataset.get("training_scope_team_count", 0) or 0),
         "training_scope_teams": dataset.get("training_scope_teams", []),
         "max_label_date": dataset.get("max_label_date", ""),
+        "max_label_cutoff": dataset.get("max_label_cutoff", ""),
         "removed_before_start_rows": int(dataset.get("removed_before_start_rows", 0) or 0),
         "removed_future_rows": int(dataset.get("removed_future_rows", 0) or 0),
         "raw_international_source_rows": int(dataset.get("raw_international_source_rows", 0) or 0),
@@ -8070,6 +8124,7 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "split_policy": record.get("split_policy", ""),
         "training_start_year": int(record.get("training_start_year", INTERNATIONAL_TRAINING_START_YEAR) or INTERNATIONAL_TRAINING_START_YEAR),
         "max_label_date": record.get("max_label_date", ""),
+        "max_label_cutoff": record.get("max_label_cutoff", ""),
         "validation_rows": int(record.get("validation_rows", 0) or 0),
         "hidden_from_catalog": bool(record.get("hidden_from_catalog", False)),
         "markets": record.get("markets", {}),

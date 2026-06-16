@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pandas as pd
@@ -457,6 +458,44 @@ def test_international_recent_filters_pre_2014_rows(tmp_path, monkeypatch):
     assert [str(row["date"].date()) for row in rows] == ["2014-01-02", "2026-06-10"]
     assert features.loc[features["Team"] == "Mexico", "recent15_matches"].iloc[0] == pytest.approx(2.0)
     assert context["start_date"] == "2014-01-01"
+    assert context["home_recent"]["features"]["recent15_matches"] == pytest.approx(2.0)
+
+
+def test_international_recent_uses_current_minute_when_fixture_is_future(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            current = datetime(2026, 6, 16, 12, 34, 56, tzinfo=timezone.utc)
+            return current.astimezone(tz) if tz else current.replace(tzinfo=None)
+
+    monkeypatch.setattr(international_provider, "datetime", FrozenDateTime)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", tmp_path)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", tmp_path / "all_matches.csv")
+    pd.DataFrame([
+        {"date": "2014-01-02 00:00:00", "home_team": "Mexico", "away_team": "Canada", "home_score": 1, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2026-06-16 12:33:00", "home_team": "Mexico", "away_team": "USA", "home_score": 2, "away_score": 1, "tournament": "FIFA World Cup qualification", "neutral": False},
+        {"date": "2026-06-16 12:34:00", "home_team": "Mexico", "away_team": "Brazil", "home_score": 9, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2026-06-17 00:00:00", "home_team": "Mexico", "away_team": "Japan", "home_score": 8, "away_score": 0, "tournament": "Friendly", "neutral": False},
+    ]).to_csv(international_provider.INTERNATIONAL_MATCHES_FILE, index=False)
+
+    matches = international_provider.load_international_matches(required=True)
+    rows = international_provider.team_recent_rows(matches, "Mexico", before_date="2026-06-20", limit=15)
+    features = international_provider.recent15_feature_table(matches, teams=["Mexico"], before_date="2026-06-20")
+    context = international_provider.contextual_poisson_for_match(
+        "Mexico",
+        "Canada",
+        before_date="2026-06-20",
+        matches=matches,
+    )
+
+    assert [str(row["date"]) for row in rows] == [
+        "2014-01-02 00:00:00",
+        "2026-06-16 12:33:00",
+    ]
+    assert features.loc[features["Team"] == "Mexico", "recent15_matches"].iloc[0] == pytest.approx(2.0)
+    assert context["data_cutoff"] == "2026-06-16T12:34:00"
     assert context["home_recent"]["features"]["recent15_matches"] == pytest.approx(2.0)
 
 

@@ -67,6 +67,7 @@ from src.worldcup.international_provider import (
     INTERNATIONAL_ROOT,
     INTERNATIONAL_RECENT_START_DATE,
     contextual_poisson_for_match,
+    international_cutoff_timestamp,
     international_results_status,
     is_friendly_tournament,
     load_international_matches,
@@ -1819,6 +1820,7 @@ def xg_lightgbm_training_status() -> Dict[str, Any]:
         "removed_outside_team_scope_rows": int(dataset.get("removed_outside_team_scope_rows", 0) or 0),
         "removed_outside_team_scope_label_rows": int(dataset.get("removed_outside_team_scope_label_rows", 0) or 0),
         "max_label_date": dataset.get("max_label_date", ""),
+        "max_label_cutoff": dataset.get("max_label_cutoff", ""),
         "label_source": dataset.get("prepared_label_source", ""),
     }
     planned_market_count = len(required_markets) + len(optional_markets)
@@ -2612,7 +2614,7 @@ def recent_international_team_matches(matches: pd.DataFrame, team: str, before_d
     if not required.issubset(matches.columns):
         return []
     working = matches.copy()
-    working["_date"] = pd.to_datetime(working["date"], errors="coerce")
+    working["_date"] = pd.to_datetime(working["date"], errors="coerce", utc=True).dt.tz_convert(None)
     working["_home_score"] = pd.to_numeric(working["home_score"], errors="coerce")
     working["_away_score"] = pd.to_numeric(working["away_score"], errors="coerce")
     working = working[
@@ -2621,9 +2623,8 @@ def recent_international_team_matches(matches: pd.DataFrame, team: str, before_d
         & working["_away_score"].notna()
     ].copy()
     working = working[working["_date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE)].copy()
-    cutoff = pd.to_datetime(before_date, errors="coerce")
-    if pd.notna(cutoff):
-        working = working[working["_date"] < cutoff].copy()
+    cutoff = international_cutoff_timestamp(before_date)
+    working = working[working["_date"] < cutoff].copy()
     team_key = team_name_key(team)
     home_keys = working["home_team"].map(team_name_key)
     away_keys = working["away_team"].map(team_name_key)

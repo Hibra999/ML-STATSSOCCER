@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import shutil
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -348,6 +348,32 @@ def resolve_international_columns(columns: Iterable[str]) -> Dict[str, str]:
     return resolved
 
 
+def current_international_cutoff_timestamp() -> pd.Timestamp:
+    now = pd.Timestamp(datetime.now(timezone.utc)).floor("min")
+    return now.tz_convert(None) if now.tzinfo is not None else now
+
+
+def international_cutoff_timestamp(before_date: Optional[Any] = None) -> pd.Timestamp:
+    current_cutoff = current_international_cutoff_timestamp()
+    if before_date is None or (isinstance(before_date, str) and not before_date.strip()):
+        return current_cutoff
+    try:
+        if not isinstance(before_date, (pd.Series, pd.DataFrame, list, tuple, dict, np.ndarray)) and pd.isna(before_date):
+            return current_cutoff
+    except (TypeError, ValueError):
+        pass
+    parsed = pd.to_datetime(before_date, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        return current_cutoff
+    cutoff = pd.Timestamp(parsed)
+    cutoff = cutoff.tz_convert(None) if cutoff.tzinfo is not None else cutoff
+    return min(cutoff, current_cutoff)
+
+
+def international_datetime_series(values: Any) -> pd.Series:
+    return pd.to_datetime(values, errors="coerce", utc=True).dt.tz_convert(None)
+
+
 def recent15_feature_table(
         matches: Optional[pd.DataFrame] = None,
         teams: Optional[Iterable[str]] = None,
@@ -387,7 +413,7 @@ def build_recent15_match_index(matches: Optional[pd.DataFrame]) -> Dict[str, pd.
         return {}
 
     working = matches.copy()
-    working["date"] = pd.to_datetime(working.get("date"), errors="coerce")
+    working["date"] = international_datetime_series(working.get("date"))
     working["home_score"] = pd.to_numeric(working.get("home_score"), errors="coerce")
     working["away_score"] = pd.to_numeric(working.get("away_score"), errors="coerce")
     working = working[
@@ -395,7 +421,11 @@ def build_recent15_match_index(matches: Optional[pd.DataFrame]) -> Dict[str, pd.
         & working["home_score"].notna()
         & working["away_score"].notna()
     ].copy()
-    working = working[working["date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE)].copy()
+    cutoff = current_international_cutoff_timestamp()
+    working = working[
+        (working["date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE))
+        & (working["date"] < cutoff)
+    ].copy()
     if working.empty:
         return {}
 
@@ -448,19 +478,18 @@ def recent15_feature_table_from_index(
     if teams is None:
         teams = sorted(match_index.keys())
     requested = [(str(team or "").strip(), canonical_team_name(team)) for team in teams]
-    cutoff = pd.to_datetime(before_date, errors="coerce")
+    cutoff = international_cutoff_timestamp(before_date)
     max_rows = max(int(limit or RECENT_MATCH_LIMIT), 1)
     rows: List[Dict[str, Any]] = []
     for display, canonical in requested:
         frame = match_index.get(canonical)
         if frame is None or frame.empty:
-            rows.append(recent15_summary_features(display, [], before_date=before_date))
+            rows.append(recent15_summary_features(display, [], before_date=cutoff))
             continue
         scoped = frame
-        if pd.notna(cutoff):
-            scoped = scoped[scoped["date"] < pd.Timestamp(cutoff)]
+        scoped = scoped[scoped["date"] < cutoff]
         if scoped.empty:
-            rows.append(recent15_summary_features(display, [], before_date=before_date))
+            rows.append(recent15_summary_features(display, [], before_date=cutoff))
             continue
         recent = scoped.tail(max_rows).copy().reset_index(drop=True)
         total = max(int(recent.shape[0]), 1)
@@ -483,7 +512,7 @@ def recent15_feature_table_from_index(
         recent["difficulty_factor"] = np.clip(1.0 + ((recent["opponent_rating"] - 1500.0) / 900.0), 0.72, 1.32)
         recent["adjusted_gf"] = recent["gf"].astype(float) * recent["difficulty_factor"]
         recent["adjusted_ga"] = recent["ga"].astype(float) / recent["difficulty_factor"].clip(lower=1e-9)
-        feature_row = recent15_summary_features(display, recent.to_dict(orient="records"), before_date=before_date)
+        feature_row = recent15_summary_features(display, recent.to_dict(orient="records"), before_date=cutoff)
         rows.append(feature_row)
     return pd.DataFrame(rows).fillna(0.0) if rows else pd.DataFrame(columns=["Team", *RECENT15_NUMERIC_COLUMNS])
 
@@ -498,17 +527,18 @@ def recent15_feature_rows_vectorized(
     requested = [(str(team or "").strip(), canonical_team_name(team)) for team in teams]
     if not requested:
         return []
-    base_rows = {display: recent15_summary_features(display, [], before_date=before_date) for display, _ in requested}
+    cutoff = international_cutoff_timestamp(before_date)
+    base_rows = {display: recent15_summary_features(display, [], before_date=cutoff) for display, _ in requested}
     if matches is None or matches.empty:
         return [base_rows[display] for display, _ in requested]
 
     working = matches.copy()
-    working["date"] = pd.to_datetime(working.get("date"), errors="coerce")
+    working["date"] = international_datetime_series(working.get("date"))
     working = working[working["date"].notna()].copy()
-    working = working[working["date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE)].copy()
-    cutoff = pd.to_datetime(before_date, errors="coerce")
-    if pd.notna(cutoff):
-        working = working[working["date"] < pd.Timestamp(cutoff)].copy()
+    working = working[
+        (working["date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE))
+        & (working["date"] < cutoff)
+    ].copy()
     if working.empty:
         return [base_rows[display] for display, _ in requested]
 
@@ -630,8 +660,9 @@ def recent15_team_context(
     matches = load_international_matches(required=False) if matches is None else matches
     display_team = str(team or "").strip()
     canonical = canonical_team_name(display_team)
-    rows = team_recent_rows(matches, canonical, before_date=before_date, limit=limit, base_model=base_model)
-    features = recent15_summary_features(display_team, rows, before_date=before_date)
+    cutoff = international_cutoff_timestamp(before_date)
+    rows = team_recent_rows(matches, canonical, before_date=cutoff, limit=limit, base_model=base_model)
+    features = recent15_summary_features(display_team, rows, before_date=cutoff)
     return {
         "team": display_team,
         "canonical_team": canonical,
@@ -651,11 +682,12 @@ def contextual_poisson_for_match(
 ) -> Dict[str, Any]:
     matches = load_international_matches(required=False) if matches is None else matches
     source_path = str(getattr(matches, "attrs", {}).get("source_path") or INTERNATIONAL_MATCHES_FILE)
+    cutoff = international_cutoff_timestamp(before_date)
     if matches is None or matches.empty:
         return unavailable_context("all_matches.csv no disponible", source_path, home, away, before_date, base_model=base_model, max_goals=max_goals, limit=limit)
 
-    home_context = recent15_team_context(home, matches, before_date=before_date, limit=limit, base_model=base_model)
-    away_context = recent15_team_context(away, matches, before_date=before_date, limit=limit, base_model=base_model)
+    home_context = recent15_team_context(home, matches, before_date=cutoff, limit=limit, base_model=base_model)
+    away_context = recent15_team_context(away, matches, before_date=cutoff, limit=limit, base_model=base_model)
     home_features = home_context["features"]
     away_features = away_context["features"]
     if not home_context["matches"] and not away_context["matches"]:
@@ -696,6 +728,7 @@ def contextual_poisson_for_match(
         "source_path": source_path,
         "start_date": INTERNATIONAL_RECENT_START_DATE,
         "before_date": date_to_string(before_date),
+        "data_cutoff": cutoff.isoformat(),
         "match_limit": int(limit),
         **matrix_payload,
         "home_recent": home_context,
@@ -752,11 +785,13 @@ def team_recent_rows(
         return []
     team_key = canonical_team_name(canonical_team)
     scoped = matches[(matches["home_team"] == team_key) | (matches["away_team"] == team_key)].copy()
-    scoped["_date"] = pd.to_datetime(scoped["date"], errors="coerce")
-    scoped = scoped[scoped["_date"].notna() & (scoped["_date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE))].copy()
-    cutoff = pd.to_datetime(before_date, errors="coerce")
-    if pd.notna(cutoff):
-        scoped = scoped[scoped["_date"] < cutoff].copy()
+    scoped["_date"] = international_datetime_series(scoped["date"])
+    cutoff = international_cutoff_timestamp(before_date)
+    scoped = scoped[
+        scoped["_date"].notna()
+        & (scoped["_date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE))
+        & (scoped["_date"] < cutoff)
+    ].copy()
     if scoped.empty:
         return []
     scoped = scoped.sort_values("_date", kind="stable").tail(int(limit)).reset_index(drop=True)
@@ -834,7 +869,7 @@ def recent15_summary_features(team: str, rows: List[Dict[str, Any]], before_date
         "recent15_over25_rate": float(((frame["gf"] + frame["ga"]) > 2.5).mean()),
         "recent15_btts_rate": float(((frame["gf"] > 0) & (frame["ga"] > 0)).mean()),
     })
-    cutoff = pd.to_datetime(before_date, errors="coerce")
+    cutoff = international_cutoff_timestamp(before_date)
     last_date = pd.Timestamp(frame["date"].max()) if not frame.empty else pd.NaT
     if pd.notna(cutoff) and pd.notna(last_date):
         output["recent15_days_since_last_match"] = float(max((pd.Timestamp(cutoff) - last_date).days, 0))
@@ -910,6 +945,7 @@ def unavailable_context(
 ) -> Dict[str, Any]:
     lambda_home, lambda_away = base_lambdas(base_model, home, away)
     matrix_payload = poisson_matrix_payload(lambda_home, lambda_away, max_goals=max_goals)
+    cutoff = international_cutoff_timestamp(before_date)
     return {
         "available": False,
         "matrix_available": True,
@@ -919,6 +955,7 @@ def unavailable_context(
         "dataset_slug": INTERNATIONAL_DATASET_SLUG,
         "source_path": source_path,
         "before_date": date_to_string(before_date),
+        "data_cutoff": cutoff.isoformat(),
         "match_limit": int(limit),
         **matrix_payload,
         "home_recent": {"team": home, "canonical_team": canonical_team_name(home), "features": recent15_summary_features(home, []), "matches": []},
