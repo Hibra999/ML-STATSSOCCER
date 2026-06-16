@@ -1027,6 +1027,7 @@ def _history_model_rows(history_df: pd.DataFrame | None, base_model: Any, recenc
     rows: List[Dict[str, Any]] = []
     working = history_df.copy()
     if "Date" in working:
+        working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
         working = working.sort_values("Date", kind="stable")
     working["_score_model_weight"] = _history_row_weights(working, recency_weight)
     for _, row in working.iterrows():

@@ -28,6 +28,19 @@ def test_score_model_grids_are_normalized_and_non_negative():
         assert np.all(grid >= 0.0)
 
 
+def test_worldcup_model_from_history_handles_mixed_date_types_safely():
+    history = pd.DataFrame([
+        {"Date": pd.Timestamp("2026-06-10"), "Team 1": "Mexico", "Team 2": "Canada", "G1": 2, "G2": 1},
+        {"Date": "2026-06-08", "Team 1": "Canada", "Team 2": "USA", "G1": 0, "G2": 1},
+        {"Date": pd.to_datetime("2026-06-12"), "Team 1": "USA", "Team 2": "Mexico", "G1": 1, "G2": 3},
+    ])
+    model = WorldCupModel.from_history(history, teams=["Mexico", "Canada", "USA"])
+
+    lambda1, lambda2 = model.expected_goals("Mexico", "Canada")
+    assert lambda1 > 0.0
+    assert lambda2 > 0.0
+
+
 def test_batched_score_model_grids_match_scalar_numpy_backend():
     state = ScoreModelState("dixon_coles_mle", "Dixon-Coles", True, {"rho": -0.08})
     lambdas_home = np.asarray([1.42, 0.95, 2.1], dtype=float)

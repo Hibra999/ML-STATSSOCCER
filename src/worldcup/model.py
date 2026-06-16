@@ -110,7 +110,7 @@ class WorldCupModel:
         recency_weight = _clamp(recency_weight, 0.0, 1.0)
 
         if historical_df is not None and not historical_df.empty:
-            ordered_history = historical_df.sort_values("Date", kind="stable").copy()
+            ordered_history = _ordered_history_for_model(historical_df)
             ordered_history["_weight"] = _match_weights(ordered_history, recency_weight)
             global_g1 = max(float(np.average(ordered_history["G1"], weights=ordered_history["_weight"])), 0.5)
             global_g2 = max(float(np.average(ordered_history["G2"], weights=ordered_history["_weight"])), 0.5)
@@ -160,7 +160,6 @@ class WorldCupModel:
             host_advantage=host_advantage,
             max_goals=max_goals,
         )
-
     def profile(self, team: str) -> TeamProfile:
         if team in self._profiles:
             return self._profiles[team]
@@ -229,6 +228,14 @@ class WorldCupModel:
         if rng.random() <= win_share:
             return team1, team2, goals1, goals2
         return team2, team1, goals1, goals2
+
+
+def _ordered_history_for_model(historical_df: pd.DataFrame) -> pd.DataFrame:
+    ordered_history = historical_df.copy()
+    if "Date" in ordered_history:
+        ordered_history["Date"] = pd.to_datetime(ordered_history["Date"], errors="coerce")
+        ordered_history = ordered_history.sort_values("Date", kind="stable").copy()
+    return ordered_history
 
 
 def score_grid_features(lambda1: float, lambda2: float, max_goals: int = 10, score_cap: int = 4) -> Dict[str, float]:
