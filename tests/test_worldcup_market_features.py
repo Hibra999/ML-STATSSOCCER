@@ -433,6 +433,62 @@ def test_international_recent_weights_prioritize_latest_official_matches(tmp_pat
     )
 
 
+def test_international_recent_filters_pre_2014_rows(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", tmp_path)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", tmp_path / "all_matches.csv")
+    pd.DataFrame([
+        {"date": "2013-10-10", "home_team": "Mexico", "away_team": "Canada", "home_score": 9, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2014-01-02", "home_team": "Mexico", "away_team": "Canada", "home_score": 1, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2026-06-10", "home_team": "Mexico", "away_team": "USA", "home_score": 2, "away_score": 1, "tournament": "FIFA World Cup qualification", "neutral": False},
+    ]).to_csv(international_provider.INTERNATIONAL_MATCHES_FILE, index=False)
+
+    matches = international_provider.load_international_matches(required=True)
+    rows = international_provider.team_recent_rows(matches, "Mexico", before_date="2026-06-11", limit=15)
+    features = international_provider.recent15_feature_table(matches, teams=["Mexico"], before_date="2026-06-11")
+    context = international_provider.contextual_poisson_for_match(
+        "Mexico",
+        "Canada",
+        before_date="2026-06-11",
+        matches=matches,
+    )
+
+    assert [str(row["date"].date()) for row in rows] == ["2014-01-02", "2026-06-10"]
+    assert features.loc[features["Team"] == "Mexico", "recent15_matches"].iloc[0] == pytest.approx(2.0)
+    assert context["start_date"] == "2014-01-01"
+    assert context["home_recent"]["features"]["recent15_matches"] == pytest.approx(2.0)
+
+
+def test_international_history_rows_use_all_matches_since_2014_and_team_scope(tmp_path, monkeypatch):
+    from src.worldcup import international_provider
+
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_ROOT", tmp_path)
+    monkeypatch.setattr(international_provider, "INTERNATIONAL_MATCHES_FILE", tmp_path / "all_matches.csv")
+    pd.DataFrame([
+        {"date": "2013-12-31", "home_team": "USA", "away_team": "Canada", "home_score": 3, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2014-01-02", "home_team": "USA", "away_team": "Czech Republic", "home_score": 2, "away_score": 1, "tournament": "Friendly", "neutral": False},
+        {"date": "2025-06-01", "home_team": "Brazil", "away_team": "Bosnia & Herzegovina", "home_score": 1, "away_score": 1, "tournament": "Friendly", "neutral": True},
+        {"date": "2026-06-20", "home_team": "Mexico", "away_team": "Canada", "home_score": 1, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2025-03-01", "home_team": "Tahiti", "away_team": "Fiji", "home_score": 1, "away_score": 0, "tournament": "Friendly", "neutral": False},
+    ]).to_csv(international_provider.INTERNATIONAL_MATCHES_FILE, index=False)
+
+    matches = international_provider.load_international_matches(required=True)
+    history = training.international_history_rows(
+        matches,
+        teams=["USA", "Czech Republic", "Bosnia & Herzegovina", "Brazil"],
+        max_date="2026-06-16",
+    )
+
+    assert list(history[["Team 1", "Team 2"]].itertuples(index=False, name=None)) == [
+        ("USA", "Czech Republic"),
+        ("Brazil", "Bosnia & Herzegovina"),
+    ]
+    assert history["Date"].min() == pd.Timestamp("2014-01-02")
+    assert history["Date"].max() == pd.Timestamp("2025-06-01")
+    assert history.attrs["source"].startswith("all_matches.csv:")
+
+
 def test_international_status_reports_scored_dates_and_future_unscored_rows(tmp_path, monkeypatch):
     from src.worldcup import international_provider
 

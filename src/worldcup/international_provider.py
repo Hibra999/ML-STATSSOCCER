@@ -21,6 +21,7 @@ INTERNATIONAL_MATCHES_FILE = INTERNATIONAL_ROOT / "all_matches.csv"
 RECENT_MATCH_LIMIT = 15
 INTERNATIONAL_FRESHNESS_MAX_AGE_DAYS = 30
 INTERNATIONAL_MIN_CURRENT_SCORED_DATE = "2026-01-01"
+INTERNATIONAL_RECENT_START_DATE = "2014-01-01"
 CONTEXT_TOTAL_GOAL_LINES = tuple(line for line in TOTAL_GOAL_LINES if line <= 3.5)
 RECENT15_MIN_RECENCY_WEIGHT = 0.65
 RECENT15_MAX_RECENCY_WEIGHT = 1.55
@@ -394,6 +395,7 @@ def build_recent15_match_index(matches: Optional[pd.DataFrame]) -> Dict[str, pd.
         & working["home_score"].notna()
         & working["away_score"].notna()
     ].copy()
+    working = working[working["date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE)].copy()
     if working.empty:
         return {}
 
@@ -503,6 +505,7 @@ def recent15_feature_rows_vectorized(
     working = matches.copy()
     working["date"] = pd.to_datetime(working.get("date"), errors="coerce")
     working = working[working["date"].notna()].copy()
+    working = working[working["date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE)].copy()
     cutoff = pd.to_datetime(before_date, errors="coerce")
     if pd.notna(cutoff):
         working = working[working["date"] < pd.Timestamp(cutoff)].copy()
@@ -691,6 +694,7 @@ def contextual_poisson_for_match(
         "source": "all_matches.csv",
         "dataset_slug": INTERNATIONAL_DATASET_SLUG,
         "source_path": source_path,
+        "start_date": INTERNATIONAL_RECENT_START_DATE,
         "before_date": date_to_string(before_date),
         "match_limit": int(limit),
         **matrix_payload,
@@ -748,12 +752,14 @@ def team_recent_rows(
         return []
     team_key = canonical_team_name(canonical_team)
     scoped = matches[(matches["home_team"] == team_key) | (matches["away_team"] == team_key)].copy()
+    scoped["_date"] = pd.to_datetime(scoped["date"], errors="coerce")
+    scoped = scoped[scoped["_date"].notna() & (scoped["_date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE))].copy()
     cutoff = pd.to_datetime(before_date, errors="coerce")
     if pd.notna(cutoff):
-        scoped = scoped[scoped["date"] < cutoff].copy()
+        scoped = scoped[scoped["_date"] < cutoff].copy()
     if scoped.empty:
         return []
-    scoped = scoped.sort_values("date", kind="stable").tail(int(limit)).reset_index(drop=True)
+    scoped = scoped.sort_values("_date", kind="stable").tail(int(limit)).reset_index(drop=True)
     total = max(int(scoped.shape[0]), 1)
     rows: List[Dict[str, Any]] = []
     for index, row in scoped.iterrows():
@@ -767,7 +773,7 @@ def team_recent_rows(
         opponent_rating = rating_for_team(opponent, base_model=base_model)
         difficulty = clamp(1.0 + ((opponent_rating - 1500.0) / 900.0), 0.72, 1.32)
         rows.append({
-            "date": pd.Timestamp(row["date"]),
+            "date": pd.Timestamp(row["_date"]),
             "team": team_key,
             "opponent": opponent,
             "is_home": bool(is_home),

@@ -21,6 +21,8 @@ from src.worldcup.model import (
 
 
 DEFAULT_SCORE_MODEL = "independent_poisson"
+STATSMODELS_POISSON_GLM_MODEL = "statsmodels_poisson_glm"
+NEGATIVE_BINOMIAL_GLM_MODEL = "negative_binomial_glm"
 STAT_MODEL_ROOT = Path("storage") / "worldcup" / "stat_models"
 LOCAL_XG_FILE = Path("storage") / "worldcup" / "xg" / "manual_xg.csv"
 _CUPY_BACKEND_STATUS: Dict[str, Any] | None = None
@@ -36,6 +38,18 @@ SCORE_MODEL_OPTIONS = [
         "key": "dixon_coles_mle",
         "label": "Dixon-Coles MLE",
         "description": "Corrige 0-0, 1-0, 0-1 y 1-1 con rho estimado por maxima verosimilitud.",
+        "heavy": False,
+    },
+    {
+        "key": STATSMODELS_POISSON_GLM_MODEL,
+        "label": "Poisson GLM statsmodels",
+        "description": "Calibra lambdas con GLM Poisson regularizado, offset log(lambda base) y pesos temporales.",
+        "heavy": False,
+    },
+    {
+        "key": NEGATIVE_BINOMIAL_GLM_MODEL,
+        "label": "Negative Binomial GLM",
+        "description": "Variante de conteo sobredispersa: lambdas GLM y margenes Negative Binomial NB2.",
         "heavy": False,
     },
     {
@@ -133,8 +147,11 @@ class AdvancedScoreWorldCupModel:
                 return bayesian_lambdas
         method = getattr(self.base_model, "expected_goals_for_match", None)
         if callable(method):
-            return method(team1, team2, match=match)
-        return self.base_model.expected_goals(team1, team2)
+            base_lambdas = method(team1, team2, match=match)
+        else:
+            base_lambdas = self.base_model.expected_goals(team1, team2)
+        calibrated = _statsmodels_lambdas_for_match(self.state, team1, team2, base_lambdas)
+        return calibrated if calibrated is not None else base_lambdas
 
     def score_grid(self, team1: str, team2: str, match: Dict[str, Any] | None = None, max_goals: int | None = None) -> np.ndarray:
         lambda1, lambda2 = self.expected_goals_for_match(team1, team2, match=match)
@@ -267,7 +284,7 @@ def fit_score_model_state(
         if cached is not None:
             return cached
 
-    rows = _history_model_rows(history_df, base_model)
+    rows = _history_model_rows(history_df, base_model, recency_weight=config.get("score_mle_recency_weight", config.get("recency_weight", 0.0)))
     if key == "xg_poisson_local":
         state = _fit_xg_local_state(label=label, fingerprint=fingerprint)
     elif key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
@@ -281,30 +298,61 @@ def fit_score_model_state(
             warnings=("Sin historico suficiente; se usa Poisson independiente.",),
             fingerprint=fingerprint,
         )
-    elif key == "dixon_coles_mle":
-        rho, fit_backend, fit_warnings = _estimate_dixon_coles_rho(
-            rows,
-            backend=config.get("score_backend") or config.get("sota_device", "auto"),
-        )
+    elif key == STATSMODELS_POISSON_GLM_MODEL:
+        lambda_model, fit_warnings = _fit_statsmodels_lambda_model(rows, teams=teams, config=config)
         state = ScoreModelState(
             key,
             label,
-            True,
-            {"rho": rho, "fit_backend": fit_backend},
+            bool(lambda_model),
+            {"lambda_model": lambda_model} if lambda_model else {},
             warnings=tuple(fit_warnings),
             fingerprint=fingerprint,
         )
-    elif key == "bivariate_poisson_mle":
-        corr_share, fit_backend, fit_warnings = _estimate_bivariate_corr_share(
-            rows,
+    elif key == NEGATIVE_BINOMIAL_GLM_MODEL:
+        lambda_model, fit_warnings = _fit_statsmodels_lambda_model(rows, teams=teams, config=config)
+        params = {"lambda_model": lambda_model, "alpha": _negative_binomial_alpha(lambda_model)} if lambda_model else {}
+        state = ScoreModelState(
+            key,
+            label,
+            bool(lambda_model),
+            params,
+            warnings=tuple(fit_warnings),
+            fingerprint=fingerprint,
+        )
+    elif key == "dixon_coles_mle":
+        lambda_model, lambda_warnings = _fit_statsmodels_lambda_model(rows, teams=teams, config=config)
+        mle_rows = _rows_with_lambda_model(rows, lambda_model) if lambda_model else rows
+        rho, fit_backend, fit_warnings = _estimate_dixon_coles_rho(
+            mle_rows,
             backend=config.get("score_backend") or config.get("sota_device", "auto"),
         )
+        params = {"rho": rho, "fit_backend": fit_backend}
+        if lambda_model:
+            params["lambda_model"] = lambda_model
         state = ScoreModelState(
             key,
             label,
             True,
-            {"corr_share": corr_share, "fit_backend": fit_backend},
-            warnings=tuple(fit_warnings),
+            params,
+            warnings=tuple(_merge_warnings(lambda_warnings, fit_warnings)),
+            fingerprint=fingerprint,
+        )
+    elif key == "bivariate_poisson_mle":
+        lambda_model, lambda_warnings = _fit_statsmodels_lambda_model(rows, teams=teams, config=config)
+        mle_rows = _rows_with_lambda_model(rows, lambda_model) if lambda_model else rows
+        corr_share, fit_backend, fit_warnings = _estimate_bivariate_corr_share(
+            mle_rows,
+            backend=config.get("score_backend") or config.get("sota_device", "auto"),
+        )
+        params = {"corr_share": corr_share, "fit_backend": fit_backend}
+        if lambda_model:
+            params["lambda_model"] = lambda_model
+        state = ScoreModelState(
+            key,
+            label,
+            True,
+            params,
+            warnings=tuple(_merge_warnings(lambda_warnings, fit_warnings)),
             fingerprint=fingerprint,
         )
     else:
@@ -333,6 +381,8 @@ def score_grid_from_lambdas(state: ScoreModelState | Dict[str, Any], lambda1: fl
         return dixon_coles_score_grid(lambda1, lambda2, rho=float(params.get("rho", 0.0)), max_goals=max_goals)
     if key == "bivariate_poisson_mle":
         return bivariate_poisson_score_grid(lambda1, lambda2, float(params.get("corr_share", 0.0)), max_goals=max_goals)
+    if key == NEGATIVE_BINOMIAL_GLM_MODEL:
+        return negative_binomial_score_grid(lambda1, lambda2, alpha=float(params.get("alpha", 0.0)), max_goals=max_goals)
     return poisson_score_grid(lambda1=lambda1, lambda2=lambda2, max_goals=max_goals)
 
 
@@ -486,6 +536,30 @@ def bivariate_poisson_score_grid(lambda1: float, lambda2: float, corr_share: flo
     return _normalize_grid(grid)
 
 
+def negative_binomial_score_grid(lambda1: float, lambda2: float, alpha: float, max_goals: int = 10) -> np.ndarray:
+    max_goals = int(min(max(int(max_goals or 10), 4), 14))
+    home = _negative_binomial_pmf_vector(lambda1, alpha=alpha, max_goals=max_goals)
+    away = _negative_binomial_pmf_vector(lambda2, alpha=alpha, max_goals=max_goals)
+    return _normalize_grid(np.outer(home, away))
+
+
+def _negative_binomial_pmf_vector(rate: float, alpha: float, max_goals: int) -> np.ndarray:
+    rate = _clamp_rate(rate)
+    alpha = float(np.clip(alpha, 0.0, 2.0))
+    if alpha <= 1e-8:
+        goals = np.arange(max_goals + 1, dtype=float)
+        log_p = -rate + goals * math.log(max(rate, 1e-12)) - np.asarray([math.lgamma(int(goal) + 1) for goal in goals])
+        return np.exp(log_p)
+    size = 1.0 / alpha
+    success = size / (size + rate)
+    values = np.zeros(max_goals + 1, dtype=float)
+    values[0] = math.exp(size * math.log(max(success, 1e-12)))
+    ratio = rate / (size + rate)
+    for goal in range(max_goals):
+        values[goal + 1] = values[goal] * ((goal + size) / float(goal + 1)) * ratio
+    return values
+
+
 def score_backend_status(requested_device: Any = "auto") -> Dict[str, Any]:
     requested = _normalize_backend_request(requested_device)
     if requested in {"cpu", "numpy"}:
@@ -541,6 +615,14 @@ def _score_grids_from_lambdas_xp(
             lambda1,
             lambda2,
             corr_share=float(params.get("corr_share", 0.0)),
+            max_goals=max_goals,
+        )
+    if key == NEGATIVE_BINOMIAL_GLM_MODEL:
+        return _negative_binomial_score_grids_xp(
+            xp,
+            lambda1,
+            lambda2,
+            alpha=float(params.get("alpha", 0.0)),
             max_goals=max_goals,
         )
     return _poisson_score_grids_xp(xp, lambda1, lambda2, max_goals=max_goals)
@@ -612,6 +694,33 @@ def _bivariate_poisson_score_grids_xp(xp: Any, lambda1: Any, lambda2: Any, corr_
         )
         grids += xp.where(valid[None, :, :], xp.exp(term), 0.0)
     return _normalize_batched_grids_xp(xp, grids)
+
+
+def _negative_binomial_score_grids_xp(xp: Any, lambda1: Any, lambda2: Any, alpha: float, max_goals: int) -> Any:
+    home = _negative_binomial_pmf_matrix_xp(xp, lambda1, alpha=alpha, max_goals=max_goals)
+    away = _negative_binomial_pmf_matrix_xp(xp, lambda2, alpha=alpha, max_goals=max_goals)
+    grids = home[:, :, None] * away[:, None, :]
+    return _normalize_batched_grids_xp(xp, grids)
+
+
+def _negative_binomial_pmf_matrix_xp(xp: Any, rate: Any, alpha: float, max_goals: int) -> Any:
+    rate = xp.asarray(rate, dtype=xp.float64).reshape(-1)
+    alpha = float(np.clip(alpha, 0.0, 2.0))
+    if alpha <= 1e-8:
+        goals_np = np.arange(max_goals + 1, dtype=float)
+        log_factorials_np = np.asarray([math.lgamma(int(goal) + 1) for goal in goals_np], dtype=float)
+        goals = xp.asarray(goals_np, dtype=xp.float64)
+        log_factorials = xp.asarray(log_factorials_np, dtype=xp.float64)
+        log_p = -rate[:, None] + goals[None, :] * xp.log(xp.maximum(rate[:, None], xp.float64(1e-12))) - log_factorials[None, :]
+        return xp.exp(log_p)
+    size = xp.float64(1.0 / alpha)
+    success = size / (size + rate)
+    ratio = rate / (size + rate)
+    values = xp.zeros((int(rate.size), max_goals + 1), dtype=xp.float64)
+    values[:, 0] = xp.exp(size * xp.log(xp.maximum(success, xp.float64(1e-12))))
+    for goal in range(max_goals):
+        values[:, goal + 1] = values[:, goal] * ((goal + size) / float(goal + 1)) * ratio
+    return values
 
 
 def _normalize_batched_grids_xp(xp: Any, grids: Any) -> Any:
@@ -750,7 +859,7 @@ def _pytensor_flags_include_cxx(flags: str) -> bool:
     return False
 
 
-def _history_model_rows(history_df: pd.DataFrame | None, base_model: Any) -> List[Dict[str, Any]]:
+def _history_model_rows(history_df: pd.DataFrame | None, base_model: Any, recency_weight: Any = 0.0) -> List[Dict[str, Any]]:
     if history_df is None or history_df.empty:
         return []
     required = {"Team 1", "Team 2", "G1", "G2"}
@@ -760,6 +869,7 @@ def _history_model_rows(history_df: pd.DataFrame | None, base_model: Any) -> Lis
     working = history_df.copy()
     if "Date" in working:
         working = working.sort_values("Date", kind="stable")
+    working["_score_model_weight"] = _history_row_weights(working, recency_weight)
     for _, row in working.iterrows():
         home = str(row.get("Team 1", "")).strip()
         away = str(row.get("Team 2", "")).strip()
@@ -779,8 +889,328 @@ def _history_model_rows(history_df: pd.DataFrame | None, base_model: Any) -> Lis
             "g2": max(g2, 0),
             "lambda1": _clamp_rate(lambda1),
             "lambda2": _clamp_rate(lambda2),
+            "weight": max(float(row.get("_score_model_weight", 1.0) or 1.0), 1e-6),
         })
     return rows
+
+
+def _history_row_weights(history: pd.DataFrame, recency_weight: Any) -> pd.Series:
+    try:
+        weight = float(recency_weight)
+    except (TypeError, ValueError):
+        weight = 0.0
+    weight = float(np.clip(weight, 0.0, 1.0))
+    if weight <= 0.0 or "Date" not in history:
+        return pd.Series([1.0] * len(history), index=history.index, dtype=float)
+    dates = pd.to_datetime(history["Date"], errors="coerce")
+    if dates.notna().sum() < 2:
+        return pd.Series([1.0] * len(history), index=history.index, dtype=float)
+    latest = dates.max()
+    years_ago = (latest - dates).dt.days.fillna(0).clip(lower=0) / 365.25
+    recent_curve = np.exp(-years_ago / 12.0)
+    weights = (1.0 - weight) + weight * recent_curve
+    return pd.Series(weights, index=history.index, dtype=float).clip(lower=0.1)
+
+
+def _fit_statsmodels_lambda_model(
+        rows: List[Dict[str, Any]],
+        teams: Iterable[str],
+        config: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[str]]:
+    mode = str(config.get("stat_lambda_model", STATSMODELS_POISSON_GLM_MODEL) or "").strip().lower()
+    if mode in {"0", "false", "off", "none", "raw", "disabled"}:
+        return {}, []
+    min_matches = int(max(int(config.get("stat_glm_min_matches") or 12), 4))
+    if len(rows) < min_matches:
+        return {}, [f"GLM statsmodels omitido: {len(rows)} partidos < minimo {min_matches}."]
+    try:
+        import statsmodels.api as sm  # type: ignore
+    except Exception as exc:
+        return {}, [f"statsmodels no disponible ({exc.__class__.__name__}: {exc}); lambdas raw."]
+
+    frame = _lambda_model_training_frame(rows)
+    if frame.empty:
+        return {}, ["GLM statsmodels omitido: sin filas de conteo validas."]
+    columns = _lambda_design_columns(frame, teams)
+    alphas = _glm_alpha_candidates(config.get("stat_glm_alphas"))
+    train_frame, validation_frame = _lambda_temporal_split(frame, config.get("stat_glm_validation_fraction", 0.2))
+    best_alpha = alphas[0]
+    validation_scores: List[Dict[str, Any]] = []
+    if not validation_frame.empty and train_frame["match_idx"].nunique() >= 4:
+        for alpha in alphas:
+            try:
+                params = _fit_poisson_glm_params(sm, train_frame, columns, alpha)
+                score = _lambda_model_validation_score(validation_frame, columns, params)
+            except Exception as exc:
+                validation_scores.append({"alpha": float(alpha), "available": False, "warning": f"{exc.__class__.__name__}: {exc}"})
+                continue
+            validation_scores.append({"alpha": float(alpha), "available": True, **score})
+        available_scores = [item for item in validation_scores if item.get("available")]
+        if available_scores:
+            best = min(available_scores, key=lambda item: float(item.get("objective", float("inf"))))
+            best_alpha = float(best["alpha"])
+
+    try:
+        params = _fit_poisson_glm_params(sm, frame, columns, best_alpha)
+    except Exception as exc:
+        return {}, [f"GLM statsmodels fallo ({exc.__class__.__name__}: {exc}); lambdas raw."]
+
+    diagnostics = _lambda_model_diagnostics(frame, columns, params)
+    warnings: List[str] = []
+    dispersion = float(diagnostics.get("pearson_dispersion") or 0.0)
+    if dispersion > 1.5:
+        warnings.append(f"Sobredispersion Poisson detectada ({dispersion:.2f}); considerar Negative Binomial si mejora walk-forward.")
+    zero_gap = float(diagnostics.get("zero_rate_gap") or 0.0)
+    if zero_gap > 0.08:
+        warnings.append(f"Exceso de ceros detectado ({zero_gap:.3f}); considerar ZIP/ZINB solo si gana en backtest temporal.")
+
+    params_dict = {column: float(value) for column, value in zip(columns, params)}
+    model = {
+        "type": STATSMODELS_POISSON_GLM_MODEL,
+        "offset": "log_base_lambda",
+        "regularization": "ridge_l2",
+        "alpha": float(best_alpha),
+        "columns": list(columns),
+        "params": params_dict,
+        "n_matches": int(frame["match_idx"].nunique()),
+        "n_count_rows": int(frame.shape[0]),
+        "validation": {
+            "source": "temporal_holdout_pretest",
+            "objective": "score_log_loss + 0.75*result_log_loss + 0.25*ou25_log_loss",
+            "trials": validation_scores,
+        },
+        "diagnostics": diagnostics,
+    }
+    return model, warnings
+
+
+def _lambda_model_training_frame(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    records: List[Dict[str, Any]] = []
+    for match_idx, row in enumerate(rows):
+        weight = max(float(row.get("weight", 1.0) or 1.0), 1e-6)
+        records.append({
+            "match_idx": match_idx,
+            "date": row.get("date", ""),
+            "side": "home",
+            "team": str(row.get("home", "")),
+            "opponent": str(row.get("away", "")),
+            "is_home": 1.0,
+            "goals": int(row.get("g1", 0)),
+            "base_lambda": _clamp_rate(row.get("lambda1", 1.0)),
+            "weight": weight,
+            "actual_home_goals": int(row.get("g1", 0)),
+            "actual_away_goals": int(row.get("g2", 0)),
+        })
+        records.append({
+            "match_idx": match_idx,
+            "date": row.get("date", ""),
+            "side": "away",
+            "team": str(row.get("away", "")),
+            "opponent": str(row.get("home", "")),
+            "is_home": 0.0,
+            "goals": int(row.get("g2", 0)),
+            "base_lambda": _clamp_rate(row.get("lambda2", 1.0)),
+            "weight": weight,
+            "actual_home_goals": int(row.get("g1", 0)),
+            "actual_away_goals": int(row.get("g2", 0)),
+        })
+    frame = pd.DataFrame(records)
+    if frame.empty:
+        return frame
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    return frame.sort_values(["match_idx", "side"], kind="stable").reset_index(drop=True)
+
+
+def _lambda_design_columns(frame: pd.DataFrame, teams: Iterable[str]) -> List[str]:
+    team_names = sorted(
+        set(str(team) for team in teams if str(team).strip())
+        | set(str(team) for team in frame.get("team", pd.Series(dtype=str)).dropna().tolist() if str(team).strip())
+        | set(str(team) for team in frame.get("opponent", pd.Series(dtype=str)).dropna().tolist() if str(team).strip())
+    )
+    return ["const", "is_home", *[f"attack::{team}" for team in team_names], *[f"defense::{team}" for team in team_names]]
+
+
+def _lambda_design_matrix(frame: pd.DataFrame, columns: Sequence[str]) -> np.ndarray:
+    matrix = np.zeros((int(frame.shape[0]), len(columns)), dtype=float)
+    index = {column: idx for idx, column in enumerate(columns)}
+    if "const" in index:
+        matrix[:, index["const"]] = 1.0
+    if "is_home" in index and "is_home" in frame:
+        matrix[:, index["is_home"]] = pd.to_numeric(frame["is_home"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    for row_index, (_, row) in enumerate(frame.iterrows()):
+        attack_key = f"attack::{str(row.get('team', ''))}"
+        defense_key = f"defense::{str(row.get('opponent', ''))}"
+        if attack_key in index:
+            matrix[row_index, index[attack_key]] = 1.0
+        if defense_key in index:
+            matrix[row_index, index[defense_key]] = 1.0
+    return matrix
+
+
+def _fit_poisson_glm_params(sm: Any, frame: pd.DataFrame, columns: Sequence[str], alpha: float) -> np.ndarray:
+    x = _lambda_design_matrix(frame, columns)
+    y = pd.to_numeric(frame["goals"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    offset = np.log(np.clip(pd.to_numeric(frame["base_lambda"], errors="coerce").fillna(1.0).to_numpy(dtype=float), 1e-9, None))
+    weights = np.clip(pd.to_numeric(frame["weight"], errors="coerce").fillna(1.0).to_numpy(dtype=float), 1e-6, None)
+    model = sm.GLM(y, x, family=sm.families.Poisson(), offset=offset, freq_weights=weights)
+    result = model.fit_regularized(alpha=max(float(alpha), 1e-8), L1_wt=0.0, maxiter=300, cnvrg_tol=1e-8)
+    return np.asarray(result.params, dtype=float)
+
+
+def _glm_alpha_candidates(value: Any) -> List[float]:
+    if isinstance(value, str) and value.strip():
+        candidates = []
+        for part in value.split(","):
+            try:
+                candidates.append(float(part.strip()))
+            except ValueError:
+                continue
+        if candidates:
+            return sorted({max(candidate, 1e-8) for candidate in candidates})
+    if isinstance(value, (list, tuple, set)):
+        candidates = []
+        for item in value:
+            try:
+                candidates.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        if candidates:
+            return sorted({max(candidate, 1e-8) for candidate in candidates})
+    return [0.001, 0.003, 0.01, 0.03, 0.1, 0.3]
+
+
+def _lambda_temporal_split(frame: pd.DataFrame, validation_fraction: Any) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    try:
+        fraction = float(validation_fraction)
+    except (TypeError, ValueError):
+        fraction = 0.2
+    fraction = float(np.clip(fraction, 0.05, 0.4))
+    match_ids = list(dict.fromkeys(frame["match_idx"].astype(int).tolist()))
+    if len(match_ids) < 8:
+        return frame.copy(), frame.iloc[0:0].copy()
+    validation_count = int(np.clip(round(len(match_ids) * fraction), 2, max(len(match_ids) - 4, 1)))
+    validation_ids = set(match_ids[-validation_count:])
+    train = frame[~frame["match_idx"].isin(validation_ids)].copy()
+    validation = frame[frame["match_idx"].isin(validation_ids)].copy()
+    return train, validation
+
+
+def _lambda_model_validation_score(frame: pd.DataFrame, columns: Sequence[str], params: np.ndarray) -> Dict[str, float]:
+    predicted = _predict_lambda_frame(frame, columns, params)
+    working = frame.copy()
+    working["_predicted_lambda"] = predicted
+    score_log_loss = 0.0
+    result_log_loss = 0.0
+    ou25_log_loss = 0.0
+    evaluated = 0
+    for _, group in working.groupby("match_idx", sort=True):
+        home_rows = group[group["side"] == "home"]
+        away_rows = group[group["side"] == "away"]
+        if home_rows.empty or away_rows.empty:
+            continue
+        home_row = home_rows.iloc[0]
+        away_row = away_rows.iloc[0]
+        actual_home = int(home_row.get("actual_home_goals", home_row.get("goals", 0)))
+        actual_away = int(home_row.get("actual_away_goals", away_row.get("goals", 0)))
+        lambda_home = _clamp_rate(home_row.get("_predicted_lambda", home_row.get("base_lambda", 1.0)))
+        lambda_away = _clamp_rate(away_row.get("_predicted_lambda", away_row.get("base_lambda", 1.0)))
+        grid = poisson_score_grid(lambda_home, lambda_away, max_goals=10)
+        capped_home = min(max(actual_home, 0), grid.shape[0] - 1)
+        capped_away = min(max(actual_away, 0), grid.shape[1] - 1)
+        probabilities = probabilities_from_score_grid(grid, lambda_home, lambda_away)
+        actual_outcome = "home" if actual_home > actual_away else "away" if actual_away > actual_home else "draw"
+        score_log_loss += -math.log(max(float(grid[capped_home, capped_away]), 1e-12))
+        result_log_loss += -math.log(max(float(probabilities.get(actual_outcome, 0.0)), 1e-12))
+        actual_ou = "over25" if (actual_home + actual_away) > 2.5 else "under25"
+        ou25_log_loss += -math.log(max(float(probabilities.get(actual_ou, 0.0)), 1e-12))
+        evaluated += 1
+    denominator = max(evaluated, 1)
+    score_ll = score_log_loss / denominator
+    result_ll = result_log_loss / denominator
+    ou25_ll = ou25_log_loss / denominator
+    return {
+        "evaluated_matches": int(evaluated),
+        "score_log_loss": round(float(score_ll), 6),
+        "result_log_loss": round(float(result_ll), 6),
+        "ou25_log_loss": round(float(ou25_ll), 6),
+        "objective": round(float(score_ll + (0.75 * result_ll) + (0.25 * ou25_ll)), 6),
+    }
+
+
+def _lambda_model_diagnostics(frame: pd.DataFrame, columns: Sequence[str], params: np.ndarray) -> Dict[str, Any]:
+    mu = np.clip(_predict_lambda_frame(frame, columns, params), 1e-9, None)
+    y = pd.to_numeric(frame["goals"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    weights = np.clip(pd.to_numeric(frame["weight"], errors="coerce").fillna(1.0).to_numpy(dtype=float), 1e-6, None)
+    pearson = float(np.sum(weights * np.square(y - mu) / mu))
+    df_resid = max(float(np.sum(weights) - len(params)), 1.0)
+    observed_zero_rate = float(np.average((y <= 0).astype(float), weights=weights))
+    expected_zero_rate = float(np.average(np.exp(-mu), weights=weights))
+    return {
+        "pearson_chi2": round(pearson, 6),
+        "df_resid": round(df_resid, 6),
+        "pearson_dispersion": round(pearson / df_resid, 6),
+        "observed_zero_rate": round(observed_zero_rate, 6),
+        "expected_zero_rate": round(expected_zero_rate, 6),
+        "zero_rate_gap": round(observed_zero_rate - expected_zero_rate, 6),
+        "mean_observed_goals": round(float(np.average(y, weights=weights)), 6),
+        "mean_predicted_goals": round(float(np.average(mu, weights=weights)), 6),
+    }
+
+
+def _negative_binomial_alpha(lambda_model: Dict[str, Any]) -> float:
+    diagnostics = (lambda_model or {}).get("diagnostics") or {}
+    dispersion = float(diagnostics.get("pearson_dispersion") or 1.0)
+    mean_mu = max(float(diagnostics.get("mean_predicted_goals") or 1.0), 1e-6)
+    alpha = max((dispersion - 1.0) / mean_mu, 0.0)
+    return float(np.clip(alpha, 0.0, 2.0))
+
+
+def _predict_lambda_frame(frame: pd.DataFrame, columns: Sequence[str], params: np.ndarray) -> np.ndarray:
+    x = _lambda_design_matrix(frame, columns)
+    offset = np.log(np.clip(pd.to_numeric(frame["base_lambda"], errors="coerce").fillna(1.0).to_numpy(dtype=float), 1e-9, None))
+    eta = offset + np.asarray(x @ np.asarray(params, dtype=float), dtype=float)
+    return np.clip(np.exp(np.clip(eta, -4.0, 2.2)), 0.05, 6.5)
+
+
+def _statsmodels_lambdas_for_match(
+        state: ScoreModelState,
+        home: str,
+        away: str,
+        base_lambdas: Tuple[float, float],
+) -> Tuple[float, float] | None:
+    lambda_model = (state.params or {}).get("lambda_model") or {}
+    if not lambda_model:
+        return None
+    try:
+        home_lambda = _predict_lambda_from_model(lambda_model, team=home, opponent=away, is_home=True, base_lambda=base_lambdas[0])
+        away_lambda = _predict_lambda_from_model(lambda_model, team=away, opponent=home, is_home=False, base_lambda=base_lambdas[1])
+    except Exception:
+        return None
+    return _clamp_rate(home_lambda), _clamp_rate(away_lambda)
+
+
+def _predict_lambda_from_model(lambda_model: Dict[str, Any], team: str, opponent: str, is_home: bool, base_lambda: Any) -> float:
+    params = lambda_model.get("params") or {}
+    eta = math.log(max(_clamp_rate(base_lambda), 1e-9))
+    eta += float(params.get("const", 0.0))
+    eta += float(params.get("is_home", 0.0)) * (1.0 if is_home else 0.0)
+    eta += float(params.get(f"attack::{str(team)}", 0.0))
+    eta += float(params.get(f"defense::{str(opponent)}", 0.0))
+    return float(np.clip(math.exp(float(np.clip(eta, -4.0, 2.2))), 0.05, 6.5))
+
+
+def _rows_with_lambda_model(rows: List[Dict[str, Any]], lambda_model: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not lambda_model:
+        return rows
+    output: List[Dict[str, Any]] = []
+    for row in rows:
+        updated = dict(row)
+        home = str(row.get("home", ""))
+        away = str(row.get("away", ""))
+        updated["lambda1"] = _predict_lambda_from_model(lambda_model, team=home, opponent=away, is_home=True, base_lambda=row.get("lambda1", 1.0))
+        updated["lambda2"] = _predict_lambda_from_model(lambda_model, team=away, opponent=home, is_home=False, base_lambda=row.get("lambda2", 1.0))
+        output.append(updated)
+    return output
 
 
 def _bayesian_lambdas_for_match(state: ScoreModelState, home: str, away: str) -> Tuple[float, float] | None:
@@ -830,7 +1260,11 @@ def _estimate_dixon_coles_rho(rows: List[Dict[str, Any]], backend: Any = "auto")
         warnings = [f"MLE Dixon-Coles batched fallo ({exc.__class__.__name__}: {exc}); se usa optimizacion CPU."]
 
     def objective(rho: float) -> float:
-        return -sum(_grid_log_probability(dixon_coles_score_grid(row["lambda1"], row["lambda2"], rho=rho, max_goals=10), row) for row in rows)
+        return -sum(
+            float(row.get("weight", 1.0) or 1.0)
+            * _grid_log_probability(dixon_coles_score_grid(row["lambda1"], row["lambda2"], rho=rho, max_goals=10), row)
+            for row in rows
+        )
 
     result = _minimize_scalar(objective, -0.24, 0.24)
     return float(np.clip(result, -0.24, 0.24)), "numpy", warnings
@@ -848,7 +1282,11 @@ def _estimate_bivariate_corr_share(rows: List[Dict[str, Any]], backend: Any = "a
         warnings = [f"MLE bivariado batched fallo ({exc.__class__.__name__}: {exc}); se usa optimizacion CPU."]
 
     def objective(share: float) -> float:
-        return -sum(_grid_log_probability(bivariate_poisson_score_grid(row["lambda1"], row["lambda2"], share, max_goals=10), row) for row in rows)
+        return -sum(
+            float(row.get("weight", 1.0) or 1.0)
+            * _grid_log_probability(bivariate_poisson_score_grid(row["lambda1"], row["lambda2"], share, max_goals=10), row)
+            for row in rows
+        )
 
     return float(np.clip(_minimize_scalar(objective, 0.0, 0.55), 0.0, 0.55)), "numpy", warnings
 
@@ -864,6 +1302,7 @@ def _estimate_dixon_coles_rho_batched(
     lambda2 = xp.asarray(row_arrays["lambda2"], dtype=xp.float64)[None, :]
     goals_home = xp.asarray(row_arrays["g1"], dtype=xp.int64)
     goals_away = xp.asarray(row_arrays["g2"], dtype=xp.int64)
+    weights = xp.asarray(row_arrays["weight"], dtype=xp.float64)
     candidate_array = xp.asarray(candidates, dtype=xp.float64)[:, None]
     base_grids = _poisson_score_grids_xp(
         xp,
@@ -886,7 +1325,7 @@ def _estimate_dixon_coles_rho_batched(
     low_factors[:, :, 1, 1] = xp.maximum(1.0 - candidate_array, 1e-6)
     adjusted_totals = 1.0 + xp.sum(base_low[None, :, :, :] * (low_factors - 1.0), axis=(2, 3))
     probabilities = base_observed * factors / xp.maximum(adjusted_totals, 1e-12)
-    likelihoods = xp.sum(xp.log(xp.maximum(probabilities, 1e-12)), axis=1)
+    likelihoods = xp.sum(weights[None, :] * xp.log(xp.maximum(probabilities, 1e-12)), axis=1)
     index = int(_scalar_from_xp(xp, xp.argmax(likelihoods)))
     return float(candidates[index]), backend_name, warnings
 
@@ -902,6 +1341,7 @@ def _estimate_bivariate_corr_share_batched(
     lambda2 = xp.asarray(row_arrays["lambda2"], dtype=xp.float64)
     goals_home = xp.asarray(row_arrays["g1"], dtype=xp.int64)
     goals_away = xp.asarray(row_arrays["g2"], dtype=xp.int64)
+    weights = xp.asarray(row_arrays["weight"], dtype=xp.float64)
     row_index = xp.arange(int(goals_home.size), dtype=xp.int64)
     likelihoods = []
     chunk_size = 32
@@ -918,7 +1358,7 @@ def _estimate_bivariate_corr_share_batched(
             max_goals=10,
         ).reshape(int(chunk.size), int(lambda1.size), 11, 11)
         observed = grids[:, row_index, goals_home, goals_away]
-        likelihoods.append(xp.sum(xp.log(xp.maximum(observed, 1e-12)), axis=1))
+        likelihoods.append(xp.sum(weights[None, :] * xp.log(xp.maximum(observed, 1e-12)), axis=1))
     all_likelihoods = xp.concatenate(likelihoods)
     index = int(_scalar_from_xp(xp, xp.argmax(all_likelihoods)))
     return float(candidates[index]), backend_name, warnings
@@ -932,6 +1372,7 @@ def _row_arrays_for_mle(rows: List[Dict[str, Any]], max_goals: int) -> Dict[str,
         "lambda2": np.asarray([_clamp_rate(row["lambda2"]) for row in rows], dtype=float),
         "g1": np.asarray([min(max(int(row["g1"]), 0), max_goals) for row in rows], dtype=int),
         "g2": np.asarray([min(max(int(row["g2"]), 0), max_goals) for row in rows], dtype=int),
+        "weight": np.asarray([max(float(row.get("weight", 1.0) or 1.0), 1e-6) for row in rows], dtype=float),
     }
 
 
@@ -1108,6 +1549,11 @@ def _fit_fingerprint(key: str, history_df: pd.DataFrame | None, teams: Iterable[
         "bayes_chains": config.get("bayes_chains"),
         "score_backend_generation": "cupy-batched-v1",
         "sota_device": config.get("sota_device"),
+        "score_mle_recency_weight": config.get("score_mle_recency_weight", config.get("recency_weight")),
+        "stat_lambda_model": config.get("stat_lambda_model", STATSMODELS_POISSON_GLM_MODEL),
+        "stat_glm_alphas": config.get("stat_glm_alphas"),
+        "stat_glm_min_matches": config.get("stat_glm_min_matches"),
+        "stat_glm_validation_fraction": config.get("stat_glm_validation_fraction"),
     }
     digest.update(json.dumps(relevant, sort_keys=True, default=str).encode("utf-8"))
     if history_df is not None and not history_df.empty:

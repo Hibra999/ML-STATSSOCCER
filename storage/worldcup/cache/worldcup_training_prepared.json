@@ -1,47 +1,315 @@
 {
-  "prepared_at": "2026-06-10T17:34:40.121101+00:00",
+  "prepared_schema_version": "worldcup_2026_international_since_2014_v6_teams_scope_split_80_10_10",
+  "prepared_at": "2026-06-16T03:07:47.917267+00:00",
   "training_mode": "match_result",
-  "source_mode": "team_strength",
+  "source_mode": "international_only",
   "source_files": [
-    "storage\\worldcup\\kaggle\\test.csv",
-    "storage\\worldcup\\kaggle\\train.csv"
+    "storage/worldcup/international/all_matches.csv"
   ],
-  "label_source": "historical_worldcup",
-  "warnings": [
-    "El Kaggle actual no trae filas de partido entrenables; el ETL usa resultados historicos abiertos del Mundial para 1X2 y O/U 2.5.",
-    "Test final bloqueado al Mundial 2022; entrenamiento/validacion usan solo años anteriores."
+  "label_source": "all_matches.csv",
+  "warnings": [],
+  "label_policy_notes": [
+    "Objetivo operativo: Mundial 2026.",
+    "Labels obligatorios desde all_matches.csv; train.csv/test.csv y el Kaggle Mundial legacy se ignoran por completo.",
+    "Corpus entrenable: partidos internacionales desde 2014, incluyendo FIFA World Cup y resultados 2026 ya jugados.",
+    "Scope de equipos: partidos donde participa al menos una de las 48 selecciones del Mundial 2026.",
+    "Anti-leakage: split temporal 80/10/10 por fecha: train primero, validacion intermedia y test final.",
+    "6357 filas raw y 0 labels sin selecciones del Mundial 2026 quedaron fuera del entrenamiento.",
+    "Split temporal 80/10/10 desde 2014: train=4401, validacion=550, test=551; 198 partidos FIFA World Cup incluidos."
   ],
-  "target_column": "Label + OverUnder25",
+  "target_worldcup_year": "2026",
+  "benchmark_worldcup_year": "",
+  "benchmark_policy": "temporal_80_10_10",
+  "target_column": "Label + GoalsDistribution + OverUnder05/15/25/35",
   "team_columns": [],
-  "train_rows": 900,
-  "test_rows": 64,
-  "prediction_rows": 48,
-  "team_feature_rows": 72,
+  "train_rows": 4401,
+  "validation_rows": 550,
+  "test_rows": 551,
+  "prediction_rows": 0,
+  "team_feature_rows": 0,
   "market_rows": 0,
   "qualifier_feature_rows": 0,
   "market_status": {
     "status": "missing",
     "has_1x2": false,
     "has_ou25": false,
-    "sources": [],
-    "loaded_at": "2026-06-10T17:34:40.033101+00:00"
+    "sources": [
+      "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
+    ],
+    "loaded_at": "2026-06-16T03:07:37.486948+00:00"
   },
   "market_warnings": [
-    "Football-Data XLSX no disponible en cache: storage\\worldcup\\market\\WorldCup2026.xlsx."
+    "Football-Data XLSX no disponible en cache: storage/worldcup/market/WorldCup2026.xlsx."
   ],
   "api_football_status": {
-    "status": "missing",
-    "sources": [],
-    "loaded_at": "2026-06-10T17:34:40.035102+00:00"
+    "status": "ok",
+    "sources": [
+      "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
+    ],
+    "loaded_at": "2026-06-16T03:07:37.522546+00:00"
   },
-  "api_football_warnings": [
-    "API-Football no disponible en cache: storage\\worldcup\\api_football\\raw."
-  ],
-  "api_football_fixture_rows": 0,
-  "api_football_stat_rows": 0,
+  "api_football_warnings": [],
+  "api_football_fixture_rows": 63,
+  "api_football_stat_rows": 126,
   "api_football_market_rows": 0,
-  "dc_rho": -0.06,
+  "international_recent": {
+    "dataset_slug": "martj42/international_results",
+    "github_url": "https://raw.githubusercontent.com/martj42/international_results/refs/heads/master/results.csv",
+    "fallback_dataset_slug": "patateriedata/all-international-football-results",
+    "local_path": "storage/worldcup/international",
+    "file_path": "storage/worldcup/international/all_matches.csv",
+    "source_path": "storage/worldcup/international/all_matches.csv",
+    "exists": true,
+    "available": true,
+    "rows": 49417,
+    "all_matches_rows": 49417,
+    "scored_rows": 49417,
+    "raw_rows": 49477,
+    "unscored_rows": 60,
+    "future_unscored_rows": 60,
+    "max_dataset_date": "2026-06-27",
+    "max_scored_date": "2026-06-14",
+    "worldcup_rows": 976,
+    "official_rows": 31029,
+    "friendly_rows": 18388,
+    "teams": 336
+  },
+  "all_matches_rows": 5502,
+  "worldcup_rows": 198,
+  "class_distribution": {
+    "train": {
+      "rows": 4401,
+      "markets": {
+        "result": {
+          "A": 1254,
+          "D": 1022,
+          "H": 2125
+        },
+        "over_under_05": {
+          "0": 374,
+          "1": 4027
+        },
+        "over_under_15": {
+          "0": 1236,
+          "1": 3165
+        },
+        "over_under_25": {
+          "0": 2269,
+          "1": 2132
+        },
+        "over_under_35": {
+          "0": 3188,
+          "1": 1213
+        },
+        "goals_distribution": {
+          "0": 374,
+          "1": 862,
+          "2": 1033,
+          "3": 919,
+          "4": 579,
+          "5": 312,
+          "6": 322
+        }
+      }
+    },
+    "validation": {
+      "rows": 550,
+      "markets": {
+        "result": {
+          "A": 161,
+          "D": 127,
+          "H": 262
+        },
+        "over_under_05": {
+          "0": 52,
+          "1": 498
+        },
+        "over_under_15": {
+          "0": 152,
+          "1": 398
+        },
+        "over_under_25": {
+          "0": 263,
+          "1": 287
+        },
+        "over_under_35": {
+          "0": 378,
+          "1": 172
+        },
+        "goals_distribution": {
+          "0": 52,
+          "1": 100,
+          "2": 111,
+          "3": 115,
+          "4": 77,
+          "5": 52,
+          "6": 43
+        }
+      }
+    },
+    "test": {
+      "rows": 551,
+      "markets": {
+        "result": {
+          "A": 153,
+          "D": 128,
+          "H": 270
+        },
+        "over_under_05": {
+          "0": 47,
+          "1": 504
+        },
+        "over_under_15": {
+          "0": 138,
+          "1": 413
+        },
+        "over_under_25": {
+          "0": 271,
+          "1": 280
+        },
+        "over_under_35": {
+          "0": 376,
+          "1": 175
+        },
+        "goals_distribution": {
+          "0": 47,
+          "1": 91,
+          "2": 133,
+          "3": 105,
+          "4": 79,
+          "5": 47,
+          "6": 49
+        }
+      }
+    }
+  },
+  "sample_weight_policy": {
+    "worldcup": 1.65,
+    "continental_or_world_official": 1.35,
+    "qualifier": 1.25,
+    "nations_league": 1.1,
+    "other_official": 1.0,
+    "friendly": 0.6
+  },
+  "data_quality": {
+    "prepared_at": "2026-06-16T03:07:47.917267+00:00",
+    "strength": "debil",
+    "sources": {
+      "all_matches": {
+        "available": true,
+        "rows": 5502,
+        "worldcup_rows": 198,
+        "updated_at": "",
+        "source_path": "storage/worldcup/international/all_matches.csv"
+      },
+      "odds": {
+        "available": false,
+        "rows": 0,
+        "has_1x2": false,
+        "has_ou25": false,
+        "updated_at": "2026-06-16T03:07:37.486948+00:00",
+        "sources": [
+          "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
+        ]
+      },
+      "api_football": {
+        "available": true,
+        "status": "ok",
+        "fixtures": 63,
+        "team_stats": 126,
+        "odds": 0,
+        "market_rows": 0,
+        "updated_at": "2026-06-16T03:07:37.522546+00:00",
+        "sources": [
+          "storage/worldcup/api_football/raw/fixtures_league-1_season-2022.json"
+        ]
+      },
+      "lineups": {
+        "available": false,
+        "rows": 0,
+        "updated_at": "2026-06-16T03:07:37.522546+00:00"
+      },
+      "injuries": {
+        "available": false,
+        "rows": 0,
+        "updated_at": "2026-06-16T03:07:37.522546+00:00"
+      },
+      "player_stats": {
+        "available": true,
+        "rows": 126,
+        "updated_at": "2026-06-16T03:07:37.522546+00:00"
+      }
+    },
+    "missing_sources": [
+      "odds",
+      "lineups",
+      "injuries"
+    ]
+  },
+  "training_start_year": 2014,
+  "training_team_scope_policy": "worldcup_2026_participant_any",
+  "training_scope_team_count": 48,
+  "training_scope_teams": [
+    "Algeria",
+    "Argentina",
+    "Australia",
+    "Austria",
+    "Belgium",
+    "Bosnia & Herzegovina",
+    "Brazil",
+    "Canada",
+    "Cape Verde",
+    "Colombia",
+    "Croatia",
+    "Curaçao",
+    "Czech Republic",
+    "DR Congo",
+    "Ecuador",
+    "Egypt",
+    "England",
+    "France",
+    "Germany",
+    "Ghana",
+    "Haiti",
+    "Iran",
+    "Iraq",
+    "Ivory Coast",
+    "Japan",
+    "Jordan",
+    "Mexico",
+    "Morocco",
+    "Netherlands",
+    "New Zealand",
+    "Norway",
+    "Panama",
+    "Paraguay",
+    "Portugal",
+    "Qatar",
+    "Saudi Arabia",
+    "Scotland",
+    "Senegal",
+    "South Africa",
+    "South Korea",
+    "Spain",
+    "Sweden",
+    "Switzerland",
+    "Tunisia",
+    "Turkey",
+    "USA",
+    "Uruguay",
+    "Uzbekistan"
+  ],
+  "max_label_date": "2026-06-16",
+  "removed_before_start_rows": 0,
+  "removed_future_rows": 0,
+  "raw_international_source_rows": 49417,
+  "date_scoped_international_source_rows": 11859,
+  "team_scoped_international_source_rows": 5502,
+  "removed_outside_team_scope_rows": 6357,
+  "removed_outside_team_scope_label_rows": 0,
+  "dc_rho": -0.010000000000000009,
   "over_under_ready": true,
+  "goals_distribution_ready": true,
   "result_ready": true,
   "preview": {
     "columns": [
@@ -53,110 +321,200 @@
       "Label",
       "HG",
       "AG",
+      "OverUnder05",
+      "OverUnder15",
       "OverUnder25",
-      "Source"
+      "OverUnder35",
+      "Source",
+      "is_worldcup_match",
+      "tournament",
+      "stage",
+      "group",
+      "knockout",
+      "label_source",
+      "sample_weight"
     ],
     "rows": [
       {
         "FixtureId": "0",
-        "Date": "1930-07-13 00:00:00",
-        "Year": 1930,
-        "Home": "France",
-        "Away": "Mexico",
-        "Label": "H",
-        "HG": 4.0,
-        "AG": 1.0,
+        "Date": "2014-01-01 00:00:00",
+        "Year": 2014,
+        "Home": "Kuwait",
+        "Away": "Jordan",
+        "Label": "A",
+        "HG": 1.0,
+        "AG": 2.0,
+        "OverUnder05": 1,
+        "OverUnder15": 1,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "OverUnder35": 0,
+        "Source": "all_matches.csv",
+        "is_worldcup_match": false,
+        "tournament": "WAFF Championship",
+        "stage": "",
+        "group": "",
+        "knockout": false,
+        "label_source": "all_matches.csv",
+        "sample_weight": 1.35
       },
       {
         "FixtureId": "1",
-        "Date": "1930-07-13 00:00:00",
-        "Year": 1930,
-        "Home": "United States",
-        "Away": "Belgium",
-        "Label": "H",
-        "HG": 3.0,
-        "AG": 0.0,
-        "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "Date": "2014-01-04 00:00:00",
+        "Year": 2014,
+        "Home": "Bahrain",
+        "Away": "Jordan",
+        "Label": "A",
+        "HG": 0.0,
+        "AG": 1.0,
+        "OverUnder05": 1,
+        "OverUnder15": 0,
+        "OverUnder25": 0,
+        "OverUnder35": 0,
+        "Source": "all_matches.csv",
+        "is_worldcup_match": false,
+        "tournament": "WAFF Championship",
+        "stage": "",
+        "group": "",
+        "knockout": false,
+        "label_source": "all_matches.csv",
+        "sample_weight": 1.35
       },
       {
         "FixtureId": "2",
-        "Date": "1930-07-14 00:00:00",
-        "Year": 1930,
-        "Home": "Yugoslavia",
-        "Away": "Brazil",
-        "Label": "H",
-        "HG": 2.0,
+        "Date": "2014-01-04 00:00:00",
+        "Year": 2014,
+        "Home": "Namibia",
+        "Away": "Ghana",
+        "Label": "A",
+        "HG": 0.0,
         "AG": 1.0,
-        "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "OverUnder05": 1,
+        "OverUnder15": 0,
+        "OverUnder25": 0,
+        "OverUnder35": 0,
+        "Source": "all_matches.csv",
+        "is_worldcup_match": false,
+        "tournament": "Friendly",
+        "stage": "",
+        "group": "",
+        "knockout": false,
+        "label_source": "all_matches.csv",
+        "sample_weight": 0.6
       },
       {
         "FixtureId": "3",
-        "Date": "1930-07-14 00:00:00",
-        "Year": 1930,
-        "Home": "Romania",
-        "Away": "Peru",
+        "Date": "2014-01-04 00:00:00",
+        "Year": 2014,
+        "Home": "Qatar",
+        "Away": "Kuwait",
         "Label": "H",
         "HG": 3.0,
-        "AG": 1.0,
+        "AG": 0.0,
+        "OverUnder05": 1,
+        "OverUnder15": 1,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "OverUnder35": 0,
+        "Source": "all_matches.csv",
+        "is_worldcup_match": false,
+        "tournament": "WAFF Championship",
+        "stage": "",
+        "group": "",
+        "knockout": false,
+        "label_source": "all_matches.csv",
+        "sample_weight": 1.35
       },
       {
         "FixtureId": "4",
-        "Date": "1930-07-15 00:00:00",
-        "Year": 1930,
-        "Home": "Argentina",
-        "Away": "France",
+        "Date": "2014-01-07 00:00:00",
+        "Year": 2014,
+        "Home": "Qatar",
+        "Away": "Jordan",
         "Label": "H",
-        "HG": 1.0,
+        "HG": 2.0,
         "AG": 0.0,
+        "OverUnder05": 1,
+        "OverUnder15": 1,
         "OverUnder25": 0,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "OverUnder35": 0,
+        "Source": "all_matches.csv",
+        "is_worldcup_match": false,
+        "tournament": "WAFF Championship",
+        "stage": "",
+        "group": "",
+        "knockout": false,
+        "label_source": "all_matches.csv",
+        "sample_weight": 1.35
       },
       {
         "FixtureId": "5",
-        "Date": "1930-07-16 00:00:00",
-        "Year": 1930,
-        "Home": "Chile",
-        "Away": "Mexico",
-        "Label": "H",
-        "HG": 3.0,
-        "AG": 0.0,
+        "Date": "2014-01-15 00:00:00",
+        "Year": 2014,
+        "Home": "Moldova",
+        "Away": "Norway",
+        "Label": "A",
+        "HG": 1.0,
+        "AG": 2.0,
+        "OverUnder05": 1,
+        "OverUnder15": 1,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "OverUnder35": 0,
+        "Source": "all_matches.csv",
+        "is_worldcup_match": false,
+        "tournament": "Friendly",
+        "stage": "",
+        "group": "",
+        "knockout": false,
+        "label_source": "all_matches.csv",
+        "sample_weight": 0.6
       },
       {
         "FixtureId": "6",
-        "Date": "1930-07-17 00:00:00",
-        "Year": 1930,
-        "Home": "Yugoslavia",
-        "Away": "Bolivia",
-        "Label": "H",
-        "HG": 4.0,
-        "AG": 0.0,
+        "Date": "2014-01-17 00:00:00",
+        "Year": 2014,
+        "Home": "Moldova",
+        "Away": "Sweden",
+        "Label": "A",
+        "HG": 1.0,
+        "AG": 2.0,
+        "OverUnder05": 1,
+        "OverUnder15": 1,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "OverUnder35": 0,
+        "Source": "all_matches.csv",
+        "is_worldcup_match": false,
+        "tournament": "Friendly",
+        "stage": "",
+        "group": "",
+        "knockout": false,
+        "label_source": "all_matches.csv",
+        "sample_weight": 0.6
       },
       {
         "FixtureId": "7",
-        "Date": "1930-07-17 00:00:00",
-        "Year": 1930,
-        "Home": "United States",
-        "Away": "Paraguay",
-        "Label": "H",
-        "HG": 3.0,
-        "AG": 0.0,
+        "Date": "2014-01-18 00:00:00",
+        "Year": 2014,
+        "Home": "Norway",
+        "Away": "Poland",
+        "Label": "A",
+        "HG": 0.0,
+        "AG": 3.0,
+        "OverUnder05": 1,
+        "OverUnder15": 1,
         "OverUnder25": 1,
-        "Source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json"
+        "OverUnder35": 0,
+        "Source": "all_matches.csv",
+        "is_worldcup_match": false,
+        "tournament": "Friendly",
+        "stage": "",
+        "group": "",
+        "knockout": false,
+        "label_source": "all_matches.csv",
+        "sample_weight": 0.6
       }
     ],
-    "total": 900
+    "total": 4401
   },
-  "history_source": "cache:storage\\worldcup\\cache\\worldcup_1930.json, cache:storage\\worldcup\\cache\\worldcup_1934.json, cache:storage\\worldcup\\cache\\worldcup_1938.json, cache:storage\\worldcup\\cache\\worldcup_1950.json, cache:storage\\worldcup\\cache\\worldcup_1954.json, cache:storage\\worldcup\\cache\\worldcup_1958.json, cache:storage\\worldcup\\cache\\worldcup_1962.json, cache:storage\\worldcup\\cache\\worldcup_1966.json, cache:storage\\worldcup\\cache\\worldcup_1970.json, cache:storage\\worldcup\\cache\\worldcup_1974.json, cache:storage\\worldcup\\cache\\worldcup_1978.json, cache:storage\\worldcup\\cache\\worldcup_1982.json, cache:storage\\worldcup\\cache\\worldcup_1986.json, cache:storage\\worldcup\\cache\\worldcup_1990.json, cache:storage\\worldcup\\cache\\worldcup_1994.json, cache:storage\\worldcup\\cache\\worldcup_1998.json, cache:storage\\worldcup\\cache\\worldcup_2002.json, cache:storage\\worldcup\\cache\\worldcup_2006.json, cache:storage\\worldcup\\cache\\worldcup_2010.json, cache:storage\\worldcup\\cache\\worldcup_2014.json, cache:storage\\worldcup\\cache\\worldcup_2018.json, cache:storage\\worldcup\\cache\\worldcup_2022.json",
-  "final_test_year": "2022",
-  "split_policy": "latest_worldcup_final_test"
+  "history_source": "all_matches.csv:storage/worldcup/international/all_matches.csv:since_2014",
+  "final_test_year": "",
+  "split_policy": "temporal_since_2014_80_10_10"
 }

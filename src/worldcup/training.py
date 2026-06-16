@@ -994,8 +994,12 @@ def train_single_hybrid_model(
     history_df = shared_context.get("history_df")
     history_source = shared_context.get("history_source", "")
     if history_df is None:
-        history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
-        history_df = filter_training_scope_sources(history_df, group_teams, keep_unknown_date=False)
+        source_matches = load_international_matches(required=False)
+        history_df = international_history_rows(source_matches, teams=group_teams)
+        history_source = str(history_df.attrs.get("source") or "")
+        if history_df.empty:
+            history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
+            history_df = filter_training_scope_sources(history_df, group_teams, keep_unknown_date=False)
     feature_store = normalized["team_features"]
     market_rows = normalized.get("market_data", pd.DataFrame())
     qualifier_rows = normalized.get("qualifier_matches", pd.DataFrame())
@@ -1552,10 +1556,13 @@ def train_dual_market_model(
     if not normalized["trainable"]:
         raise WorldCupTrainingError("El ETL preparado no dejo filas entrenables para el modelo 1X2.")
     group_teams = teams_from_tournament(tournament)
-    history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
-    history_df = filter_training_scope_sources(history_df, group_teams, keep_unknown_date=False)
     international_matches = load_international_matches(required=False)
     international_matches = filter_training_scope_sources(international_matches, group_teams, keep_unknown_date=False)
+    history_df = international_history_rows(international_matches, teams=group_teams)
+    history_source = str(history_df.attrs.get("source") or "")
+    if history_df.empty:
+        history_df, history_source = load_historical_matches(refresh=bool(payload.get("refresh_history", False)))
+        history_df = filter_training_scope_sources(history_df, group_teams, keep_unknown_date=False)
     shared_context = {
         "files": files,
         "normalized": normalized,
@@ -2199,8 +2206,6 @@ def build_prepared_dataset(
         refresh_history: bool = False,
 ) -> Dict[str, Any]:
     scope_teams = worldcup_training_scope_teams()
-    history_df, history_source = load_historical_matches(refresh=bool(refresh_history))
-    history_df = filter_training_scope_sources(history_df, scope_teams, keep_unknown_date=False)
     market_bundle = load_market_data(force_download=bool(refresh_history), allow_download=bool(refresh_history), use_scraper=False)
     market_data = filter_training_scope_sources(market_bundle.get("matches", pd.DataFrame()).copy(), scope_teams, keep_unknown_date=True)
     qualifier_matches = filter_training_scope_sources(market_bundle.get("qualifiers", pd.DataFrame()).copy(), scope_teams, keep_unknown_date=True)
@@ -2213,6 +2218,8 @@ def build_prepared_dataset(
         raw_international_matches = load_international_matches(required=True)
     except Exception as exc:
         raise WorldCupTrainingError(f"all_matches.csv es obligatorio para labels: {exc}") from exc
+    history_df = international_history_rows(raw_international_matches, teams=scope_teams)
+    history_source = str(history_df.attrs.get("source") or "all_matches.csv")
     raw_international_source_rows = int(raw_international_matches.shape[0]) if isinstance(raw_international_matches, pd.DataFrame) else 0
     date_scoped_international_matches = filter_training_scope_frame(raw_international_matches, keep_unknown_date=False)
     date_scoped_international_source_rows = int(date_scoped_international_matches.shape[0])
@@ -2675,6 +2682,70 @@ def international_match_rows(matches: pd.DataFrame) -> pd.DataFrame:
             "sample_weight": sample_weight_for_tournament(tournament, is_worldcup=worldcup),
         })
     return sanitize_match_rows(pd.DataFrame(rows))
+
+
+def international_history_rows(
+        matches: Optional[pd.DataFrame] = None,
+        teams: Optional[Iterable[Any]] = None,
+        *,
+        start_year: int = INTERNATIONAL_TRAINING_START_YEAR,
+        max_date: Optional[Any] = None,
+) -> pd.DataFrame:
+    """Return all_matches.csv rows in the historical format expected by score models."""
+    if matches is None:
+        matches = load_international_matches(required=False)
+    columns = ["Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group", "Source"]
+    if matches is None or matches.empty:
+        output = pd.DataFrame(columns=columns)
+        output.attrs["source"] = "all_matches.csv unavailable"
+        return output
+    label_rows = international_match_rows(matches)
+    if label_rows.empty:
+        output = pd.DataFrame(columns=columns)
+        output.attrs["source"] = str(matches.attrs.get("source_path") or "all_matches.csv")
+        return output
+    label_rows = deduplicate_labeled_matches(sanitize_match_rows(label_rows))
+    label_rows, scope_stats = filter_international_training_scope(
+        label_rows,
+        start_year=start_year,
+        max_date=max_date,
+    )
+    if teams is not None:
+        label_rows = filter_worldcup_team_scope_frame(
+            label_rows,
+            teams,
+            keep_without_team_columns=False,
+        )
+    if label_rows.empty:
+        output = pd.DataFrame(columns=columns)
+        output.attrs["source"] = str(matches.attrs.get("source_path") or "all_matches.csv")
+        output.attrs["scope_stats"] = scope_stats
+        return output
+    output = pd.DataFrame({
+        "Date": pd.to_datetime(label_rows["Date"], errors="coerce"),
+        "Year": pd.to_numeric(label_rows["Year"], errors="coerce").astype("Int64"),
+        "Team 1": label_rows["Home"].map(clean_team_name),
+        "Team 2": label_rows["Away"].map(clean_team_name),
+        "G1": pd.to_numeric(label_rows["HG"], errors="coerce"),
+        "G2": pd.to_numeric(label_rows["AG"], errors="coerce"),
+        "Round": label_rows.get("tournament", pd.Series("", index=label_rows.index)).astype(str),
+        "Group": label_rows.get("group", pd.Series("", index=label_rows.index)).astype(str),
+        "Source": label_rows.get("Source", pd.Series("all_matches.csv", index=label_rows.index)).astype(str),
+    })
+    output = output[
+        output["Date"].notna()
+        & output["Team 1"].astype(str).str.len().gt(1)
+        & output["Team 2"].astype(str).str.len().gt(1)
+        & output["G1"].notna()
+        & output["G2"].notna()
+    ].copy()
+    output = output.sort_values("Date", kind="stable").reset_index(drop=True)
+    source_path = str(matches.attrs.get("source_path") or INTERNATIONAL_MATCHES_FILE)
+    output.attrs["source"] = f"all_matches.csv:{source_path}:since_{int(start_year)}"
+    output.attrs["source_path"] = source_path
+    output.attrs["scope_stats"] = scope_stats
+    output.attrs["rows"] = int(output.shape[0])
+    return output
 
 
 def deduplicate_labeled_matches(rows: pd.DataFrame) -> pd.DataFrame:

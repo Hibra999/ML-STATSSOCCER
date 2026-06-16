@@ -43,6 +43,32 @@ def _fotmob_event(match_id, home, away, home_goals, away_goals, *, finished=True
     }
 
 
+def test_score_history_for_tournament_prefers_all_matches_since_2014(monkeypatch):
+    from src.web import mundial_services as services
+    from src.worldcup.international_provider import normalize_international_matches
+
+    raw_matches = pd.DataFrame([
+        {"date": "2013-12-31", "home_team": "Mexico", "away_team": "Canada", "home_score": 5, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2014-01-02", "home_team": "Mexico", "away_team": "Canada", "home_score": 1, "away_score": 0, "tournament": "Friendly", "neutral": False},
+        {"date": "2025-06-01", "home_team": "USA", "away_team": "Czech Republic", "home_score": 2, "away_score": 1, "tournament": "Friendly", "neutral": False},
+    ])
+    normalized = normalize_international_matches(raw_matches)
+    monkeypatch.setattr(services, "load_international_matches", lambda required=False: normalized)
+    monkeypatch.setattr(
+        services,
+        "load_historical_matches",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("historical fallback should not be used")),
+    )
+    tournament = {"groups": {"A": ["Mexico", "Canada", "USA", "Czech Republic"]}}
+
+    history, source = services.score_history_for_tournament(tournament, services.DEFAULT_CONFIG)
+
+    assert source.startswith("all_matches.csv:")
+    assert history["Date"].min() == pd.Timestamp("2014-01-02")
+    assert list(history["Team 1"]) == ["Mexico", "USA"]
+    assert list(history["Team 2"]) == ["Canada", "Czech Republic"]
+
+
 def test_sota_and_alternative_sequences_are_statistical_score_models():
     from src.web import mundial_services as services
     from src.worldcup.score_models import score_model_options
@@ -53,8 +79,10 @@ def test_sota_and_alternative_sequences_are_statistical_score_models():
     assert disabled.isdisjoint(services.SOTA_SCORE_MODEL_SEQUENCE)
     assert disabled <= catalog_keys
     assert "xg_poisson_local" not in services.SOTA_SCORE_MODEL_SEQUENCE
-    assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 3
+    assert len(services.SOTA_SCORE_MODEL_SEQUENCE) == 5
     assert services.ALTERNATIVE_SCORE_MODEL_SEQUENCE == [
+        "statsmodels_poisson_glm",
+        "negative_binomial_glm",
         "dixon_coles_mle",
         "bivariate_poisson_mle",
     ]
@@ -89,6 +117,8 @@ def test_alternatives_benchmark_aliases_and_statistical_registry():
     assert services.normalize_report_pipeline_mode("modo_desconocido") == "poisson_sota"
     assert services.SOTA_SCORE_MODEL_SEQUENCE == [
         "independent_poisson",
+        "statsmodels_poisson_glm",
+        "negative_binomial_glm",
         "dixon_coles_mle",
         "bivariate_poisson_mle",
     ]
@@ -409,6 +439,9 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert result["summary"]["backtest_auto_n"] == 3
     assert result["summary"]["backtest_scope"] == "worldcup_2026_confirmed_auto"
     assert result["summary"]["backtest_source"] == "test-results"
+    assert result["summary"]["statistical_audit"]["available"] is True
+    assert result["statistical_audit"]["baseline_model_key"] == "independent_poisson"
+    assert result["statistical_audit"]["market_comparisons"]
     assert result["summary"]["generated_at"]
     assert result["summary"]["backtest_range"]["evaluated_matches"] == 3
     assert result["summary"]["backtest_range"]["first_match"]["home"] == "Argentina"
@@ -1385,7 +1418,7 @@ def test_alternatives_backtest_auto_uses_confirmed_2026_walk_forward_without_lea
     assert train_snapshots[2][train_snapshots[2]["Year"].eq(2026)]["Team 1"].tolist() == ["Argentina", "Brazil"]
     assert "France" not in train_snapshots[2][train_snapshots[2]["Year"].eq(2026)].tail(1)["Team 1"].tolist()
     assert result["models"][0]["evaluated_matches"] == 3
-    assert result["models"][0]["over_under_accuracy"] == 0.833333
+    assert result["models"][0]["over_under_accuracy"] == 0.75
     assert result["models"][0]["over_under_accuracy_by_line"]["0.5"] == 1.0
     assert len(result["models"][0]["matches"]) == 3
     assert result["models"][0]["matches"][0]["pick_hit"] is True

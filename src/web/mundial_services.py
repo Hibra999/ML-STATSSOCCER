@@ -34,6 +34,8 @@ from src.worldcup import (
 from src.worldcup.model import TOTAL_GOAL_LINES, poisson_score_grid, total_line_suffix
 from src.worldcup.score_models import (
     DEFAULT_SCORE_MODEL,
+    NEGATIVE_BINOMIAL_GLM_MODEL,
+    STATSMODELS_POISSON_GLM_MODEL,
     build_score_model,
     normalize_score_model_key,
     probabilities_from_score_grid,
@@ -51,6 +53,7 @@ from src.worldcup.sota_alternatives import (
     sota_alternatives_catalog,
     sota_baseline_context,
 )
+from src.worldcup.statistical_audit import build_prediction_statistical_audit
 from src.worldcup.data import (
     CACHE_ROOT,
     fixture_results_status,
@@ -62,6 +65,7 @@ from src.worldcup.data import (
 from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
 from src.worldcup.international_provider import (
     INTERNATIONAL_ROOT,
+    INTERNATIONAL_RECENT_START_DATE,
     contextual_poisson_for_match,
     international_results_status,
     is_friendly_tournament,
@@ -83,6 +87,8 @@ from src.worldcup.training import (
     build_matchup_feature_table,
     dataset_status as worldcup_training_dataset_status,
     default_model_id,
+    filter_training_scope_sources,
+    international_history_rows,
     json_safe,
     list_worldcup_models,
     match_feature_row,
@@ -119,6 +125,8 @@ XG_LIGHTGBM_PIPELINE_MODE = "xg_lightgbm"
 XG_LIGHTGBM_PIPELINE_LABEL = "xG-LightGBM"
 SOTA_SCORE_MODEL_SEQUENCE = [
     "independent_poisson",
+    STATSMODELS_POISSON_GLM_MODEL,
+    NEGATIVE_BINOMIAL_GLM_MODEL,
     "dixon_coles_mle",
     "bivariate_poisson_mle",
 ]
@@ -142,6 +150,10 @@ DEFAULT_CONFIG = {
     "score_model": DEFAULT_SCORE_MODEL,
     "stat_model_cache": True,
     "stat_model_refit": False,
+    "stat_lambda_model": STATSMODELS_POISSON_GLM_MODEL,
+    "stat_glm_min_matches": 12,
+    "stat_glm_validation_fraction": 0.2,
+    "score_mle_recency_weight": None,
     "bayes_draws": 500,
     "bayes_tune": 500,
     "bayes_chains": 2,
@@ -328,6 +340,13 @@ class BenchmarkFeatureSource:
             self.warnings.append(f"API-Football cache no disponible para features ({exc.__class__.__name__}).")
         try:
             self.international_matches = load_international_matches(required=False)
+            scope_teams = [team for group_teams in groups_from_tournament(self.tournament).values() for team in group_teams]
+            self.international_matches = filter_training_scope_sources(
+                self.international_matches,
+                scope_teams,
+                keep_unknown_date=False,
+                keep_without_team_columns=False,
+            )
         except Exception as exc:
             self.warnings.append(f"all_matches.csv no disponible para features recientes ({exc.__class__.__name__}).")
         try:
@@ -1432,7 +1451,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     base_model, history_source = build_model(tournament, config)
-    feature_history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    feature_history_df, _ = score_history_for_tournament(tournament, config)
     feature_source = benchmark_feature_source(tournament, feature_history_df, config)
     limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
     group_filter = str(payload.get("group") or "").strip()
@@ -1990,7 +2009,7 @@ def alternatives_benchmark_report(
 ) -> Dict[str, Any]:
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_refresh = refresh_worldcup_2026_results(tournament, refresh=True)
-    history_df, history_source = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    history_df, history_source = score_history_for_tournament(tournament, config)
     feature_source = benchmark_feature_source(tournament, history_df, config)
     model_sequence = list(BENCHMARK_SCORE_MODEL_SEQUENCE)
     tuning_summary = tune_benchmark_poisson_recent_matches(
@@ -2046,6 +2065,7 @@ def alternatives_benchmark_report(
         progress_callback=progress_callback,
     )
     backtests = backtest.get("models", [])
+    statistical_audit = build_prediction_statistical_audit(backtests, baseline_key=DEFAULT_SCORE_MODEL)
     best_model = best_alternative_from_backtests(backtests)
     backtest_by_key = {str(item.get("model_key") or ""): item for item in backtests}
     ranked_model_keys = [str(item.get("model_key") or "") for item in backtests if str(item.get("model_key") or "")]
@@ -2117,6 +2137,14 @@ def alternatives_benchmark_report(
         "config": config,
         "best_model": best_model,
         "backtest": backtest_summary,
+        "statistical_audit": {
+            "available": statistical_audit.get("available", False),
+            "evaluated_models": statistical_audit.get("evaluated_models", 0),
+            "evaluated_matches": statistical_audit.get("evaluated_matches", 0),
+            "baseline_model_key": statistical_audit.get("baseline_model_key", DEFAULT_SCORE_MODEL),
+            "recommendations": statistical_audit.get("recommendations", []),
+            "warnings": statistical_audit.get("warnings", []),
+        },
         "feature_research": worldcup_feature_research_summary(feature_source),
     }
     report = persist_upcoming_report({
@@ -2129,6 +2157,7 @@ def alternatives_benchmark_report(
         "baseline": summary["baseline_model"],
         "fixture_reports": fixture_reports,
         "model_backtests": backtests,
+        "statistical_audit": statistical_audit,
         "best_model": best_model,
         "backtest": backtest,
         "table": table,
@@ -2424,7 +2453,7 @@ def alternatives_backtest_report(
         "backtest_range": backtest_range_summary(confirmed_df, generated_at),
         "baseline": baseline_metrics,
         "anti_leakage": (
-            "Walk-forward Mundial 2026: cada partido confirmado se evalua con historico mundialista previo "
+            "Walk-forward Mundial 2026: cada partido confirmado se evalua con all_matches.csv desde 2014 "
             "y solo resultados 2026 estrictamente anteriores en orden cronologico; nunca se entrena con el "
             "partido evaluado ni con resultados 2026 posteriores."
         ),
@@ -2591,6 +2620,7 @@ def recent_international_team_matches(matches: pd.DataFrame, team: str, before_d
         & working["_home_score"].notna()
         & working["_away_score"].notna()
     ].copy()
+    working = working[working["_date"] >= pd.Timestamp(INTERNATIONAL_RECENT_START_DATE)].copy()
     cutoff = pd.to_datetime(before_date, errors="coerce")
     if pd.notna(cutoff):
         working = working[working["_date"] < cutoff].copy()
@@ -2693,6 +2723,7 @@ def evaluate_score_model_walk_forward_2026(
     match_rows: List[Dict[str, Any]] = []
     warnings: List[str] = []
     model_available = True
+    international_status = international_results_status() if feature_source is not None else None
     for fixture_index, (_, eval_row) in enumerate(confirmed_df.iterrows(), start=1):
         emit_report_progress(
             progress_callback,
@@ -2756,7 +2787,13 @@ def evaluate_score_model_walk_forward_2026(
         row_metrics = score_model_backtest_prediction(prediction_model, eval_row, config)
         if not row_metrics:
             continue
-        row_metrics["sample"]["recent_matches_15"] = recent_matches_for_fixture(train_df, eval_row, limit=15)
+        row_metrics["sample"]["recent_matches_15"] = recent_matches_for_fixture(
+            train_df,
+            eval_row,
+            limit=15,
+            international_matches=feature_source.international_matches if feature_source is not None else None,
+            international_status=international_status,
+        )
         accumulate_backtest_totals(totals, row_metrics)
         match_rows.append(row_metrics["sample"])
         if len(sample_rows) < 8:
@@ -3666,7 +3703,7 @@ def upcoming_sota_fixture_reports(
     group_map = groups_from_tournament(tournament)
     team_names = [team for group_teams in group_map.values() for team in group_teams]
     if history_df is None or history_df.empty:
-        history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
+        history_df, _ = score_history_for_tournament(tournament, config)
     international_matches = load_international_matches(required=False)
     international_status = international_results_status()
     for report, fixture in zip(fixture_reports, fixtures):
@@ -5840,10 +5877,23 @@ def procedure() -> Dict[str, Any]:
     }
 
 
+def score_history_for_tournament(tournament: Dict[str, Any], config: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
+    group_map = groups_from_tournament(tournament)
+    team_names = [team for group_teams in group_map.values() for team in group_teams]
+    international_matches = load_international_matches(required=False)
+    history_df = international_history_rows(international_matches, teams=team_names)
+    history_source = str(history_df.attrs.get("source") or "")
+    if not history_df.empty:
+        return history_df, history_source
+    history_df, history_source = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    history_df = filter_training_scope_sources(history_df, team_names, keep_unknown_date=False)
+    return history_df, history_source
+
+
 def build_model(tournament: Dict[str, Any], config: Dict[str, Any]) -> Tuple[WorldCupModel, str]:
     group_map = groups_from_tournament(tournament)
     team_names = [team for group_teams in group_map.values() for team in group_teams]
-    history_df, history_source = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    history_df, history_source = score_history_for_tournament(tournament, config)
     model = WorldCupModel.from_history(
         history_df,
         teams=team_names,
@@ -5860,7 +5910,7 @@ def apply_configured_score_model(model: Any, tournament: Dict[str, Any], config:
         return model
     group_map = groups_from_tournament(tournament)
     team_names = [team for group_teams in group_map.values() for team in group_teams]
-    history_df, _ = load_historical_matches(refresh=bool(config.get("refresh", False)))
+    history_df, _ = score_history_for_tournament(tournament, config)
     return build_score_model(model, history_df=history_df, teams=team_names, config=config)
 
 
@@ -5912,6 +5962,14 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "score_model": normalize_score_model_key(payload.get("score_model", DEFAULT_CONFIG["score_model"])),
         "stat_model_cache": bool(payload.get("stat_model_cache", DEFAULT_CONFIG["stat_model_cache"])),
         "stat_model_refit": bool(payload.get("stat_model_refit", DEFAULT_CONFIG["stat_model_refit"])),
+        "stat_lambda_model": str(payload.get("stat_lambda_model", DEFAULT_CONFIG["stat_lambda_model"]) or STATSMODELS_POISSON_GLM_MODEL).strip().lower(),
+        "stat_glm_min_matches": int(_clamp_int(payload.get("stat_glm_min_matches", DEFAULT_CONFIG["stat_glm_min_matches"]), 4, 500)),
+        "stat_glm_validation_fraction": _clamp_float(payload.get("stat_glm_validation_fraction", DEFAULT_CONFIG["stat_glm_validation_fraction"]), 0.05, 0.4),
+        "score_mle_recency_weight": _clamp_float(
+            payload.get("score_mle_recency_weight", payload.get("recency_weight", DEFAULT_CONFIG["recency_weight"])),
+            0.0,
+            1.0,
+        ),
         "bayes_draws": int(_clamp_int(payload.get("bayes_draws", DEFAULT_CONFIG["bayes_draws"]), 100, 10000)),
         "bayes_tune": int(_clamp_int(payload.get("bayes_tune", DEFAULT_CONFIG["bayes_tune"]), 100, 10000)),
         "bayes_chains": int(_clamp_int(payload.get("bayes_chains", DEFAULT_CONFIG["bayes_chains"]), 1, 8)),
