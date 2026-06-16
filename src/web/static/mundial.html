@@ -12,20 +12,20 @@
       <span class="brand-mark">26</span>
       <span><strong>Mundial 2026 <span class="version-badge">v1</span></strong><small>ML-STATSSOCCER</small></span>
     </a>
-    <nav>
-      <button class="nav-pill active" data-section="resumen">Resumen</button>
-      <button class="nav-pill" data-section="grupos">Grupos</button>
-      <button class="nav-pill" data-section="fixtures">Calendario</button>
-      <button class="nav-pill" data-section="predicciones">Predicciones Futuras</button>
-      <button class="nav-pill" data-section="xg-lightgbm">xG-LightGBM</button>
-      <button class="nav-pill" data-section="datos">Datos</button>
+    <nav class="main-nav" aria-label="Secciones Mundial 2026">
+      <button type="button" class="nav-pill active" data-section="resumen" aria-selected="true">Resumen</button>
+      <button type="button" class="nav-pill" data-section="grupos" aria-selected="false">Grupos</button>
+      <button type="button" class="nav-pill" data-section="fixtures" aria-selected="false">Calendario</button>
+      <button type="button" class="nav-pill" data-section="predicciones" aria-selected="false">Predicciones Futuras</button>
+      <button type="button" class="nav-pill" data-section="xg-lightgbm" aria-selected="false">xG-LightGBM</button>
+      <button type="button" class="nav-pill" data-section="datos" aria-selected="false">Datos</button>
     </nav>
   </header>
 
   <main>
     <section id="alert" class="alert hidden"></section>
 
-    <section id="resumen" class="hero dashboard-hero section-block worldcup-view active">
+    <section id="resumen" class="hero dashboard-hero section-block worldcup-view active section-shell">
       <div class="dashboard-hero-main">
         <div class="hero-copy">
           <span class="eyebrow">Dashboard Mundial</span>
@@ -54,22 +54,30 @@
       </div>
     </section>
 
-    <section id="grupos" class="section-block worldcup-view">
-      <div class="section-heading">
-        <h2>Grupos</h2>
-        <small id="groups-source"></small>
+    <section id="grupos" class="section-block worldcup-view section-shell groups-page">
+      <div class="section-heading section-toolbar">
+        <div class="section-heading-title">
+          <h2>Grupos</h2>
+          <small id="groups-source"></small>
+        </div>
+        <span class="section-chip">Fase de grupos</span>
       </div>
       <div id="groups-grid" class="groups-grid"></div>
-      <div class="section-heading subheading">
-        <h2>Equipos y perfil</h2>
-        <small>Ratings derivados del historico sin resultados 2026</small>
+      <div class="section-heading subheading section-toolbar">
+        <div class="section-heading-title">
+          <h2>Equipos y perfil</h2>
+          <small>Ratings derivados del histórico sin resultados 2026</small>
+        </div>
       </div>
       <div id="teams-grid" class="teams-grid"></div>
     </section>
 
-    <section id="fixtures" class="section-block worldcup-view">
-      <div class="section-heading">
-        <h2>Calendario</h2>
+    <section id="fixtures" class="section-block worldcup-view section-shell fixtures-page">
+      <div class="section-heading section-toolbar">
+        <div class="section-heading-title">
+          <h2>Calendario</h2>
+          <small id="fixtures-source" class="summary-strip">Estado de jornada</small>
+        </div>
         <div class="filters">
           <select id="fixture-group-filter"></select>
           <input id="fixture-search" placeholder="Buscar equipo">
@@ -78,10 +86,13 @@
       <div id="fixtures-list" class="fixtures-list"></div>
     </section>
 
-    <section id="predicciones" class="section-block worldcup-view">
-      <div class="section-heading">
-        <h2>Predicciones Futuras</h2>
-        <small id="upcoming-summary">Reporte por pipeline</small>
+    <section id="predicciones" class="section-block worldcup-view section-shell prediction-page">
+      <div class="section-heading section-toolbar">
+        <div class="section-heading-title">
+          <h2>Predicciones Futuras</h2>
+          <small id="upcoming-summary">Reporte por pipeline</small>
+        </div>
+        <span class="section-chip">SOTA + xG-LightGBM</span>
       </div>
       <div class="prediction-dock clean-dock">
         <div>
@@ -148,10 +159,13 @@
       </details>
     </section>
 
-    <section id="xg-lightgbm" class="section-block worldcup-view">
-      <div class="section-heading">
-        <h2>xG-LightGBM</h2>
-        <small id="xg-lightgbm-summary">Pipeline ML profesional</small>
+    <section id="xg-lightgbm" class="section-block worldcup-view section-shell xg-page">
+      <div class="section-heading section-toolbar">
+        <div class="section-heading-title">
+          <h2>xG-LightGBM</h2>
+          <small id="xg-lightgbm-summary">Pipeline ML profesional</small>
+        </div>
+        <span class="section-chip">Entrenamiento y métricas</span>
       </div>
       <div class="prediction-dock xg-training-dock">
         <div>

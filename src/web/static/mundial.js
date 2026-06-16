@@ -38,8 +38,23 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 function bindEvents() {
+  const nav = document.querySelector(".main-nav");
+  if (nav) {
+    nav.setAttribute("role", "tablist");
+  }
   document.querySelectorAll("[data-section]").forEach((button) => {
+    button.setAttribute("role", "tab");
+    button.setAttribute("tabindex", "-1");
+    if (button.dataset.section) {
+      button.setAttribute("aria-controls", button.dataset.section);
+    }
+    button.addEventListener("keydown", handleWorldcupTabKeyboard);
     button.addEventListener("click", () => switchWorldcupView(button.dataset.section));
+  });
+  document.querySelectorAll(".worldcup-view").forEach((view) => {
+    view.setAttribute("role", "tabpanel");
+    view.setAttribute("tabindex", "-1");
+    view.setAttribute("aria-hidden", "true");
   });
   bind("simulate-poisson-btn", "click", runMatchMonteCarlo);
   bind("fixture-group-filter", "change", renderFixtures);
@@ -54,6 +69,34 @@ function bindEvents() {
     const input = document.getElementById(id);
     if (input) input.addEventListener("change", () => syncPoissonRecentInputs(input));
   });
+
+  const sections = document.querySelectorAll(".worldcup-view");
+  const activeButton = document.querySelector(".nav-pill.active");
+  const activeId = (activeButton && activeButton.dataset.section) || "resumen";
+  switchWorldcupView(activeId, false, sections);
+}
+
+function handleWorldcupTabKeyboard(event) {
+  const { key } = event;
+  if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "Home" && key !== "End") return;
+  const buttons = [...document.querySelectorAll(".main-nav .nav-pill")];
+  if (!buttons.length) return;
+  const activeIndex = buttons.findIndex((button) => button.classList.contains("active"));
+  if (activeIndex < 0) return;
+  let nextIndex = activeIndex;
+  if (key === "ArrowRight") {
+    nextIndex = (activeIndex + 1) % buttons.length;
+  } else if (key === "ArrowLeft") {
+    nextIndex = (activeIndex - 1 + buttons.length) % buttons.length;
+  } else if (key === "Home") {
+    nextIndex = 0;
+  } else if (key === "End") {
+    nextIndex = buttons.length - 1;
+  }
+  if (nextIndex === activeIndex) return;
+  event.preventDefault();
+  const targetSection = buttons[nextIndex].dataset.section;
+  switchWorldcupView(targetSection, true);
 }
 
 function bind(id, event, handler) {
@@ -271,11 +314,20 @@ function renderTeams(payload) {
 function renderFixtureFilters() {
   const groups = [...new Set(state.fixtures.map((fixture) => fixture.group).filter(Boolean))];
   document.getElementById("fixture-group-filter").innerHTML = `<option value="">Todos los grupos</option>${groups.map((group) => `<option value="${escapeAttr(group)}">${escapeHtml(group)}</option>`).join("")}`;
+  const fixturesSource = document.getElementById("fixtures-source");
+  if (fixturesSource) {
+    fixturesSource.textContent = `${state.fixtures.length} partidos cargados`;
+  }
 }
 
 function renderFixtures() {
   const group = document.getElementById("fixture-group-filter").value;
   const query = document.getElementById("fixture-search").value.trim().toLowerCase();
+  const badge = (fixture) => {
+    const state = fixtureStatusLabel(fixture);
+    const cls = fixtureStatusClass(fixture);
+    return `<span class="fixture-status-badge ${escapeAttr(cls)}">${escapeHtml(state)}</span>`;
+  };
   const fixtures = state.fixtures.filter((fixture) => {
     if (group && fixture.group !== group) return false;
     if (!query) return true;
@@ -284,6 +336,7 @@ function renderFixtures() {
   document.getElementById("fixtures-list").innerHTML = fixtures.map((fixture) => `
     <article class="fixture-card">
       <div class="fixture-meta"><span>${escapeHtml(fixture.date)} ${escapeHtml(fixture.time || "")}</span><span>${escapeHtml(fixture.group || fixture.round)}</span></div>
+      <div>${badge(fixture)}</div>
       <div class="fixture-teams">
         <div class="fixture-team">${flagHtml(fixture.home)}<strong>${escapeHtml(fixture.home.name)}</strong></div>
         <span>${fixture.finished ? `${escapeHtml(fixture.score_home)}-${escapeHtml(fixture.score_away)}` : "vs"}</span>
@@ -312,6 +365,19 @@ function renderHeroCountdown(targetIso, stateLabel, highlight) {
   const kickoffLine = [highlight && highlight.date, highlight && highlight.time, highlight && highlight.venue].filter(Boolean).join(" · ");
   container.innerHTML = dashboardCountdownHtml(matchLine, kickoffLine, targetIso, stateLabel);
   refreshCountdowns();
+}
+
+function fixtureStatusLabel(fixture) {
+  if (!fixture) return "Pendiente";
+  if (fixture.finished) return "Final";
+  if (fixture.countdown_state === "live") return "En vivo";
+  return "Próximo";
+}
+
+function fixtureStatusClass(fixture) {
+  if (!fixture || fixture.finished) return "final";
+  if (fixture.countdown_state === "live") return "live";
+  return "scheduled";
 }
 
 function dashboardCountdownHtml(matchLine, kickoffLine, targetIso, stateLabel) {
@@ -2698,9 +2764,23 @@ function jsonOptions(payload) {
   return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) };
 }
 
-function switchWorldcupView(id) {
-  document.querySelectorAll(".nav-pill").forEach((button) => button.classList.toggle("active", button.dataset.section === id));
-  document.querySelectorAll(".worldcup-view").forEach((view) => view.classList.toggle("active", view.id === id));
+function switchWorldcupView(id, focusTab = false, externalViews = null) {
+  const buttons = [...document.querySelectorAll(".main-nav .nav-pill")];
+  const views = externalViews ? [...externalViews] : [...document.querySelectorAll(".worldcup-view")];
+  const targetButton = buttons.find((button) => button.dataset.section === id);
+  if (!targetButton) return;
+  buttons.forEach((button) => {
+    const active = button === targetButton;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.setAttribute("tabindex", active ? "0" : "-1");
+  });
+  views.forEach((view) => {
+    const active = view.id === id;
+    view.classList.toggle("active", active);
+    view.setAttribute("aria-hidden", String(!active));
+  });
+  if (focusTab) targetButton.focus({ preventScroll: true });
   window.scrollTo({ top: 0, behavior: "smooth" });
   if (id === "alineaciones" && state.fixtures.length) loadSelectedLineup(false);
   if (id === "predicciones" && state.fixtures.length) fillUpcomingGroupFilter();

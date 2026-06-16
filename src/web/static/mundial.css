@@ -110,19 +110,79 @@ label input, label select {
 
 nav {
   display: flex;
+}
+
+.main-nav {
+  display: flex;
   gap: 6px;
   overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.main-nav::-webkit-scrollbar {
+  display: none;
 }
 .nav-pill {
-  border: 0;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  min-height: 34px;
+  padding: 7px 12px;
   white-space: nowrap;
   background: transparent;
   color: var(--muted);
+  transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease, transform 0.12s ease;
 }
 .nav-pill.active,
 .nav-pill:hover {
   background: #e9f3ef;
   color: var(--green);
+  border-color: #bfd5cc;
+}
+.nav-pill:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 1px;
+}
+.nav-pill:active {
+  transform: scale(0.99);
+}
+.section-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.section-heading {
+  align-items: start;
+}
+
+.section-heading-title {
+  display: grid;
+  gap: 4px;
+}
+
+.section-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 7px 11px;
+  border-radius: 999px;
+  background: #eaf3ee;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.section-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hero-compact {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 main {
@@ -577,6 +637,9 @@ h3 { font-size: 16px; }
   justify-content: space-between;
   margin-bottom: 14px;
 }
+.section-heading.compact {
+  margin-bottom: 8px;
+}
 .subheading {
   margin-top: 22px;
 }
@@ -585,6 +648,114 @@ h3 { font-size: 16px; }
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.summary-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.summary-strip .section-chip {
+  background: #f0f6f3;
+}
+
+.groups-page,
+.fixtures-page,
+.prediction-page,
+.xg-page {
+  gap: 18px;
+}
+
+.group-card,
+.fixture-card,
+.team-card,
+.visual-panel,
+.report-panel,
+.prediction-card,
+.upcoming-card {
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.14s ease;
+}
+
+.group-card:hover,
+.fixture-card:hover,
+.team-card:hover,
+.visual-panel:hover,
+.prediction-card:hover,
+.upcoming-card:hover {
+  border-color: #9fbbd3;
+  box-shadow: 0 12px 30px rgba(18, 31, 43, 0.08);
+  transform: translateY(-1px);
+}
+
+.fixture-card {
+  display: grid;
+  gap: 12px;
+}
+.fixture-card .fixture-meta {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+
+.fixture-status-badge {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #f8fafb;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.fixture-status-badge.live {
+  border-color: #ffd6a8;
+  background: #fff7ea;
+  color: #8a5a00;
+}
+.fixture-status-badge.final {
+  border-color: #d7dfd5;
+  background: #f6f9f4;
+  color: #3b4a56;
+}
+.fixture-status-badge.scheduled {
+  border-color: #bfd5cc;
+  background: #ecf6f2;
+  color: var(--green);
+}
+
+.prediction-dock,
+.training-panel,
+.xg-training-dock {
+  align-items: start;
+}
+
+.prediction-dock > article,
+.xg-training-dock > article,
+.xg-training-dock > details,
+.prediction-dock > details {
+  margin-bottom: 0;
+}
+
+.prediction-page .worldcup-progress,
+.xg-page .worldcup-progress {
+  margin: 0;
+}
+
+.upcoming-report,
+.xg-page #xg-status-cards {
+  gap: 12px;
+}
+
+.report-summary-grid,
+.dataset-summary,
+.model-state-grid,
+.metric-card-grid,
+.market-card-grid {
+  grid-auto-rows: minmax(76px, auto);
 }
 
 .groups-grid {
@@ -3278,6 +3449,15 @@ th {
   .topbar {
     display: grid;
     gap: 12px;
+  }
+  .main-nav {
+    padding-bottom: 0;
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .section-toolbar {
+    align-items: start;
+    flex-direction: column;
   }
   main { padding: 14px; }
   h1 { font-size: 34px; }
