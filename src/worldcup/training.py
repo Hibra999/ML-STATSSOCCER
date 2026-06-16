@@ -158,6 +158,8 @@ FEATURE_SELECTION_MODES = {FEATURE_SELECTION_FAMILY_BALANCED, FEATURE_SELECTION_
 CALIBRATION_METHODS = {"sigmoid", "isotonic"}
 PROBABILITY_OBJECTIVES = {"LogLoss", "Brier", "PredictiveScore"}
 TRAINING_OBJECTIVES = ("F1", "Accuracy", "Precision", "Recall", "BalancedAccuracy", "LogLoss", "Brier", "PredictiveScore")
+DEFAULT_SHAP_SAMPLE_ROWS = 256
+SHAP_REDUNDANCY_CORRELATION = 0.95
 HISTORY_FEATURE_WINDOWS = (3, 5, 10, 15)
 HISTORY_REFERENCE_DATE = "2026-06-11"
 WALK_FORWARD_ROOT = Path("storage") / "worldcup" / "walk_forward"
@@ -511,6 +513,11 @@ def training_options() -> Dict[str, Any]:
         "objectives": list(TRAINING_OBJECTIVES),
         "calibration_methods": sorted(CALIBRATION_METHODS),
         "feature_selection_modes": [FEATURE_SELECTION_FAMILY_BALANCED, FEATURE_SELECTION_SUPERVISED_MODEL],
+        "interpretability": {
+            "shap_enabled_default": False,
+            "xg_lightgbm_shap_enabled_default": True,
+            "shap_sample_rows_default": DEFAULT_SHAP_SAMPLE_ROWS,
+        },
         "hardware": detect_hardware(),
         "defaults": default_training_payload(),
     }
@@ -667,6 +674,8 @@ def default_training_payload() -> Dict[str, Any]:
         "calibration_enabled": False,
         "calibration_method": "sigmoid",
         "feature_selection_mode": FEATURE_SELECTION_FAMILY_BALANCED,
+        "shap_enabled": False,
+        "shap_sample_rows": DEFAULT_SHAP_SAMPLE_ROWS,
         **worldcup_model_defaults("xgboost"),
     }
 
@@ -702,9 +711,32 @@ def normalize_feature_selection_mode(value: Any) -> str:
     return key if key in FEATURE_SELECTION_MODES else FEATURE_SELECTION_FAMILY_BALANCED
 
 
+def normalize_payload_bool(value: Any, default: bool = False) -> bool:
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "si", "sí"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
 def normalize_calibration_method(value: Any) -> str:
     key = str(value or "sigmoid").strip().lower().replace("-", "_")
     return key if key in CALIBRATION_METHODS else "sigmoid"
+
+
+def normalize_shap_sample_rows(value: Any) -> int:
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return DEFAULT_SHAP_SAMPLE_ROWS
+    try:
+        rows = int(float(value))
+    except (TypeError, ValueError):
+        return DEFAULT_SHAP_SAMPLE_ROWS
+    return max(32, min(rows, 1000))
 
 
 def worldcup_model_defaults(model_key: str) -> Dict[str, Any]:
@@ -727,6 +759,8 @@ def xg_lightgbm_defaults() -> Dict[str, Any]:
         "calibration_enabled": True,
         "calibration_method": "sigmoid",
         "feature_selection_mode": FEATURE_SELECTION_FAMILY_BALANCED,
+        "shap_enabled": True,
+        "shap_sample_rows": DEFAULT_SHAP_SAMPLE_ROWS,
     })
     return defaults
 
@@ -1288,6 +1322,16 @@ def train_single_hybrid_model(
     )
     raw_clf = fit_result["classifier"]
     raw_top_features = top_feature_importances(raw_clf, feature_columns)
+    interpretability = shap_interpretability_payload(
+        raw_clf,
+        feature_columns,
+        x_validation if has_validation_matrix else None,
+        y_validation_encoded if has_validation_matrix else None,
+        classes=label_classes,
+        target=effective_target,
+        enabled=bool(train_config.get("shap_enabled", False)),
+        sample_rows=int(train_config.get("shap_sample_rows", DEFAULT_SHAP_SAMPLE_ROWS) or DEFAULT_SHAP_SAMPLE_ROWS),
+    )
     raw_train_pred = classifier_predict(raw_clf, x_fit_final)
     raw_eval_pred = classifier_predict(raw_clf, x_eval)
     raw_train_proba = classifier_predict_proba(raw_clf, x_fit_final)
@@ -1446,6 +1490,7 @@ def train_single_hybrid_model(
         "confusion_matrix": confusion,
         "calibration": calibration,
         "baseline": baseline,
+        "interpretability": interpretability,
         "derived_total_markets": derived_total_markets,
         "classes": label_classes,
         "encoded_classes": list(range(len(label_classes))),
@@ -1469,7 +1514,7 @@ def train_single_hybrid_model(
         "tuning_trace": tuning_trace(tuned),
         "etl_steps": etl,
         "hardware": hardware,
-        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *normalized.get("api_football_warnings", []), *fit_result.get("warnings", []), *calibration_result.get("warnings", []), *baseline.get("warnings", [])] if warning]),
+        "warnings": unique_strings([warning for warning in [target_warning, *normalized.get("warnings", []), *normalized.get("market_warnings", []), *normalized.get("api_football_warnings", []), *fit_result.get("warnings", []), *calibration_result.get("warnings", []), *baseline.get("warnings", []), *(interpretability.get("shap", {}).get("warnings", []) if isinstance(interpretability, dict) else [])] if warning]),
         "top_features": raw_top_features,
         "feature_inventory": feature_inventory_payload(feature_columns, x_train=x_fit_final, x_eval=x_eval, feature_selection=feature_selection),
         "feature_cache": feature_cache.summary(),
@@ -1500,6 +1545,7 @@ def train_single_hybrid_model(
         "confusion_matrix": confusion,
         "calibration": calibration,
         "baseline": baseline,
+        "interpretability": interpretability,
         "features": feature_columns,
         "feature_inventory": record["feature_inventory"],
         "train_rows": int(len(y_fit_final)),
@@ -1698,6 +1744,7 @@ def train_dual_market_model(
         "confusion_matrix": result_record.get("confusion_matrix", {}),
         "calibration": result_record.get("calibration", {}),
         "baseline": result_record.get("baseline", {}),
+        "interpretability": bundle_interpretability_payload(market_results, result_record.get("interpretability", {})),
         "classes": result_record.get("classes", []),
         "mode": normalized["training_mode"],
         "eval_strategy": result_record.get("eval_strategy", ""),
@@ -1753,6 +1800,7 @@ def train_dual_market_model(
         "confusion_matrix": bundle_record["confusion_matrix"],
         "calibration": bundle_record["calibration"],
         "baseline": bundle_record["baseline"],
+        "interpretability": bundle_record["interpretability"],
         "features": bundle_record["feature_columns"],
         "feature_inventory": bundle_record["feature_inventory"],
         "train_rows": int(result_result.get("train_rows", 0)),
@@ -5304,6 +5352,7 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     model_id = normalize_worldcup_model_id(payload.get("model_id") or default_model_id(model_profile or model_key, default_target))
     feature_profile = normalize_feature_profile(payload.get("feature_profile", DEFAULT_FEATURE_PROFILE))
     default_calibration_enabled = model_profile == XG_LIGHTGBM_PROFILE
+    default_shap_enabled = model_profile == XG_LIGHTGBM_PROFILE
     return {
         "model_id": model_id,
         "model_name": str(payload.get("model_name") or model_id).strip() or model_id,
@@ -5318,15 +5367,17 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "seed": int(float(payload.get("seed", 2026) or 2026)),
         "n_jobs": n_jobs,
         "device": device,
-        "tuning_enabled": bool(payload.get("tuning_enabled", False)),
+        "tuning_enabled": normalize_payload_bool(payload.get("tuning_enabled"), False),
         "n_trials": max(int(float(payload.get("n_trials", payload.get("trials", 12)) or 12)), 1),
         "optuna_sampler": str(payload.get("optuna_sampler") or "tpe"),
         "optuna_pruner": str(payload.get("optuna_pruner") or "none"),
         "objective": normalize_metric_name(payload.get("objective") or "F1"),
         "tune_params": payload.get("tune_params", payload.get("tune", "all")),
-        "calibration_enabled": bool(payload.get("calibration_enabled", default_calibration_enabled)),
+        "calibration_enabled": normalize_payload_bool(payload.get("calibration_enabled"), default_calibration_enabled),
         "calibration_method": normalize_calibration_method(payload.get("calibration_method", "sigmoid")),
         "feature_selection_mode": normalize_feature_selection_mode(payload.get("feature_selection_mode")),
+        "shap_enabled": normalize_payload_bool(payload.get("shap_enabled"), default_shap_enabled),
+        "shap_sample_rows": normalize_shap_sample_rows(payload.get("shap_sample_rows", DEFAULT_SHAP_SAMPLE_ROWS)),
         "market_index": int(payload.get("market_index") or 0),
         "market_total": int(payload.get("market_total") or 0),
         "trials_per_market": int(payload.get("trials_per_market") or 0),
@@ -6883,6 +6934,299 @@ def top_feature_importances(clf, feature_columns: List[str], limit: int = 12) ->
     return sorted(pairs, key=lambda item: item["importance"], reverse=True)[:limit]
 
 
+def shap_interpretability_payload(
+        clf,
+        feature_columns: List[str],
+        x_validation: Optional[pd.DataFrame],
+        y_validation: Optional[pd.Series] = None,
+        classes: Optional[List[Any]] = None,
+        target: str = "result",
+        enabled: bool = False,
+        sample_rows: int = DEFAULT_SHAP_SAMPLE_ROWS,
+        top_limit: int = 25,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "shap": {
+            "enabled": bool(enabled),
+            "applied": False,
+            "method": "TreeExplainer",
+            "validation_source": "temporal_validation_pre_test",
+            "target": target,
+            "sample_rows": 0,
+            "feature_count": len(feature_columns or []),
+            "top_features": [],
+            "family_share": [],
+            "redundant_groups": [],
+            "leakage_flags": [],
+            "low_signal_features": [],
+            "recommendations": {
+                "keep": [],
+                "drop_or_gate": [],
+                "transform": [],
+            },
+            "warnings": [],
+        }
+    }
+    shap_payload = payload["shap"]
+    if not enabled:
+        shap_payload["reason"] = "disabled"
+        return payload
+    if clf is None:
+        shap_payload["reason"] = "classifier_unavailable"
+        return payload
+    if not feature_columns:
+        shap_payload["reason"] = "features_unavailable"
+        return payload
+    if x_validation is None or x_validation.empty:
+        shap_payload["reason"] = "validation_unavailable"
+        return payload
+    try:
+        import shap  # type: ignore
+    except Exception as exc:
+        shap_payload["reason"] = "shap_unavailable"
+        shap_payload["warnings"].append(f"SHAP no disponible: {exc.__class__.__name__}: {exc}")
+        return payload
+    try:
+        x_sample = align_matrix_to_feature_columns(x_validation, feature_columns)
+        limit = min(normalize_shap_sample_rows(sample_rows), int(x_sample.shape[0]))
+        if int(x_sample.shape[0]) > limit:
+            sample_index = np.unique(np.linspace(0, int(x_sample.shape[0]) - 1, limit, dtype=int))
+            x_sample = x_sample.iloc[sample_index].reset_index(drop=True)
+            if y_validation is not None and len(y_validation) >= int(np.max(sample_index)) + 1:
+                y_validation = pd.Series(y_validation).iloc[sample_index].reset_index(drop=True)
+        else:
+            x_sample = x_sample.reset_index(drop=True)
+            if y_validation is not None:
+                y_validation = pd.Series(y_validation).reset_index(drop=True)
+        explainer = shap.TreeExplainer(clf)
+        try:
+            values = explainer.shap_values(x_sample, check_additivity=False)
+        except TypeError:
+            values = explainer.shap_values(x_sample)
+        vector = shap_importance_vector(values, len(feature_columns))
+        total = float(np.sum(vector))
+        top_features = shap_top_features(feature_columns, vector, total, limit=top_limit)
+        family_share = shap_family_share(feature_columns, vector, total)
+        redundant_groups = shap_redundant_feature_groups(x_sample, top_features)
+        leakage_flags = shap_leakage_flags(top_features)
+        low_signal = shap_low_signal_features(feature_columns, vector, total)
+        shap_payload.update({
+            "applied": True,
+            "sample_rows": int(x_sample.shape[0]),
+            "class_count": len(classes or []),
+            "observed_class_count": int(pd.Series(y_validation).dropna().nunique()) if y_validation is not None else 0,
+            "top_features": top_features,
+            "family_share": family_share,
+            "redundant_groups": redundant_groups,
+            "leakage_flags": leakage_flags,
+            "low_signal_features": low_signal,
+            "recommendations": shap_recommendations(top_features, low_signal, redundant_groups, leakage_flags),
+        })
+    except Exception as exc:
+        shap_payload["reason"] = "tree_explainer_failed"
+        shap_payload["warnings"].append(f"SHAP TreeExplainer fallo: {exc.__class__.__name__}: {exc}")
+    return payload
+
+
+def shap_importance_vector(values: Any, feature_count: int) -> np.ndarray:
+    if feature_count <= 0:
+        return np.asarray([], dtype=float)
+    raw = getattr(values, "values", values)
+    if isinstance(raw, list):
+        arrays = []
+        for item in raw:
+            try:
+                arrays.append(np.asarray(getattr(item, "values", item), dtype=float))
+            except Exception:
+                continue
+        if not arrays:
+            return np.zeros(feature_count, dtype=float)
+        try:
+            array = np.stack(arrays, axis=0)
+        except ValueError:
+            array = np.asarray(arrays, dtype=object)
+    else:
+        array = np.asarray(raw, dtype=float)
+    array = np.nan_to_num(np.asarray(array, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    abs_values = np.abs(array)
+    if abs_values.ndim == 1:
+        output = abs_values
+    elif abs_values.ndim == 2:
+        if abs_values.shape[1] == feature_count:
+            output = np.mean(abs_values, axis=0)
+        elif abs_values.shape[0] == feature_count:
+            output = np.mean(abs_values, axis=1)
+        else:
+            output = np.ravel(abs_values)
+    elif abs_values.ndim == 3:
+        if abs_values.shape[1] == feature_count:
+            output = np.mean(abs_values, axis=(0, 2))
+        elif abs_values.shape[2] == feature_count:
+            output = np.mean(abs_values, axis=(0, 1))
+        elif abs_values.shape[0] == feature_count:
+            output = np.mean(abs_values, axis=(1, 2))
+        else:
+            output = np.ravel(abs_values)
+    else:
+        axes = tuple(index for index, size in enumerate(abs_values.shape) if size != feature_count)
+        output = np.mean(abs_values, axis=axes) if axes else abs_values
+    output = np.nan_to_num(np.asarray(output, dtype=float).reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
+    if output.size < feature_count:
+        output = np.pad(output, (0, feature_count - output.size), constant_values=0.0)
+    return output[:feature_count]
+
+
+def shap_top_features(feature_columns: List[str], vector: np.ndarray, total: float, limit: int = 25) -> List[Dict[str, Any]]:
+    rows = []
+    denominator = total if total > 0 else 1.0
+    for column, value in zip(feature_columns, vector):
+        score = float(value)
+        if score <= 0.0:
+            continue
+        rows.append({
+            "feature": column,
+            "family": feature_family(column),
+            "mean_abs_shap": round(score, 8),
+            "share": round(score / denominator, 6),
+        })
+    return sorted(rows, key=lambda item: item["mean_abs_shap"], reverse=True)[:limit]
+
+
+def shap_family_share(feature_columns: List[str], vector: np.ndarray, total: float) -> List[Dict[str, Any]]:
+    families: Dict[str, float] = {}
+    for column, value in zip(feature_columns, vector):
+        families[feature_family(column)] = families.get(feature_family(column), 0.0) + float(value)
+    denominator = total if total > 0 else 1.0
+    rows = [
+        {"family": family, "mean_abs_shap": round(value, 8), "share": round(value / denominator, 6)}
+        for family, value in families.items()
+        if value > 0.0
+    ]
+    return sorted(rows, key=lambda item: item["mean_abs_shap"], reverse=True)
+
+
+def shap_redundant_feature_groups(
+        x_sample: pd.DataFrame,
+        top_features: List[Dict[str, Any]],
+        threshold: float = SHAP_REDUNDANCY_CORRELATION,
+        max_features: int = 40,
+        max_groups: int = 12,
+) -> List[Dict[str, Any]]:
+    candidates = [str(item["feature"]) for item in top_features[:max_features] if str(item.get("feature", "")) in x_sample.columns]
+    if len(candidates) < 2:
+        return []
+    matrix = x_sample[candidates].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    matrix = matrix.loc[:, matrix.var(ddof=0) > 0.0]
+    candidates = [column for column in candidates if column in matrix.columns]
+    if len(candidates) < 2:
+        return []
+    corr = matrix.corr().abs().fillna(0.0)
+    rank = {str(item["feature"]): index for index, item in enumerate(top_features)}
+    visited = set()
+    groups: List[Dict[str, Any]] = []
+    for column in candidates:
+        if column in visited:
+            continue
+        peers = [
+            peer
+            for peer in candidates
+            if peer != column and peer not in visited and float(corr.loc[column, peer]) >= threshold
+        ]
+        if not peers:
+            continue
+        group = sorted([column, *peers], key=lambda name: rank.get(name, len(rank)))
+        visited.update(group)
+        max_corr = max(float(corr.loc[left, right]) for left in group for right in group if left != right)
+        groups.append({
+            "representative": group[0],
+            "features": group,
+            "max_abs_correlation": round(max_corr, 6),
+            "recommendation": "Mantener la representante y validar eliminar/colapsar aliases correlacionados.",
+        })
+        if len(groups) >= max_groups:
+            break
+    return groups
+
+
+def shap_leakage_flags(top_features: List[Dict[str, Any]], limit: int = 20) -> List[Dict[str, Any]]:
+    risk_notes = {
+        "market": "Verificar que las cuotas tengan timestamp previo al kickoff; si no, usar solo en modelo live/prepartido confirmado.",
+        "model_vs_market": "Depende de mercado; requiere fuente de cuotas as-of previa al partido.",
+        "market_vs_model": "Depende de mercado; requiere fuente de cuotas as-of previa al partido.",
+        "model_market": "Depende de mercado; requiere fuente de cuotas as-of previa al partido.",
+        "api_football": "Auditar que fixtures, stats y xG sean snapshots previos al partido explicado.",
+        "qualifier": "Debe excluir el partido actual y cualquier fila posterior a match_date.",
+        "recent15": "La ventana recent15 debe usar solo partidos con fecha estrictamente anterior.",
+        "fixture": "Contexto de fixture debe estar disponible antes del partido.",
+        "xi": "Lineups/once inicial solo son validos despues de publicacion oficial; separar modelo live si aplica.",
+    }
+    flags = []
+    for item in top_features:
+        feature = str(item.get("feature") or "")
+        family = feature_family(feature)
+        reason = risk_notes.get(family)
+        if reason is None and feature.endswith("_available"):
+            reason = "Indicador de disponibilidad puede codificar cobertura de fuente; validar drift por equipo/torneo."
+        if reason is None and any(token in feature.lower() for token in ("future", "label", "result_actual", "goals_actual")):
+            reason = "Nombre sugiere variable posterior al resultado; revisar origen antes de usar en training."
+        if reason:
+            flags.append({
+                "feature": feature,
+                "family": family,
+                "share": item.get("share", 0.0),
+                "risk": reason,
+            })
+        if len(flags) >= limit:
+            break
+    return flags
+
+
+def shap_low_signal_features(feature_columns: List[str], vector: np.ndarray, total: float, limit: int = 40) -> List[Dict[str, Any]]:
+    denominator = total if total > 0 else 1.0
+    rows = []
+    for column, value in zip(feature_columns, vector):
+        score = float(value)
+        share = score / denominator
+        if score <= 1e-12 or share <= 0.0005:
+            rows.append({
+                "feature": column,
+                "family": feature_family(column),
+                "mean_abs_shap": round(score, 10),
+                "share": round(share, 8),
+            })
+    return sorted(rows, key=lambda item: item["mean_abs_shap"])[:limit]
+
+
+def shap_recommendations(
+        top_features: List[Dict[str, Any]],
+        low_signal: List[Dict[str, Any]],
+        redundant_groups: List[Dict[str, Any]],
+        leakage_flags: List[Dict[str, Any]],
+) -> Dict[str, List[Any]]:
+    keep = [
+        item["feature"]
+        for item in top_features
+        if float(item.get("share", 0.0) or 0.0) >= 0.01 and item["feature"] not in {flag["feature"] for flag in leakage_flags}
+    ][:15]
+    drop_or_gate = list(dict.fromkeys(
+        [flag["feature"] for flag in leakage_flags]
+        + [item["feature"] for item in low_signal[:20]]
+    ))
+    transform = [
+        {
+            "features": group["features"],
+            "representative": group["representative"],
+            "action": "colapsar_aliases_o_elegir_una_variante",
+        }
+        for group in redundant_groups
+    ]
+    return {
+        "keep": keep,
+        "drop_or_gate": drop_or_gate[:30],
+        "transform": transform,
+    }
+
+
 def feature_inventory_payload(
         feature_columns: List[str],
         x_train: Optional[pd.DataFrame] = None,
@@ -7391,6 +7735,7 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "confusion_matrix": record.get("confusion_matrix", result.get("confusion_matrix", {})),
         "calibration": record.get("calibration", result.get("calibration", {})),
         "baseline": record.get("baseline", result.get("baseline", {})),
+        "interpretability": record.get("interpretability", result.get("interpretability", {})),
         "classes": record.get("classes", []),
         "eval_strategy": record.get("eval_strategy", result.get("eval_strategy", "")),
         "train_rows": int(result.get("train_rows", 0) or 0),
@@ -7410,6 +7755,36 @@ def market_training_summary(record: Dict[str, Any], result: Dict[str, Any], labe
         "benchmark_policy": record.get("benchmark_policy", result.get("benchmark_policy", "")),
         "final_test_year": record.get("final_test_year", result.get("final_test_year", "")),
         "split_policy": record.get("split_policy", result.get("split_policy", "")),
+    }
+
+
+def bundle_interpretability_payload(markets: Dict[str, Dict[str, Any]], result_interpretability: Dict[str, Any]) -> Dict[str, Any]:
+    market_shap = {}
+    warnings: List[str] = []
+    enabled = False
+    applied = False
+    for market, summary in markets.items():
+        shap_payload = (summary.get("interpretability") or {}).get("shap", {})
+        if shap_payload:
+            market_shap[market] = shap_payload
+            enabled = enabled or bool(shap_payload.get("enabled", False))
+            applied = applied or bool(shap_payload.get("applied", False))
+            warnings.extend(shap_payload.get("warnings", []))
+    if not market_shap and result_interpretability:
+        shap_payload = result_interpretability.get("shap", {})
+        if shap_payload:
+            market_shap["result"] = shap_payload
+            enabled = bool(shap_payload.get("enabled", False))
+            applied = bool(shap_payload.get("applied", False))
+            warnings.extend(shap_payload.get("warnings", []))
+    return {
+        "shap": {
+            "enabled": enabled,
+            "applied": applied,
+            "validation_source": "temporal_validation_pre_test",
+            "markets": market_shap,
+            "warnings": unique_strings(warnings),
+        }
     }
 
 
@@ -8073,6 +8448,7 @@ def model_metadata_payload(record: Dict[str, Any], model_id: str, model_path: Pa
         "confusion_matrix": record.get("confusion_matrix", {}),
         "calibration": record.get("calibration", {}),
         "baseline": record.get("baseline", {}),
+        "interpretability": record.get("interpretability", {}),
         "mode": record.get("mode", ""),
         "eval_strategy": record.get("eval_strategy", ""),
         "prediction_rows": record.get("prediction_rows", 0),
@@ -8171,6 +8547,7 @@ def read_model_metadata(model_id: Optional[str] = None) -> Dict[str, Any]:
         "confusion_matrix": {},
         "calibration": {},
         "baseline": {},
+        "interpretability": {},
         "model_type": "",
         "model_profile": "",
         "model_label": "",

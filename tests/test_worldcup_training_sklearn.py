@@ -132,6 +132,48 @@ def test_worldcup_feature_selection_supervised_falls_back_without_validation():
     assert result["fallback_reason"] == "validation_unavailable"
 
 
+def test_worldcup_shap_interpretability_payload_flags_market_and_redundancy():
+    pytest.importorskip("shap")
+    from sklearn.ensemble import RandomForestClassifier
+
+    from src.worldcup import training
+
+    x_train = pd.DataFrame({
+        "rating_diff": [-2.0, -2.0, -1.0, -1.0, 1.0, 1.0, 2.0, 2.0],
+        "rating_ratio": [-2.0, -2.0, -1.0, -1.0, 1.0, 1.0, 2.0, 2.0],
+        "market_home_prob": [0.10, 0.90, 0.20, 0.80, 0.30, 0.70, 0.40, 0.95],
+        "noise": [0.0, 1.0, 0.5, 0.2, 0.1, 1.3, 0.7, 0.4],
+    })
+    y_train = pd.Series([0, 1, 0, 1, 0, 1, 0, 1])
+    clf = RandomForestClassifier(n_estimators=12, max_depth=3, random_state=7)
+    clf.fit(x_train, y_train)
+
+    audit = training.shap_interpretability_payload(
+        clf,
+        list(x_train.columns),
+        x_train,
+        y_train,
+        classes=[0, 1],
+        target="over_under_25",
+        enabled=True,
+        sample_rows=64,
+    )
+
+    shap_payload = audit["shap"]
+    assert shap_payload["applied"] is True
+    assert shap_payload["validation_source"] == "temporal_validation_pre_test"
+    assert shap_payload["top_features"]
+    assert any(flag["feature"] == "market_home_prob" for flag in shap_payload["leakage_flags"])
+    groups = training.shap_redundant_feature_groups(
+        x_train,
+        [
+            {"feature": "rating_diff", "mean_abs_shap": 1.0},
+            {"feature": "rating_ratio", "mean_abs_shap": 0.9},
+        ],
+    )
+    assert any({"rating_diff", "rating_ratio"}.issubset(set(group["features"])) for group in groups)
+
+
 def test_worldcup_xg_lightgbm_synthetic_bundle_keeps_test_as_final_report(tmp_path, monkeypatch):
     from sklearn.ensemble import RandomForestClassifier
 
