@@ -243,6 +243,27 @@ BALANCED_RECENT15_COLUMNS = {
     "recent15_goal_total_avg",
     "recent15_over25_rate",
     "recent15_btts_rate",
+    "recent15_match_interval_avg",
+    "recent15_match_interval_std",
+    "recent15_last_match_gap",
+    "recent15_gf_trend",
+    "recent15_ga_trend",
+    "recent15_goal_diff_trend",
+    "recent15_points_trend",
+    "recent15_opponent_rating_trend",
+    "recent15_gf_volatility",
+    "recent15_goal_total_volatility",
+    "recent15_gf_momentum_3v3",
+    "recent15_goal_diff_momentum_3v3",
+    "recent15_points_momentum_3v3",
+    "recent15_opponent_rating_momentum_3v3",
+    "recent15_ewm_gf_last",
+    "recent15_ewm_goal_diff_last",
+    "recent15_streak_win",
+    "recent15_streak_draw",
+    "recent15_streak_loss",
+    "recent15_streak_scoring",
+    "recent15_streak_clean_sheet",
 }
 BALANCED_RECENT15_SCOPED_COLUMNS = {
     "recent15_matches",
@@ -254,6 +275,27 @@ BALANCED_RECENT15_SCOPED_COLUMNS = {
     "recent15_win_rate",
     "recent15_opponent_rating_avg",
     "recent15_days_since_last_match",
+    "recent15_gf_trend",
+    "recent15_ga_trend",
+    "recent15_goal_diff_trend",
+    "recent15_points_trend",
+    "recent15_opponent_rating_trend",
+    "recent15_gf_volatility",
+    "recent15_goal_total_volatility",
+    "recent15_gf_momentum_3v3",
+    "recent15_goal_diff_momentum_3v3",
+    "recent15_points_momentum_3v3",
+    "recent15_opponent_rating_momentum_3v3",
+    "recent15_ewm_gf_last",
+    "recent15_ewm_goal_diff_last",
+    "recent15_streak_win",
+    "recent15_streak_draw",
+    "recent15_streak_loss",
+    "recent15_streak_scoring",
+    "recent15_streak_clean_sheet",
+    "recent15_match_interval_avg",
+    "recent15_match_interval_std",
+    "recent15_last_match_gap",
 }
 BALANCED_HISTORY_KEY_SUFFIXES = (
     "_points_ppg",
@@ -626,6 +668,9 @@ def framework_cuda_devices() -> Tuple[List[str], str, str]:
     devices, source, warning = tensorflow_cuda_devices()
     if devices:
         return devices, source, warning
+    devices, source, warning = cupy_cuda_devices()
+    if devices:
+        return devices, source, warning
     return [], "", warning
 
 
@@ -643,6 +688,59 @@ def tensorflow_cuda_devices() -> Tuple[List[str], str, str]:
         return devices, "tensorflow", ""
     except Exception as exc:
         return [], "", f"TensorFlow GPU check fallo ({exc.__class__.__name__}: {exc})"
+
+
+def cupy_cuda_devices() -> Tuple[List[str], str, str]:
+    try:
+        import cupy as cp  # type: ignore
+
+        device_count = int(cp.cuda.runtime.getDeviceCount())
+        if device_count <= 0:
+            return [], "cupy", "CuPy sin dispositivos CUDA"
+        names: List[str] = []
+        for index in range(device_count):
+            try:
+                props = cp.cuda.runtime.getDeviceProperties(index)
+                raw_name = props.get("name", "") if isinstance(props, dict) else ""
+                if isinstance(raw_name, bytes):
+                    raw_name = raw_name.decode("utf-8", errors="ignore")
+                names.append(str(raw_name or f"CUDA device {index}").strip())
+            except Exception:
+                names.append(f"CUDA device {index}")
+        return names, "cupy", ""
+    except Exception as exc:
+        return [], "cupy", f"CuPy no disponible ({exc.__class__.__name__}: {exc})"
+
+
+def _coerce_feature_matrix(
+        x: pd.DataFrame,
+        feature_columns: Optional[List[str]],
+        dtype: Any = np.float64,
+        fill_value: float = 0.0,
+) -> pd.DataFrame:
+    columns = list(feature_columns or x.columns)
+    if x.empty:
+        return pd.DataFrame(columns=columns, dtype=dtype)
+    aligned = x.reindex(columns=columns)
+    output = aligned.apply(pd.to_numeric, errors="coerce").fillna(fill_value)
+    return output.astype(dtype, copy=False)
+
+
+def _coerce_matrix_for_training(x: Any, model_key: str, device: str) -> Any:
+    if not isinstance(x, pd.DataFrame):
+        if device == "cuda" and model_key in {"xgboost", "lightgbm", "catboost"}:
+            try:
+                return x.astype(np.float32, copy=False)
+            except AttributeError:
+                return x
+        return x
+    if device != "cuda":
+        return x
+    if model_key not in {"xgboost", "lightgbm", "catboost"}:
+        return x
+    if x.empty:
+        return x
+    return _coerce_feature_matrix(x, feature_columns=list(x.columns), dtype=np.float32)
 
 
 def cuda_device_names(cuda_devices: Iterable[Any]) -> List[str]:
@@ -3325,13 +3423,10 @@ def build_team_training_matrix(
         feature_columns: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     x = rows.drop(columns=["Team", "Label", "Source"], errors="ignore").copy()
-    x = x.apply(pd.to_numeric, errors="coerce").fillna(0.0)
     if feature_columns is None:
         feature_columns = list(x.columns)
-    for column in feature_columns:
-        if column not in x.columns:
-            x[column] = 0.0
-    return x[feature_columns].astype(float), rows["Label"].astype(int), feature_columns
+    x = _coerce_feature_matrix(x, feature_columns=feature_columns, dtype=np.float64)
+    return x, rows["Label"].astype(int), feature_columns
 
 
 def match_date_from_row(row: pd.Series) -> Optional[pd.Timestamp]:
@@ -3996,10 +4091,7 @@ def finalize_training_matrix_from_features(
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     if feature_columns is None:
         feature_columns = list(x.columns)
-    for column in feature_columns:
-        if column not in x.columns:
-            x[column] = 0.0
-    x = x[feature_columns].astype(float)
+    x = _coerce_feature_matrix(x, feature_columns=feature_columns, dtype=np.float64)
     if progress_callback is not None:
         emit_training_progress(
             progress_callback,
@@ -5844,7 +5936,8 @@ def fit_configured_classifier(
             seed=seed,
             num_classes=num_classes,
         )
-        fit_warnings = fit_classifier(classifier, x_train, y_train, sample_weight=sample_weight)
+        model_train_matrix = _coerce_matrix_for_training(x_train, model_key=model_key, device=device)
+        fit_warnings = fit_classifier(classifier, model_train_matrix, y_train, sample_weight=sample_weight)
         finalize_classifier_for_inference(classifier, model_key=model_key, trained_device=device)
         return {"classifier": classifier, "device": device, "warnings": [*device_warnings, *fit_warnings]}
     except Exception as exc:
@@ -5862,7 +5955,8 @@ def fit_configured_classifier(
                 seed=seed,
                 num_classes=num_classes,
             )
-            fit_warnings = fit_classifier(fallback, x_train, y_train, sample_weight=sample_weight)
+            fallback_train_matrix = _coerce_matrix_for_training(x_train, model_key=model_key, device="cpu")
+            fit_warnings = fit_classifier(fallback, fallback_train_matrix, y_train, sample_weight=sample_weight)
             finalize_classifier_for_inference(fallback, model_key=model_key, trained_device="cpu")
             return {
                 "classifier": fallback,
@@ -6909,11 +7003,7 @@ def validation_score_for_feature_subset(
 
 
 def align_matrix_to_feature_columns(x: pd.DataFrame, feature_columns: List[str]) -> pd.DataFrame:
-    working = x.copy()
-    for column in feature_columns:
-        if column not in working.columns:
-            working[column] = 0.0
-    return working[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
+    return _coerce_feature_matrix(x, feature_columns=feature_columns, dtype=np.float64)
 
 
 def top_feature_importances(clf, feature_columns: List[str], limit: int = 12) -> List[Dict[str, Any]]:
@@ -7506,10 +7596,7 @@ def predict_single_record_ml_outputs(base_model: WorldCupModel, home: str, away:
         )
     ])
     feature_columns = record.get("feature_columns", BASE_FEATURE_COLUMNS)
-    for column in feature_columns:
-        if column not in x.columns:
-            x[column] = 0.0
-    x = x[feature_columns].fillna(0.0).astype(float)
+    x = _coerce_feature_matrix(x, feature_columns=feature_columns, dtype=np.float64)
     probabilities = np.asarray(classifier_predict_proba(record["classifier"], x)[0], dtype=float)
     labels = [str(label) for label in record.get("classes", [])]
     target = record.get("effective_target", "result")
@@ -7578,10 +7665,7 @@ def team_strength_score(record: Dict[str, Any], team: str) -> float:
         return 0.5
     x = match.drop(columns=["Team"], errors="ignore").copy()
     feature_columns = record.get("feature_columns", list(x.columns))
-    for column in feature_columns:
-        if column not in x.columns:
-            x[column] = 0.0
-    x = x[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
+    x = _coerce_feature_matrix(x, feature_columns=feature_columns, dtype=np.float64)
     clf = record["classifier"]
     if hasattr(clf, "predict_proba"):
         probabilities = classifier_predict_proba(clf, x)[0]

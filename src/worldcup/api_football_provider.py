@@ -591,7 +591,20 @@ def api_window_features(frame: pd.DataFrame, window: int, prefix: str) -> Dict[s
     recent = frame.tail(int(window)).copy()
     if recent.empty:
         return {}
+    recent = recent.sort_values("Date", kind="stable").reset_index(drop=True)
     weights = np.linspace(1.0, 1.0 + max(len(recent) - 1, 0) * 0.10, num=len(recent))
+    available_columns = {str(column) for column in recent.columns}
+    temporal_series: Dict[str, str] = {
+        "GF": "goals_for",
+        "GA": "goals_against",
+        "GoalDiff": "goal_diff",
+        "xg_for": "xg_for",
+        "xg_against": "xg_against",
+        "total_shots_for": "total_shots_for",
+        "total_shots_against": "total_shots_against",
+        "shots_on_goal_for": "shots_on_goal_for",
+        "shots_on_goal_against": "shots_on_goal_against",
+    }
     features = {
         f"{prefix}_points_ppg": safe_mean(recent.get("Points")),
         f"{prefix}_weighted_points": float(np.average(pd.to_numeric(recent.get("Points"), errors="coerce").fillna(0.0), weights=weights)),
@@ -607,6 +620,30 @@ def api_window_features(frame: pd.DataFrame, window: int, prefix: str) -> Dict[s
         f"{prefix}_btts_rate": safe_mean(recent.get("BTTS")),
         f"{prefix}_clean_sheet_rate": safe_mean(recent.get("CleanSheet")),
     }
+    for source_column, feature_key in temporal_series.items():
+        if source_column not in available_columns:
+            continue
+        series = pd.to_numeric(recent[source_column], errors="coerce")
+        features[f"{prefix}_{feature_key}_trend"] = robust_series_slope(series)
+        features[f"{prefix}_{feature_key}_volatility"] = safe_std(series)
+        features[f"{prefix}_{feature_key}_momentum_3v3"] = half_window_momentum(series, 3)
+        features[f"{prefix}_{feature_key}_ewm_last"] = float(series.ewm(span=min(len(series), 5), adjust=False).mean().iloc[-1]) if not series.empty else 0.0
+    if {"xg_for", "total_shots_for"} <= available_columns:
+        xg_per_shot_for = safe_ratio_series(recent["xg_for"], recent["total_shots_for"])
+        features[f"{prefix}_xg_per_shot_for_avg"] = safe_mean(xg_per_shot_for)
+        features[f"{prefix}_xg_per_shot_for_last"] = safe_last(xg_per_shot_for)
+        features[f"{prefix}_xg_per_shot_for_trend"] = robust_series_slope(xg_per_shot_for)
+        features[f"{prefix}_xg_per_shot_for_volatility"] = safe_std(xg_per_shot_for)
+        features[f"{prefix}_xg_per_shot_for_momentum_3v3"] = half_window_momentum(xg_per_shot_for, 3)
+        features[f"{prefix}_xg_per_shot_for_ewm_last"] = float(xg_per_shot_for.ewm(span=min(len(xg_per_shot_for), 5), adjust=False).mean().iloc[-1]) if not xg_per_shot_for.empty else 0.0
+    if {"xg_against", "total_shots_against"} <= available_columns:
+        xg_per_shot_against = safe_ratio_series(recent["xg_against"], recent["total_shots_against"])
+        features[f"{prefix}_xg_per_shot_against_avg"] = safe_mean(xg_per_shot_against)
+        features[f"{prefix}_xg_per_shot_against_last"] = safe_last(xg_per_shot_against)
+        features[f"{prefix}_xg_per_shot_against_trend"] = robust_series_slope(xg_per_shot_against)
+        features[f"{prefix}_xg_per_shot_against_volatility"] = safe_std(xg_per_shot_against)
+        features[f"{prefix}_xg_per_shot_against_momentum_3v3"] = half_window_momentum(xg_per_shot_against, 3)
+        features[f"{prefix}_xg_per_shot_against_ewm_last"] = float(xg_per_shot_against.ewm(span=min(len(xg_per_shot_against), 5), adjust=False).mean().iloc[-1]) if not xg_per_shot_against.empty else 0.0
     for column in numeric_stat_columns(recent):
         features[f"{prefix}_{normalize_column(column)}_avg"] = safe_mean(recent[column])
         features[f"{prefix}_{normalize_column(column)}_last"] = safe_last(recent[column])
@@ -804,6 +841,46 @@ def safe_std(values: Any) -> float:
 def safe_last(values: Any) -> float:
     series = pd.to_numeric(values, errors="coerce").dropna() if values is not None else pd.Series(dtype=float)
     return float(series.iloc[-1]) if not series.empty else 0.0
+
+
+def robust_series_slope(values: Any, min_points: int = 3) -> float:
+    series = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if series.size < max(int(min_points), 2):
+        return 0.0
+    y = series.to_numpy(dtype=float)
+    n = len(y)
+    slopes = []
+    for index_i in range(n - 1):
+        y_i = y[index_i]
+        if not np.isfinite(y_i):
+            continue
+        for index_j in range(index_i + 1, n):
+            y_j = y[index_j]
+            if not np.isfinite(y_j):
+                continue
+            dx = float(index_j - index_i)
+            slopes.append((y_j - y_i) / dx)
+    return float(np.median(slopes)) if slopes else 0.0
+
+
+def half_window_momentum(values: Any, half_window: int) -> float:
+    series = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    window = max(int(half_window), 1)
+    if series.size < (window * 2):
+        return 0.0
+    current = series.tail(window)
+    prior = series.iloc[-(window * 2):-window]
+    if prior.empty:
+        return 0.0
+    return float(current.mean() - prior.mean())
+
+
+def safe_ratio_series(numerator: Any, denominator: Any) -> pd.Series:
+    numerator_series = pd.to_numeric(pd.Series(numerator), errors="coerce")
+    denominator_series = pd.to_numeric(pd.Series(denominator), errors="coerce")
+    ratio = numerator_series / denominator_series
+    ratio = ratio[np.isfinite(numerator_series) & np.isfinite(denominator_series) & (denominator_series != 0.0)]
+    return ratio.replace([np.inf, -np.inf], np.nan).dropna()
 
 
 def numeric_or_nan(value: Any) -> float:

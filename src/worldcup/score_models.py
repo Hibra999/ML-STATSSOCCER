@@ -142,7 +142,7 @@ class AdvancedScoreWorldCupModel:
             if xg_lambdas is not None:
                 return xg_lambdas
         if self.state.key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
-            bayesian_lambdas = _bayesian_lambdas_for_match(self.state, team1, team2)
+            bayesian_lambdas = _bayesian_lambdas_for_match(self.state, team1, team2, match=match)
             if bayesian_lambdas is not None:
                 return bayesian_lambdas
         method = getattr(self.base_model, "expected_goals_for_match", None)
@@ -155,10 +155,14 @@ class AdvancedScoreWorldCupModel:
 
     def score_grid(self, team1: str, team2: str, match: Dict[str, Any] | None = None, max_goals: int | None = None) -> np.ndarray:
         lambda1, lambda2 = self.expected_goals_for_match(team1, team2, match=match)
+        predictive_overdispersion: float | None = None
+        if self.state.key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
+            predictive_overdispersion = _bayesian_predictive_overdispersion(self.state, team1, team2, match=match)
         return score_grid_from_lambdas(
             self.state,
             lambda1=lambda1,
             lambda2=lambda2,
+            predictive_overdispersion=predictive_overdispersion,
             max_goals=int(max_goals if max_goals is not None else self.max_goals),
         )
 
@@ -197,7 +201,16 @@ class AdvancedScoreWorldCupModel:
     ) -> Dict[str, float]:
         limit_goals = int(max_goals if max_goals is not None else self.max_goals)
         lambda1, lambda2 = self.expected_goals_for_match(team1, team2, match=match)
-        grid = score_grid_from_lambdas(self.state, lambda1=lambda1, lambda2=lambda2, max_goals=limit_goals)
+        predictive_overdispersion: float | None = None
+        if self.state.key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
+            predictive_overdispersion = _bayesian_predictive_overdispersion(self.state, team1, team2, match=match)
+        grid = score_grid_from_lambdas(
+            self.state,
+            lambda1=lambda1,
+            lambda2=lambda2,
+            predictive_overdispersion=predictive_overdispersion,
+            max_goals=limit_goals,
+        )
         output = probabilities_from_score_grid(grid, lambda1=lambda1, lambda2=lambda2)
         output["score_model"] = self.state.key
         output["score_model_label"] = self.state.label
@@ -369,7 +382,29 @@ def fit_score_model_state(
     return state
 
 
-def score_grid_from_lambdas(state: ScoreModelState | Dict[str, Any], lambda1: float, lambda2: float, max_goals: int = 10) -> np.ndarray:
+def score_grid_from_lambdas(
+        state: ScoreModelState | Dict[str, Any],
+        lambda1: float,
+        lambda2: float,
+        max_goals: int = 10,
+        predictive_overdispersion: float | None = None,
+) -> np.ndarray:
+    return score_grid_from_lambdas_with_overdispersion(
+        state=state,
+        lambda1=lambda1,
+        lambda2=lambda2,
+        predictive_overdispersion=predictive_overdispersion,
+        max_goals=max_goals,
+    )
+
+
+def score_grid_from_lambdas_with_overdispersion(
+        state: ScoreModelState | Dict[str, Any],
+        lambda1: float,
+        lambda2: float,
+        max_goals: int = 10,
+        predictive_overdispersion: float | None = None,
+) -> np.ndarray:
     if not isinstance(state, ScoreModelState):
         state = ScoreModelState.from_dict(dict(state or {}))
     key = state.key if state.available else DEFAULT_SCORE_MODEL
@@ -383,6 +418,12 @@ def score_grid_from_lambdas(state: ScoreModelState | Dict[str, Any], lambda1: fl
         return bivariate_poisson_score_grid(lambda1, lambda2, float(params.get("corr_share", 0.0)), max_goals=max_goals)
     if key == NEGATIVE_BINOMIAL_GLM_MODEL:
         return negative_binomial_score_grid(lambda1, lambda2, alpha=float(params.get("alpha", 0.0)), max_goals=max_goals)
+    if key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
+        alpha = float(params.get("predictive_overdispersion", 0.0))
+        if predictive_overdispersion is not None:
+            alpha = float(np.clip(float(predictive_overdispersion), 0.0, 2.0))
+        if alpha > 1e-8:
+            return negative_binomial_score_grid(lambda1, lambda2, alpha=alpha, max_goals=max_goals)
     return poisson_score_grid(lambda1=lambda1, lambda2=lambda2, max_goals=max_goals)
 
 
@@ -417,6 +458,7 @@ def score_grids_from_lambdas_with_backend(
                     params,
                     lambda1_array,
                     lambda2_array,
+                    predictive_overdispersion=float(params.get("predictive_overdispersion", 0.0)),
                     max_goals=max_goals,
                 )
                 return cp.asnumpy(grids).astype(float), "cupy", []
@@ -430,6 +472,7 @@ def score_grids_from_lambdas_with_backend(
         params,
         lambda1_array,
         lambda2_array,
+        predictive_overdispersion=float(params.get("predictive_overdispersion", 0.0)),
         max_goals=max_goals,
     )
     return np.asarray(grids, dtype=float), "numpy", warnings
@@ -598,6 +641,7 @@ def _score_grids_from_lambdas_xp(
         lambda1_values: np.ndarray,
         lambda2_values: np.ndarray,
         max_goals: int,
+        predictive_overdispersion: float = 0.0,
 ) -> Any:
     lambda1 = xp.clip(xp.asarray(lambda1_values, dtype=xp.float64), 0.05, 6.5)
     lambda2 = xp.clip(xp.asarray(lambda2_values, dtype=xp.float64), 0.05, 6.5)
@@ -625,6 +669,16 @@ def _score_grids_from_lambdas_xp(
             alpha=float(params.get("alpha", 0.0)),
             max_goals=max_goals,
         )
+    if key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
+        alpha = float(np.clip(predictive_overdispersion, 0.0, 2.0))
+        if alpha > 1e-8:
+            return _negative_binomial_score_grids_xp(
+                xp,
+                lambda1,
+                lambda2,
+                alpha=alpha,
+                max_goals=max_goals,
+            )
     return _poisson_score_grids_xp(xp, lambda1, lambda2, max_goals=max_goals)
 
 
@@ -765,76 +819,181 @@ def _fit_bayesian_state(
     away_idx = np.asarray([team_index[row["away"]] for row in rows], dtype=int)
     home_goals = np.asarray([row["g1"] for row in rows], dtype=int)
     away_goals = np.asarray([row["g2"] for row in rows], dtype=int)
+    weights = np.asarray([max(float(row.get("weight", 1.0) or 1.0), 1e-6) for row in rows], dtype=float)
+    is_neutral = np.asarray([1.0 if bool(row.get("neutral", False)) else 0.0 for row in rows], dtype=float)
+    is_home_not_neutral = 1.0 - is_neutral
     draws = int(config.get("bayes_draws") or 500)
     tune = int(config.get("bayes_tune") or 500)
     chains = int(config.get("bayes_chains") or 2)
     seed = int(config.get("seed") or 2026)
+    target_accept = float(np.clip(config.get("bayes_target_accept", 0.92), 0.8, 0.995))
+    max_treedepth = int(config.get("bayes_max_treedepth", 12))
+    sample_kwargs = {
+        "draws": draws,
+        "tune": tune,
+        "chains": chains,
+        "random_seed": seed,
+        "target_accept": target_accept,
+        "nuts": {"max_treedepth": max(6, max_treedepth)},
+        "progressbar": False,
+    }
+    fit_warnings: List[str] = []
     if key == "bayesian_dynamic_poisson":
-        periods = _row_periods(rows)
-        period_list = sorted(set(periods))
-        period_index = {period: index for index, period in enumerate(period_list)}
-        period_idx = np.asarray([period_index[period] for period in periods], dtype=int)
-        with pm.Model(coords={"period": period_list, "team": team_list}):
-            attack_raw = pm.GaussianRandomWalk(
-                "attack_raw",
-                sigma=0.18,
-                init_dist=pm.Normal.dist(0.0, 0.35),
-                dims=("period", "team"),
+        unique_periods = sorted(set(_row_periods(rows)))
+        period_idx = np.asarray(_coalesce_model_period_indices(_row_periods(rows)), dtype=int)
+        if len(unique_periods) >= 2:
+            with pm.Model(coords={"period": unique_periods, "team": team_list, "obs_id": np.arange(len(rows))}):
+                attack_rw_scale = pm.HalfNormal("attack_rw_scale", 0.25)
+                defense_rw_scale = pm.HalfNormal("defense_rw_scale", 0.25)
+                attack_raw = pm.GaussianRandomWalk(
+                    "attack_raw",
+                    sigma=attack_rw_scale,
+                    init_dist=pm.Normal.dist(0.0, 0.35),
+                    dims=("period", "team"),
+                )
+                defense_raw = pm.GaussianRandomWalk(
+                    "defense_raw",
+                    sigma=defense_rw_scale,
+                    init_dist=pm.Normal.dist(0.0, 0.35),
+                    dims=("period", "team"),
+                )
+                attack = pm.Deterministic("attack", attack_raw - pm.math.mean(attack_raw, axis=1, keepdims=True), dims=("period", "team"))
+                defense = pm.Deterministic("defense", defense_raw - pm.math.mean(defense_raw, axis=1, keepdims=True), dims=("period", "team"))
+                intercept = pm.Normal("intercept", math.log(1.2), 0.45)
+                home_adv = pm.Normal("home_adv", 0.0, 0.35)
+                neutral_adv = pm.Normal("neutral_adv", 0.0, 0.25)
+                obs_overdispersion = pm.HalfNormal("obs_overdispersion", 0.8)
+                home_mu = pm.math.exp(
+                    intercept
+                    + home_adv * is_home_not_neutral
+                    + neutral_adv * is_neutral
+                    + attack[period_idx, home_idx]
+                    - defense[period_idx, away_idx]
+                )
+                away_mu = pm.math.exp(
+                    intercept
+                    + neutral_adv * is_neutral
+                    + attack[period_idx, away_idx]
+                    - defense[period_idx, home_idx]
+                )
+                home_likelihood = pm.logp(pm.NegativeBinomial.dist(mu=home_mu, alpha=obs_overdispersion), home_goals)
+                away_likelihood = pm.logp(pm.NegativeBinomial.dist(mu=away_mu, alpha=obs_overdispersion), away_goals)
+                pm.Potential("weighted_likelihood", pm.math.sum(weights * (home_likelihood + away_likelihood)))
+                trace = pm.sample(**sample_kwargs)
+            posterior = trace.posterior
+            latest_period = -1
+            attack_mean = np.asarray(
+                posterior["attack"].isel(period=latest_period).mean(dim=("chain", "draw"))
+            ).astype(float).tolist()
+            attack_sd = np.asarray(
+                posterior["attack"].isel(period=latest_period).std(dim=("chain", "draw"))
+            ).astype(float).tolist()
+            defense_mean = np.asarray(
+                posterior["defense"].isel(period=latest_period).mean(dim=("chain", "draw"))
+            ).astype(float).tolist()
+            defense_sd = np.asarray(
+                posterior["defense"].isel(period=latest_period).std(dim=("chain", "draw"))
+            ).astype(float).tolist()
+            intercept_mean = float(np.asarray(posterior["intercept"].mean(dim=("chain", "draw"))))
+            intercept_sd = float(np.asarray(posterior["intercept"].std(dim=("chain", "draw"))))
+            home_adv_mean = float(np.asarray(posterior["home_adv"].mean(dim=("chain", "draw"))))
+            home_adv_sd = float(np.asarray(posterior["home_adv"].std(dim=("chain", "draw"))))
+            neutral_adv_mean = float(np.asarray(posterior["neutral_adv"].mean(dim=("chain", "draw"))))
+            neutral_adv_sd = float(np.asarray(posterior["neutral_adv"].std(dim=("chain", "draw"))))
+            obs_alpha = float(np.asarray(posterior["obs_overdispersion"].mean(dim=("chain", "draw"))))
+            obs_alpha_sd = float(np.asarray(posterior["obs_overdispersion"].std(dim=("chain", "draw"))))
+            predictive_overdispersion = float(
+                np.clip(
+                    obs_alpha + 0.5 * float(np.mean(np.square(np.asarray(attack_sd)) + np.square(np.asarray(defense_sd)))),
+                    0.0,
+                    2.0,
+                )
             )
-            defense_raw = pm.GaussianRandomWalk(
-                "defense_raw",
-                sigma=0.18,
-                init_dist=pm.Normal.dist(0.0, 0.35),
-                dims=("period", "team"),
-            )
-            attack = pm.Deterministic("attack", attack_raw - pm.math.mean(attack_raw, axis=1, keepdims=True), dims=("period", "team"))
-            defense = pm.Deterministic("defense", defense_raw - pm.math.mean(defense_raw, axis=1, keepdims=True), dims=("period", "team"))
-            intercept = pm.Normal("intercept", math.log(1.2), 0.45)
-            home_adv = pm.Normal("home_adv", 0.0, 0.25)
-            home_rate = pm.math.exp(intercept + home_adv + attack[period_idx, home_idx] - defense[period_idx, away_idx])
-            away_rate = pm.math.exp(intercept + attack[period_idx, away_idx] - defense[period_idx, home_idx])
-            pm.Poisson("home_goals", mu=home_rate, observed=home_goals)
-            pm.Poisson("away_goals", mu=away_rate, observed=away_goals)
-            trace = pm.sample(draws=draws, tune=tune, chains=chains, random_seed=seed, progressbar=False)
-        posterior = trace.posterior
-        latest_period = -1
-        params = {
-            "teams": team_list,
-            "periods": period_list,
-            "attack": np.asarray(posterior["attack"].isel(period=latest_period).mean(dim=("chain", "draw"))).astype(float).tolist(),
-            "defense": np.asarray(posterior["defense"].isel(period=latest_period).mean(dim=("chain", "draw"))).astype(float).tolist(),
-            "intercept": float(np.asarray(posterior["intercept"].mean(dim=("chain", "draw")))),
-            "home_adv": float(np.asarray(posterior["home_adv"].mean(dim=("chain", "draw")))),
-            "draws": draws,
-            "tune": tune,
-            "chains": chains,
-            "dynamic_period": period_list[latest_period],
-        }
-        return ScoreModelState(key=key, label=label, available=True, params=params, fingerprint=fingerprint)
-    with pm.Model(coords={"team": team_list}):
-        attack_raw = pm.Normal("attack_raw", 0.0, 0.45, dims="team")
-        defense_raw = pm.Normal("defense_raw", 0.0, 0.45, dims="team")
+            params = {
+                "teams": team_list,
+                "periods": unique_periods,
+                "attack": attack_mean,
+                "attack_sd": attack_sd,
+                "defense": defense_mean,
+                "defense_sd": defense_sd,
+                "intercept": intercept_mean,
+                "intercept_sd": intercept_sd,
+                "home_adv": home_adv_mean,
+                "home_adv_sd": home_adv_sd,
+                "neutral_adv": neutral_adv_mean,
+                "neutral_adv_sd": neutral_adv_sd,
+                "obs_overdispersion": obs_alpha,
+                "obs_overdispersion_sd": obs_alpha_sd,
+                "predictive_overdispersion": predictive_overdispersion,
+                "draws": draws,
+                "tune": tune,
+                "chains": chains,
+                "dynamic_period": unique_periods[latest_period],
+            }
+            fit_warnings.append("Bayes dinámico habilitado con random walk temporal por periodos.")
+            return ScoreModelState(key=key, label=label, available=True, params=params, warnings=tuple(fit_warnings), fingerprint=fingerprint)
+        fit_warnings.append("Bayes dinámico sin suficientes periodos; se usa modelo jerárquico estático.")
+    with pm.Model(coords={"team": team_list, "obs_id": np.arange(len(rows))}):
+        attack_scale = pm.HalfNormal("attack_scale", 0.35)
+        defense_scale = pm.HalfNormal("defense_scale", 0.35)
+        attack_offset = pm.Normal("attack_offset", 0.0, 1.0, dims="team")
+        defense_offset = pm.Normal("defense_offset", 0.0, 1.0, dims="team")
+        attack_raw = attack_scale * attack_offset
+        defense_raw = defense_scale * defense_offset
         attack = pm.Deterministic("attack", attack_raw - pm.math.mean(attack_raw), dims="team")
         defense = pm.Deterministic("defense", defense_raw - pm.math.mean(defense_raw), dims="team")
         intercept = pm.Normal("intercept", math.log(1.2), 0.45)
-        home_adv = pm.Normal("home_adv", 0.0, 0.25)
-        home_rate = pm.math.exp(intercept + home_adv + attack[home_idx] - defense[away_idx])
-        away_rate = pm.math.exp(intercept + attack[away_idx] - defense[home_idx])
-        pm.Poisson("home_goals", mu=home_rate, observed=home_goals)
-        pm.Poisson("away_goals", mu=away_rate, observed=away_goals)
-        trace = pm.sample(draws=draws, tune=tune, chains=chains, random_seed=seed, progressbar=False)
+        home_adv = pm.Normal("home_adv", 0.0, 0.35)
+        neutral_adv = pm.Normal("neutral_adv", 0.0, 0.25)
+        obs_overdispersion = pm.HalfNormal("obs_overdispersion", 0.8)
+        home_mu = pm.math.exp(
+            intercept
+            + home_adv * is_home_not_neutral
+            + neutral_adv * is_neutral
+            + attack[home_idx]
+            - defense[away_idx]
+        )
+        away_mu = pm.math.exp(
+            intercept
+            + neutral_adv * is_neutral
+            + attack[away_idx]
+            - defense[home_idx]
+        )
+        home_likelihood = pm.logp(pm.NegativeBinomial.dist(mu=home_mu, alpha=obs_overdispersion), home_goals)
+        away_likelihood = pm.logp(pm.NegativeBinomial.dist(mu=away_mu, alpha=obs_overdispersion), away_goals)
+        pm.Potential("weighted_likelihood", pm.math.sum(weights * (home_likelihood + away_likelihood)))
+        trace = pm.sample(**sample_kwargs)
     posterior = trace.posterior
     params = {
         "teams": team_list,
         "attack": np.asarray(posterior["attack"].mean(dim=("chain", "draw"))).astype(float).tolist(),
+        "attack_sd": np.asarray(posterior["attack"].std(dim=("chain", "draw"))).astype(float).tolist(),
         "defense": np.asarray(posterior["defense"].mean(dim=("chain", "draw"))).astype(float).tolist(),
+        "defense_sd": np.asarray(posterior["defense"].std(dim=("chain", "draw"))).astype(float).tolist(),
         "intercept": float(np.asarray(posterior["intercept"].mean(dim=("chain", "draw")))),
+        "intercept_sd": float(np.asarray(posterior["intercept"].std(dim=("chain", "draw")))),
         "home_adv": float(np.asarray(posterior["home_adv"].mean(dim=("chain", "draw")))),
+        "home_adv_sd": float(np.asarray(posterior["home_adv"].std(dim=("chain", "draw")))),
+        "neutral_adv": float(np.asarray(posterior["neutral_adv"].mean(dim=("chain", "draw")))),
+        "neutral_adv_sd": float(np.asarray(posterior["neutral_adv"].std(dim=("chain", "draw")))),
+        "obs_overdispersion": float(np.asarray(posterior["obs_overdispersion"].mean(dim=("chain", "draw")))),
+        "obs_overdispersion_sd": float(np.asarray(posterior["obs_overdispersion"].std(dim=("chain", "draw")))),
         "draws": draws,
         "tune": tune,
         "chains": chains,
     }
-    return ScoreModelState(key=key, label=label, available=True, params=params, fingerprint=fingerprint)
+    attack_sd_array = np.asarray(params.get("attack_sd", []), dtype=float)
+    defense_sd_array = np.asarray(params.get("defense_sd", []), dtype=float)
+    params["predictive_overdispersion"] = float(
+        np.clip(
+            params["obs_overdispersion"] + 0.5 * float(np.mean(np.square(attack_sd_array) + np.square(defense_sd_array))),
+            0.0,
+            2.0,
+        )
+    )
+    if not fit_warnings:
+        fit_warnings.append("Bayes jerárquico Poisson con priors de ataque/defensa y ventaja local/neutral.")
+    return ScoreModelState(key=key, label=label, available=True, params=params, warnings=tuple(fit_warnings), fingerprint=fingerprint)
 
 
 def _ensure_pytensor_cxx_flag() -> bool:
@@ -890,6 +1049,11 @@ def _history_model_rows(history_df: pd.DataFrame | None, base_model: Any, recenc
             "lambda1": _clamp_rate(lambda1),
             "lambda2": _clamp_rate(lambda2),
             "weight": max(float(row.get("_score_model_weight", 1.0) or 1.0), 1e-6),
+            "neutral": _fixture_neutral({
+                "neutral": row.get("neutral", False),
+                "Venue": row.get("Venue", ""),
+                "venue": row.get("venue", ""),
+            }),
         })
     return rows
 
@@ -1213,7 +1377,113 @@ def _rows_with_lambda_model(rows: List[Dict[str, Any]], lambda_model: Dict[str, 
     return output
 
 
-def _bayesian_lambdas_for_match(state: ScoreModelState, home: str, away: str) -> Tuple[float, float] | None:
+def _fixture_neutral(match: Dict[str, Any] | None) -> bool:
+    if not isinstance(match, dict):
+        return False
+    if bool(match.get("neutral", False)):
+        return True
+    if bool(match.get("is_neutral", False)):
+        return True
+    for key in ("venue", "Venue", "venue_name", "VenueName", "venue_name_raw", "venue_name_clean"):
+        value = str(match.get(key, "")).strip().lower()
+        if value in {"neutral", "home neutral", "neutro", "sede neutral", "venue: neutral"}:
+            return True
+    return False
+
+
+def _fixture_period_from_match(match: Dict[str, Any] | None) -> int | None:
+    if not isinstance(match, dict):
+        return None
+    for key in ("date", "Date", "match_date", "event_date", "kickoff", "fecha"):
+        parsed = pd.to_datetime(match.get(key), errors="coerce")
+        if pd.isna(parsed):
+            continue
+        return int(parsed.year * 100 + parsed.month)
+    return None
+
+
+def _bayesian_match_period_index(
+        periods: Sequence[int] | None,
+        match: Dict[str, Any] | None,
+) -> int:
+    if not periods:
+        return -1
+    available = sorted(set(int(item) for item in periods))
+    if not available:
+        return -1
+    fixture_period = _fixture_period_from_match(match)
+    if fixture_period is None:
+        return len(available) - 1
+    candidates = [period for period in available if period <= fixture_period]
+    if not candidates:
+        return 0
+    selected = max(candidates)
+    try:
+        return available.index(selected)
+    except ValueError:
+        return len(available) - 1
+
+
+def _bayesian_predictive_overdispersion(
+        state: ScoreModelState,
+        home: str,
+        away: str,
+        match: Dict[str, Any] | None = None,
+) -> float:
+    if not state.available:
+        return 0.0
+    params = state.params or {}
+    obs_alpha = float(params.get("obs_overdispersion", 0.0) or 0.0)
+    teams = [str(team) for team in params.get("teams", [])]
+    if not teams:
+        return float(np.clip(obs_alpha, 0.0, 2.0))
+    try:
+        home_idx = teams.index(str(home))
+        away_idx = teams.index(str(away))
+    except ValueError:
+        return float(np.clip(obs_alpha, 0.0, 2.0))
+    attack_sd = np.asarray(params.get("attack_sd") or [], dtype=float)
+    defense_sd = np.asarray(params.get("defense_sd") or [], dtype=float)
+    if attack_sd.size == 0 or defense_sd.size == 0:
+        return float(np.clip(obs_alpha, 0.0, 2.0))
+    if attack_sd.ndim == 2:
+        period_index = _bayesian_match_period_index(params.get("periods"), match)
+        if period_index < 0 or period_index >= attack_sd.shape[0]:
+            return float(np.clip(obs_alpha, 0.0, 2.0))
+        if home_idx >= attack_sd.shape[1] or away_idx >= attack_sd.shape[1]:
+            return float(np.clip(obs_alpha, 0.0, 2.0))
+        home_attack_var = attack_sd[period_index, home_idx] ** 2
+        home_defense_var = defense_sd[period_index, away_idx] ** 2
+        away_attack_var = attack_sd[period_index, away_idx] ** 2
+        away_defense_var = defense_sd[period_index, home_idx] ** 2
+    elif attack_sd.ndim == 1 and defense_sd.ndim == 1:
+        if home_idx >= attack_sd.size or away_idx >= attack_sd.size or home_idx >= defense_sd.size or away_idx >= defense_sd.size:
+            return float(np.clip(obs_alpha, 0.0, 2.0))
+        home_attack_var = attack_sd[home_idx] ** 2
+        home_defense_var = defense_sd[away_idx] ** 2
+        away_attack_var = attack_sd[away_idx] ** 2
+        away_defense_var = defense_sd[home_idx] ** 2
+    else:
+        return float(np.clip(obs_alpha, 0.0, 2.0))
+    neutral = _fixture_neutral(match)
+    home_adv_sd = float(params.get("home_adv_sd", 0.0) or 0.0) ** 2
+    neutral_adv_sd = float(params.get("neutral_adv_sd", 0.0) or 0.0) ** 2
+    if neutral:
+        home_margin_var = home_attack_var + home_defense_var + neutral_adv_sd
+        away_margin_var = away_attack_var + away_defense_var + neutral_adv_sd
+    else:
+        home_margin_var = home_attack_var + home_defense_var + home_adv_sd
+        away_margin_var = away_attack_var + away_defense_var
+    alpha = float(obs_alpha + 0.5 * float(home_margin_var + away_margin_var))
+    return float(np.clip(alpha, 0.0, 2.0))
+
+
+def _bayesian_lambdas_for_match(
+        state: ScoreModelState,
+        home: str,
+        away: str,
+        match: Dict[str, Any] | None = None,
+) -> Tuple[float, float] | None:
     if not state.available:
         return None
     params = state.params or {}
@@ -1225,13 +1495,46 @@ def _bayesian_lambdas_for_match(state: ScoreModelState, home: str, away: str) ->
         away_idx = teams.index(str(away))
     except ValueError:
         return None
-    attack = params.get("attack") or []
-    defense = params.get("defense") or []
+    attack = np.asarray(params.get("attack") or [], dtype=float)
+    defense = np.asarray(params.get("defense") or [], dtype=float)
     try:
         intercept = float(params.get("intercept", math.log(1.2)))
         home_adv = float(params.get("home_adv", 0.0))
-        lambda_home = math.exp(intercept + home_adv + float(attack[home_idx]) - float(defense[away_idx]))
-        lambda_away = math.exp(intercept + float(attack[away_idx]) - float(defense[home_idx]))
+        neutral_adv = float(params.get("neutral_adv", 0.0))
+        neutral = _fixture_neutral(match)
+        home_not_neutral = 1.0 - float(neutral)
+        if attack.ndim == 2 and defense.ndim == 2:
+            period_index = _bayesian_match_period_index(params.get("periods"), match)
+            if period_index < 0 or period_index >= attack.shape[0]:
+                return None
+            if home_idx >= attack.shape[1] or away_idx >= attack.shape[1]:
+                return None
+            attack_home = float(attack[period_index, home_idx])
+            defense_away = float(defense[period_index, away_idx])
+            attack_away = float(attack[period_index, away_idx])
+            defense_home = float(defense[period_index, home_idx])
+        else:
+            if attack.ndim != 1 or defense.ndim != 1:
+                return None
+            if home_idx >= attack.size or away_idx >= attack.size or home_idx >= defense.size or away_idx >= defense.size:
+                return None
+            attack_home = float(attack[home_idx])
+            defense_away = float(defense[away_idx])
+            attack_away = float(attack[away_idx])
+            defense_home = float(defense[home_idx])
+        lambda_home = math.exp(
+            intercept
+            + home_adv * home_not_neutral
+            + neutral_adv * float(neutral)
+            + attack_home
+            - defense_away
+        )
+        lambda_away = math.exp(
+            intercept
+            + neutral_adv * float(neutral)
+            + attack_away
+            - defense_home
+        )
     except Exception:
         return None
     return _clamp_rate(lambda_home), _clamp_rate(lambda_away)
@@ -1242,10 +1545,18 @@ def _row_periods(rows: List[Dict[str, Any]]) -> List[int]:
     periods: List[int] = []
     for index, value in enumerate(dates):
         if pd.isna(value):
-            periods.append(index)
+            periods.append(int(index))
         else:
-            periods.append(int(value.year))
+            periods.append(int(value.year * 100 + value.month))
     return periods
+
+
+def _coalesce_model_period_indices(periods: List[int]) -> List[int]:
+    unique_periods = sorted(set(int(period) for period in periods))
+    if not unique_periods:
+        return []
+    lookup = {period: index for index, period in enumerate(unique_periods)}
+    return [lookup[int(period)] for period in periods]
 
 
 def _estimate_dixon_coles_rho(rows: List[Dict[str, Any]], backend: Any = "auto") -> Tuple[float, str, List[str]]:
@@ -1547,6 +1858,8 @@ def _fit_fingerprint(key: str, history_df: pd.DataFrame | None, teams: Iterable[
         "bayes_draws": config.get("bayes_draws"),
         "bayes_tune": config.get("bayes_tune"),
         "bayes_chains": config.get("bayes_chains"),
+        "bayes_target_accept": config.get("bayes_target_accept"),
+        "bayes_max_treedepth": config.get("bayes_max_treedepth"),
         "score_backend_generation": "cupy-batched-v1",
         "sota_device": config.get("sota_device"),
         "score_mle_recency_weight": config.get("score_mle_recency_weight", config.get("recency_weight")),

@@ -67,6 +67,27 @@ RECENT15_NUMERIC_COLUMNS = [
     "recent15_goal_total_avg",
     "recent15_over25_rate",
     "recent15_btts_rate",
+    "recent15_match_interval_avg",
+    "recent15_match_interval_std",
+    "recent15_last_match_gap",
+    "recent15_gf_trend",
+    "recent15_ga_trend",
+    "recent15_goal_diff_trend",
+    "recent15_points_trend",
+    "recent15_opponent_rating_trend",
+    "recent15_gf_volatility",
+    "recent15_goal_total_volatility",
+    "recent15_gf_momentum_3v3",
+    "recent15_goal_diff_momentum_3v3",
+    "recent15_points_momentum_3v3",
+    "recent15_opponent_rating_momentum_3v3",
+    "recent15_ewm_gf_last",
+    "recent15_ewm_goal_diff_last",
+    "recent15_streak_win",
+    "recent15_streak_draw",
+    "recent15_streak_loss",
+    "recent15_streak_scoring",
+    "recent15_streak_clean_sheet",
 ]
 INTERNATIONAL_REQUIRED_COLUMNS = ("date", "home_team", "away_team", "home_score", "away_score")
 INTERNATIONAL_COLUMN_ALIASES = {
@@ -840,6 +861,7 @@ def recent15_summary_features(team: str, rows: List[Dict[str, Any]], before_date
     weights = frame["weight"].astype(float)
     official = frame[~frame["is_friendly"].astype(bool)]
     friendly = frame[frame["is_friendly"].astype(bool)]
+    frame = frame.sort_values("date", kind="stable").reset_index(drop=True)
     output.update({
         "recent15_matches": float(frame.shape[0]),
         "recent15_gf_avg": float(frame["gf"].mean()),
@@ -869,6 +891,40 @@ def recent15_summary_features(team: str, rows: List[Dict[str, Any]], before_date
         "recent15_over25_rate": float(((frame["gf"] + frame["ga"]) > 2.5).mean()),
         "recent15_btts_rate": float(((frame["gf"] > 0) & (frame["ga"] > 0)).mean()),
     })
+    match_dates = pd.to_datetime(frame["date"], errors="coerce").sort_values()
+    result_gf = frame["gf"].astype(float)
+    result_ga = frame["ga"].astype(float)
+    result_goal_diff = frame["goal_diff"].astype(float)
+    result_points = frame["points"].astype(float)
+    result_rating = frame["opponent_rating"].astype(float)
+    if match_dates.notna().sum() >= 2:
+        match_gaps = match_dates.diff().dt.days.dropna()
+        output["recent15_match_interval_avg"] = float(match_gaps.mean())
+        output["recent15_match_interval_std"] = float(match_gaps.std(ddof=0))
+        output["recent15_last_match_gap"] = float(match_gaps.iloc[-1]) if not match_gaps.empty else 0.0
+    output["recent15_gf_trend"] = robust_series_slope(result_gf)
+    output["recent15_ga_trend"] = robust_series_slope(result_ga)
+    output["recent15_goal_diff_trend"] = robust_series_slope(result_goal_diff)
+    output["recent15_points_trend"] = robust_series_slope(result_points)
+    output["recent15_opponent_rating_trend"] = robust_series_slope(result_rating)
+    output["recent15_gf_volatility"] = float(result_gf.std(ddof=0))
+    output["recent15_goal_total_volatility"] = float((result_gf + result_ga).std(ddof=0))
+    output["recent15_gf_momentum_3v3"] = half_window_momentum(result_gf, 3)
+    output["recent15_goal_diff_momentum_3v3"] = half_window_momentum(result_goal_diff, 3)
+    output["recent15_points_momentum_3v3"] = half_window_momentum(result_points, 3)
+    output["recent15_opponent_rating_momentum_3v3"] = half_window_momentum(result_rating, 3)
+    output["recent15_ewm_gf_last"] = float(result_gf.ewm(span=min(len(result_gf), 5), adjust=False).mean().iloc[-1])
+    output["recent15_ewm_goal_diff_last"] = float(result_goal_diff.ewm(span=min(len(result_goal_diff), 5), adjust=False).mean().iloc[-1])
+    win_streak, _ = streak_lengths(frame["goal_diff"], condition=lambda value: value > 0)
+    draw_streak, _ = streak_lengths(frame["goal_diff"], condition=lambda value: value == 0)
+    loss_streak, _ = streak_lengths(frame["goal_diff"], condition=lambda value: value < 0)
+    scoring_streak, _ = streak_lengths(frame["gf"], condition=lambda value: value > 0)
+    clean_sheet_streak, _ = streak_lengths(frame["ga"], condition=lambda value: value == 0)
+    output["recent15_streak_win"] = float(win_streak)
+    output["recent15_streak_draw"] = float(draw_streak)
+    output["recent15_streak_loss"] = float(loss_streak)
+    output["recent15_streak_scoring"] = float(scoring_streak)
+    output["recent15_streak_clean_sheet"] = float(clean_sheet_streak)
     cutoff = international_cutoff_timestamp(before_date)
     last_date = pd.Timestamp(frame["date"].max()) if not frame.empty else pd.NaT
     if pd.notna(cutoff) and pd.notna(last_date):
@@ -1112,6 +1168,76 @@ def coerce_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "si", "y"}
+
+
+def safe_ratio(numerator: Any, denominator: Any) -> float:
+    numerator_value = pd.to_numeric(pd.Series([numerator]), errors="coerce").iloc[0]
+    denominator_value = pd.to_numeric(pd.Series([denominator]), errors="coerce").iloc[0]
+    if not np.isfinite(numerator_value) or not np.isfinite(denominator_value) or abs(denominator_value) <= 0:
+        return 0.0
+    return float(numerator_value / denominator_value)
+
+
+def robust_series_slope(values: Any) -> float:
+    series = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if series.size < 3:
+        return 0.0
+    y = series.to_numpy(dtype=float)
+    n = len(y)
+    slopes = []
+    for index_i in range(n - 1):
+        y_i = y[index_i]
+        if not np.isfinite(y_i):
+            continue
+        for index_j in range(index_i + 1, n):
+            y_j = y[index_j]
+            if not np.isfinite(y_j):
+                continue
+            dx = float(index_j - index_i)
+            if dx <= 0.0:
+                continue
+            slopes.append((y_j - y_i) / dx)
+    if not slopes:
+        return 0.0
+    return float(np.median(slopes))
+
+
+def half_window_momentum(values: Any, n: int) -> float:
+    series = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    window = max(int(n), 1)
+    if series.size < (window * 2):
+        return 0.0
+    current = series.tail(window)
+    prior = series.iloc[-(window * 2):-window]
+    if prior.empty:
+        return 0.0
+    return float(current.mean() - prior.mean())
+
+
+def streak_lengths(values: Any, condition: Any = None, target: Any = None) -> Tuple[int, int]:
+    array = list(pd.Series(values).fillna(0))
+    current = 0
+    max_seen = 0
+    if condition is not None:
+        compare = [1 if condition(value) else 0 for value in array]
+    elif target is not None:
+        compare = [1 if value == target else 0 for value in array]
+    else:
+        compare = [1 if bool(value) else 0 for value in array]
+    for value in compare:
+        if value:
+            current += 1
+            if current > max_seen:
+                max_seen = current
+        else:
+            current = 0
+    streak = 0
+    for value in reversed(compare):
+        if value:
+            streak += 1
+        else:
+            break
+    return int(streak), int(max_seen)
 
 
 def weighted_average(values: Iterable[Any], weights: Iterable[Any]) -> float:

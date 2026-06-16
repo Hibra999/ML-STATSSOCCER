@@ -158,6 +158,8 @@ DEFAULT_CONFIG = {
     "bayes_draws": 500,
     "bayes_tune": 500,
     "bayes_chains": 2,
+    "bayes_target_accept": 0.92,
+    "bayes_max_treedepth": 12,
     "refresh": False,
 }
 LAST_SIMULATION_RESULT: Dict[str, Any] = {}
@@ -5974,6 +5976,8 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "bayes_draws": int(_clamp_int(payload.get("bayes_draws", DEFAULT_CONFIG["bayes_draws"]), 100, 10000)),
         "bayes_tune": int(_clamp_int(payload.get("bayes_tune", DEFAULT_CONFIG["bayes_tune"]), 100, 10000)),
         "bayes_chains": int(_clamp_int(payload.get("bayes_chains", DEFAULT_CONFIG["bayes_chains"]), 1, 8)),
+        "bayes_target_accept": float(np.clip(float(payload.get("bayes_target_accept", DEFAULT_CONFIG["bayes_target_accept"])), 0.8, 0.995)),
+        "bayes_max_treedepth": int(_clamp_int(payload.get("bayes_max_treedepth", DEFAULT_CONFIG["bayes_max_treedepth"]), 6, 15)),
         "refresh": bool(payload.get("refresh", DEFAULT_CONFIG["refresh"])),
         "include_confirmed_results": bool(payload.get("include_confirmed_results", mode == "poisson_live")),
     }
