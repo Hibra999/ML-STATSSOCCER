@@ -880,15 +880,33 @@ LOCAL_FLAG_ALIASES = {
 _WORLD_CUP_RESULTS_AUTO_REFRESH_LOCK = threading.Lock()
 _WORLD_CUP_RESULTS_AUTO_REFRESHED = False
 _WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY: Dict[str, Any] = {}
+_WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT: datetime | None = None
+
+
+def _utcify_datetime(value: Any | None = None) -> datetime:
+    current = value if value is not None else _now_utc()
+    if current.tzinfo is None:
+        return current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc)
+
+
+def _world_cup_results_autorefresh_stale(now: Any | None = None) -> bool:
+    current = _utcify_datetime(now)
+    if _WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT is None:
+        return True
+    last = _utcify_datetime(_WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT)
+    return current.date() != last.date()
 
 
 def ensure_worldcup_results_autorefreshed_once(tournament: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    global _WORLD_CUP_RESULTS_AUTO_REFRESHED, _WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY
-    if _WORLD_CUP_RESULTS_AUTO_REFRESHED:
+    global _WORLD_CUP_RESULTS_AUTO_REFRESHED, _WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY, _WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT
+    now = _now_utc()
+    if _WORLD_CUP_RESULTS_AUTO_REFRESHED and not _world_cup_results_autorefresh_stale(now):
         return dict(_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY)
     with _WORLD_CUP_RESULTS_AUTO_REFRESH_LOCK:
-        if _WORLD_CUP_RESULTS_AUTO_REFRESHED:
+        if _WORLD_CUP_RESULTS_AUTO_REFRESHED and not _world_cup_results_autorefresh_stale(now):
             return dict(_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY)
+        now = _utcify_datetime(now)
         try:
             target = tournament if tournament is not None else load_tournament_2026(refresh=False)[0]
             summary = refresh_worldcup_2026_results(target, refresh=True)
@@ -907,11 +925,17 @@ def ensure_worldcup_results_autorefreshed_once(tournament: Dict[str, Any] | None
                 "provider_warnings": [],
                 "missing_result_fixtures": [],
                 "auto_refresh_error": str(exc),
-                "auto_refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "auto_refreshed_at": _utcify_datetime(now).isoformat(),
             }
         _WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY = dict(summary or {})
         _WORLD_CUP_RESULTS_AUTO_REFRESHED = True
+        _WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT = _utcify_datetime(now)
         return dict(_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY)
+
+
+def ensure_worldcup_results_autorefresh_once(tournament: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Compatibility shim for legacy call sites/tests."""
+    return ensure_worldcup_results_autorefreshed_once(tournament)
 
 
 def overview(refresh: bool = False) -> Dict[str, Any]:
@@ -2012,6 +2036,7 @@ def alternatives_benchmark_report(
         progress_callback=None,
 ) -> Dict[str, Any]:
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    ensure_worldcup_results_autorefreshed_once(tournament)
     results_refresh = refresh_worldcup_2026_results(tournament, refresh=True)
     history_df, history_source = score_history_for_tournament(tournament, config)
     feature_source = benchmark_feature_source(tournament, history_df, config)
@@ -2513,12 +2538,8 @@ def confirmed_worldcup_2026_backtest_rows(tournament: Dict[str, Any]) -> pd.Data
     if working.empty:
         return pd.DataFrame(columns=["No.", "Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group", "Source"])
     working = attach_fixture_schedule(working)
-    now = pd.Timestamp(_now_utc())
-    if now.tzinfo is None:
-        now = now.tz_localize(timezone.utc)
-    else:
-        now = now.tz_convert(timezone.utc)
-    today = pd.Timestamp(now.date())
+    now = _utcify_datetime(_now_utc())
+    today = pd.Timestamp(now).tz_convert(timezone.utc).normalize()
     has_time = working["_has_kickoff_time"].astype(bool)
     available_by_time = has_time & working["_kickoff"].notna() & (working["_kickoff"] <= now)
     available_by_date = ~has_time & working["_date"].notna() & (working["_date"] <= today)
@@ -6283,7 +6304,7 @@ def fixture_countdown_state(kickoff_iso: Any, finished: Any = False) -> str:
 
 
 def fixture_kickoff_datetime(date_value: Any, time_value: Any, require_time: bool = False) -> datetime | None:
-    date_text = str(date_value or "").strip()
+    date_text = str(date_value or "").strip()[:10]
     if not date_text:
         return None
     time_text = str(time_value or "").strip()
@@ -6319,7 +6340,7 @@ def attach_fixture_schedule(df: pd.DataFrame) -> pd.DataFrame:
         kickoff_values.append(kickoff)
         kickoff_iso_values.append(kickoff.isoformat() if kickoff else "")
         has_kickoff_time.append(kickoff is not None)
-    scheduled["_date"] = pd.to_datetime(scheduled["Fecha"], errors="coerce")
+    scheduled["_date"] = pd.to_datetime(scheduled["Fecha"], utc=True, errors="coerce")
     scheduled["_kickoff_iso"] = kickoff_iso_values
     scheduled["_kickoff"] = pd.to_datetime(kickoff_values, utc=True, errors="coerce")
     scheduled["_has_kickoff_time"] = has_kickoff_time
@@ -6331,12 +6352,8 @@ def attach_fixture_schedule(df: pd.DataFrame) -> pd.DataFrame:
 def future_fixture_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
-    now = pd.Timestamp(_now_utc())
-    if now.tzinfo is None:
-        now = now.tz_localize(timezone.utc)
-    else:
-        now = now.tz_convert(timezone.utc)
-    today = pd.Timestamp(now.date())
+    now = _utcify_datetime(_now_utc())
+    today = pd.Timestamp(now).tz_convert(timezone.utc).normalize()
     finished = pd.Series(False, index=df.index)
     if "Finalizado" in df.columns:
         finished = df["Finalizado"].astype(str).str.strip().str.lower().isin({"si", "sí", "yes", "true", "1"})

@@ -347,10 +347,11 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
             "missing_result_fixtures": [],
         }
 
-    working = finalizable_worldcup_2026_fixtures(fixture_df)
+    now = _worldcup_now_utc()
+    working = finalizable_worldcup_2026_fixtures(fixture_df, now=now)
     fotmob_rows = fetch_fotmob_worldcup_result_rows(working, provider_warnings)
     sofascore_rows = fetch_sofascore_worldcup_result_rows(working, provider_warnings)
-    verified_rows = verified_worldcup_2026_result_rows(working)
+    verified_rows = verified_worldcup_2026_result_rows(working, now=now)
     fetched = [*fotmob_rows, *sofascore_rows, *verified_rows]
 
     merge = _merge_result_override_rows(existing, fetched)
@@ -391,15 +392,22 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
     }
 
 
-def finalizable_worldcup_2026_fixtures(fixture_df: pd.DataFrame) -> pd.DataFrame:
+def _worldcup_now_utc(value: Any | None = None) -> pd.Timestamp:
+    now = pd.Timestamp(value or datetime.now(timezone.utc))
+    if now.tzinfo is None:
+        return now.tz_localize(timezone.utc)
+    return now.tz_convert(timezone.utc)
+
+
+def finalizable_worldcup_2026_fixtures(fixture_df: pd.DataFrame, now: Any | None = None) -> pd.DataFrame:
     working = fixture_df.copy()
-    working["_date"] = pd.to_datetime(working["Fecha"], errors="coerce")
+    working["_date"] = pd.to_datetime(working["Fecha"], utc=True, errors="coerce")
     working["_kickoff"] = [
         fixture_kickoff_timestamp(row.get("Fecha"), row.get("Hora"))
         for _, row in working.iterrows()
     ]
-    now = pd.Timestamp(datetime.now(timezone.utc))
-    today = pd.Timestamp(now.date())
+    now = _worldcup_now_utc(now)
+    today = now.normalize()
     row_keys = [
         _worldcup_result_key(row.get("Fecha"), row.get("Equipo 1"), row.get("Equipo 2"))
         for _, row in working.iterrows()
@@ -536,12 +544,15 @@ def fetch_sofascore_worldcup_result_rows(working: pd.DataFrame, warnings: List[s
     return fetched
 
 
-def verified_worldcup_2026_result_rows(working: pd.DataFrame) -> List[Dict[str, Any]]:
+def verified_worldcup_2026_result_rows(
+    working: pd.DataFrame,
+    now: Any | None = None,
+) -> List[Dict[str, Any]]:
     fixture_keys = {
         _worldcup_result_key(row.get("Fecha"), row.get("Equipo 1"), row.get("Equipo 2"))
         for _, row in working.iterrows()
     }
-    now = pd.Timestamp(datetime.now(timezone.utc))
+    now = _worldcup_now_utc(now)
     rows: List[Dict[str, Any]] = []
     for row in VERIFIED_WORLD_CUP_2026_RESULTS:
         if not verified_worldcup_result_is_available(row, now):
@@ -560,11 +571,12 @@ def verified_worldcup_2026_result_rows(working: pd.DataFrame) -> List[Dict[str, 
     return rows
 
 
-def available_verified_worldcup_result_keys(now: pd.Timestamp) -> set[Tuple[str, str, str]]:
+def available_verified_worldcup_result_keys(now: Any | None = None) -> set[Tuple[str, str, str]]:
+    now_ts = _worldcup_now_utc(now)
     return {
         _worldcup_result_key(row.get("date"), row.get("home"), row.get("away"))
         for row in VERIFIED_WORLD_CUP_2026_RESULTS
-        if verified_worldcup_result_is_available(row, now)
+        if verified_worldcup_result_is_available(row, now_ts)
     }
 
 

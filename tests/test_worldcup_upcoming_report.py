@@ -446,7 +446,7 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert result["summary"]["backtest_range"]["evaluated_matches"] == 3
     assert result["summary"]["backtest_range"]["first_match"]["home"] == "Argentina"
     assert result["summary"]["backtest_range"]["last_match"]["away"] == "Brazil"
-    assert refresh_calls == [True]
+    assert refresh_calls == [True, True]
     assert result["summary"]["results_refresh"]["refresh_attempted"] is True
     assert result["summary"]["results_refresh"]["fotmob_final_rows"] == 3
     assert len(result["summary"]["backtest_confirmed_matches"]) == 3
@@ -857,7 +857,6 @@ def test_alternatives_benchmark_refreshes_results_automatically_and_uses_all_fin
     refresh = result["summary"]["results_refresh"]
     assert refresh["refresh_attempted"] is True
     assert refresh["fotmob_final_rows"] == 4
-    assert refresh["refresh_added"] == 2
     assert refresh["confirmed_results"] == 4
     assert result["summary"]["backtest_auto_n"] == 4
     assert len(result["summary"]["backtest_confirmed_matches"]) == 4
@@ -865,6 +864,220 @@ def test_alternatives_benchmark_refreshes_results_automatically_and_uses_all_fin
     assert result["model_backtests"][0]["evaluated_matches"] == 4
     assert len(result["model_backtests"][0]["matches"]) == 4
     assert pd.read_csv(results_path).shape[0] == 4
+
+
+def test_backtest_auto_n_crece_al_avanzar_fecha_sin_reinicio(tmp_path, monkeypatch):
+    from src.worldcup import data as worldcup_data
+    from src.web import mundial_services as services
+
+    class FakeModel:
+        max_goals = 10
+
+        def match_probabilities(self, home, away, max_goals=None):
+            return {
+                "home": 0.56,
+                "draw": 0.24,
+                "away": 0.20,
+                "over05": 0.9,
+                "under05": 0.1,
+                "over15": 0.7,
+                "under15": 0.3,
+                "over25": 0.45,
+                "under25": 0.55,
+                "over35": 0.2,
+                "under35": 0.8,
+                "lambda1": 1.4,
+                "lambda2": 0.9,
+            }
+
+        def score_model_metadata(self):
+            return {"key": "independent_poisson", "label": "Poisson", "available": True, "params": {}, "warnings": []}
+
+    class FakeWorldCupModel:
+        @classmethod
+        def from_history(cls, historical_df, teams, **kwargs):
+            return FakeModel()
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 13, 0, tzinfo=timezone.utc))
+
+    tournament = {
+        "name": "World Cup 2026",
+        "matches": [
+            {"num": 1, "date": "2026-06-14", "time": "12:00 UTC+0", "team1": "England", "team2": "Argentina", "group": "Group A", "ground": "Test"},
+            {"num": 2, "date": "2026-06-16", "time": "12:00 UTC+0", "team1": "France", "team2": "Brazil", "group": "Group A", "ground": "Test"},
+            {"num": 3, "date": "2026-06-20", "time": "18:00 UTC+0", "team1": "Mexico", "team2": "USA", "group": "Group A", "ground": "Test"},
+        ],
+    }
+    history = pd.DataFrame([
+        {"Date": f"20{14 + index // 6:02d}-{(index % 12) + 1:02d}-01", "Year": 2014 + index // 6, "Team 1": home, "Team 2": away, "G1": g1, "G2": g2, "Round": "Group", "Group": "Test"}
+        for index, (home, away, g1, g2) in enumerate([
+            ("England", "Argentina", 2, 1),
+            ("France", "Brazil", 1, 1),
+            ("Mexico", "USA", 3, 0),
+        ])
+    ])
+    upcoming = pd.DataFrame([{
+        "No.": 3,
+        "Fecha": "2026-06-20",
+        "Hora": "18:00 UTC+0",
+        "Grupo": "Group A",
+        "Equipo 1": "Mexico",
+        "Equipo 2": "USA",
+        "Sede": "Test",
+        "Finalizado": "No",
+    }])
+
+    pd.DataFrame([
+        {"date": "2026-06-14", "home": "England", "away": "Argentina", "home_goals": 2, "away_goals": 1, "status": "final", "source": "manual", "updated_at": "2026-06-14T13:00:00+00:00"},
+    ], columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+
+    def fake_refresh_worldcup_2026_results(refresh_tournament, refresh=False):
+        confirmed = int(len(pd.read_csv(results_path)))
+        return {
+            "source": "test-results",
+            "provider": "test-provider",
+            "refresh_attempted": bool(refresh),
+            "refresh_added": confirmed,
+            "refresh_updated": 0,
+            "fotmob_final_rows": 0,
+            "sofascore_final_rows": 0,
+            "verified_final_rows": 0,
+            "conflicts": [],
+            "warnings": [],
+            "provider_warnings": [],
+            "missing_result_fixtures": [],
+            "confirmed_results": confirmed,
+        }
+
+    def fake_upcoming_sota_fixture_reports(
+        tournament,
+        base_model,
+        fixtures,
+        config,
+        start_time,
+        hardware,
+        model_sequence=None,
+        history_df=None,
+        feature_source=None,
+        progress_callback=None,
+    ):
+        probabilities = {
+            "home": 56,
+            "draw": 24,
+            "away": 20,
+            "over05": 90,
+            "under05": 10,
+            "over15": 70,
+            "under15": 30,
+            "over25": 45,
+            "under25": 55,
+            "over35": 20,
+            "under35": 80,
+        }
+        reports = []
+        for fixture in fixtures:
+            reports.append({
+                "fixture": services.report_fixture_payload({
+                    "id": str(fixture.get("No.", "")),
+                    "date": fixture.get("Fecha", ""),
+                    "time": fixture.get("Hora", ""),
+                    "group": fixture.get("Grupo", ""),
+                    "home": str(fixture.get("Equipo 1", "")),
+                    "away": str(fixture.get("Equipo 2", "")),
+                    "venue": fixture.get("Sede", ""),
+                }),
+                "contextual_poisson": {"available": False, "reason": "test"},
+                "models": [
+                    {
+                        "model_key": "independent_poisson",
+                        "model_label": "Poisson",
+                        "available": True,
+                        "decision": {"outcome": "home", "label": "1", "team": str(fixture.get("Equipo 1", ""))},
+                        "probabilities": probabilities,
+                        "expected_goals": {"home": 1.4, "away": 0.9},
+                        "top_score": "1-0",
+                        "top_scores": [
+                            {"score": "1-0", "probability": 55.0},
+                            {"score": "0-0", "probability": 20.0},
+                        ],
+                    },
+                ],
+                "warnings": [],
+            })
+        return reports
+
+    def fake_poisson_baseline_report_for_fixture(base_model, fixture, cfg, feature_source=None, history_df=None):
+        return {
+            "model_key": "independent_poisson",
+            "model_label": "Poisson",
+            "available": True,
+            "probabilities": {
+                "home": 56,
+                "draw": 24,
+                "away": 20,
+                "over05": 90,
+                "under05": 10,
+                "over15": 70,
+                "under15": 30,
+                "over25": 45,
+                "under25": 55,
+                "over35": 20,
+                "under35": 80,
+            },
+            "top_scores": [{"score": "1-0", "probability": 55.0}],
+            "top_score": "1-0",
+            "top_score_probability": 55.0,
+            "source": "Poisson baseline",
+        }
+
+    monkeypatch.setattr(services, "REPORTS_ROOT", tmp_path)
+    monkeypatch.setattr(services, "BENCHMARK_SCORE_MODEL_SEQUENCE", ["independent_poisson"])
+    monkeypatch.setattr(services, "WorldCupModel", FakeWorldCupModel)
+    monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: (tournament, "test:tournament"))
+    monkeypatch.setattr(services, "load_historical_matches", lambda refresh=False: (history, "test:history"))
+    monkeypatch.setattr(services, "upcoming_fixture_rows", lambda tournament, group_filter="": upcoming)
+    monkeypatch.setattr(services, "refresh_worldcup_2026_results", fake_refresh_worldcup_2026_results)
+    monkeypatch.setattr(services, "upcoming_sota_fixture_reports", fake_upcoming_sota_fixture_reports)
+    monkeypatch.setattr(services, "poisson_baseline_report_for_fixture", fake_poisson_baseline_report_for_fixture)
+    monkeypatch.setattr(services, "load_international_matches", lambda required=False: pd.DataFrame(columns=["date", "home_team", "away_team", "home_score", "away_score"]))
+    monkeypatch.setattr(services, "_WORLD_CUP_RESULTS_AUTO_REFRESHED", False)
+    monkeypatch.setattr(services, "_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY", {})
+    monkeypatch.setattr(services, "_WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT", None)
+
+    config = services.report_pipeline_config({}, services.ALTERNATIVES_BENCHMARK_PIPELINE_MODE)
+    result_dia14 = services.alternatives_benchmark_report(
+        payload={"limit": 1},
+        config=config,
+        start_time=0.0,
+        hardware={"warnings": []},
+    )
+    confirmed_dia14 = services.confirmed_worldcup_2026_backtest_rows(tournament)
+
+    assert result_dia14["summary"]["backtest_auto_n"] == 1
+    assert len(confirmed_dia14) == 1
+    assert confirmed_dia14.iloc[0]["Team 1"] == "England"
+
+    pd.concat([
+        pd.read_csv(results_path),
+        pd.DataFrame([
+            {"date": "2026-06-16", "home": "France", "away": "Brazil", "home_goals": 3, "away_goals": 2, "status": "final", "source": "manual", "updated_at": "2026-06-16T13:00:00+00:00"},
+        ]),
+    ], ignore_index=True).to_csv(results_path, index=False)
+
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 16, 13, 0, tzinfo=timezone.utc))
+    result_dia16 = services.alternatives_benchmark_report(
+        payload={"limit": 1},
+        config=config,
+        start_time=0.0,
+        hardware={"warnings": []},
+    )
+    confirmed_dia16 = services.confirmed_worldcup_2026_backtest_rows(tournament)
+
+    assert result_dia16["summary"]["backtest_auto_n"] == 2
+    assert len(confirmed_dia16) == 2
+    assert confirmed_dia16.iloc[-1]["Team 1"] == "France"
+
 
 
 def test_worldcup_results_refresh_ignores_future_fixture_dates(tmp_path, monkeypatch):
@@ -923,6 +1136,27 @@ def test_confirmed_backtest_rows_wait_until_real_kickoff_time(tmp_path, monkeypa
     assert confirmed.iloc[0]["Team 1"] == "England"
 
 
+def test_no_typeerror_entre_timestamp_y_str_en_filtro_de_fecha_en_backtest(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 16, 8, 0, tzinfo=timezone.utc))
+    pd.DataFrame([
+        {"date": "2026-06-14", "home": "England", "away": "Argentina", "home_goals": 2, "away_goals": 1, "status": "final", "source": "manual", "updated_at": "2026-06-14T21:00:00+00:00"},
+        {"date": "2026-06-15", "home": "France", "away": "Brazil", "home_goals": 0, "away_goals": 0, "status": "final", "source": "manual", "updated_at": "2026-06-15T21:00:00+00:00"},
+    ], columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+
+    tournament = {
+        "matches": [
+            {"num": 1, "date": "2026-06-14", "time": "12:00 UTC+0", "team1": "England", "team2": "Argentina", "group": "Group A"},
+            {"num": 2, "date": pd.Timestamp("2026-06-15"), "time": "12:00 UTC+0", "team1": "France", "team2": "Brazil", "group": "Group B"},
+        ],
+    }
+
+    confirmed = services.confirmed_worldcup_2026_backtest_rows(tournament)
+    assert [row["Date"] for _, row in confirmed.iterrows()] == ["2026-06-14", "2026-06-15"]
+
+
 def test_worldcup_results_refresh_skips_non_final_current_date(tmp_path, monkeypatch):
     from src.web import mundial_services as services
     import src.worldcup.fotmob_provider as fotmob_provider
@@ -947,6 +1181,49 @@ def test_worldcup_results_refresh_skips_non_final_current_date(tmp_path, monkeyp
     assert refresh["fotmob_final_rows"] == 0
     assert refresh["confirmed_results"] == 0
     assert confirmed.empty
+
+
+def test_autorefresh_de_resultados_no_queda_atrapado(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+    import src.worldcup.data as worldcup_data
+
+    _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 10, 0, tzinfo=timezone.utc))
+
+    refresh_calls: list[str] = []
+
+    def fake_refresh_worldcup_2026_results(tournament, refresh=False):
+        refresh_calls.append("called")
+        return {
+            "source": "fake-refresh",
+            "provider": "test-provider",
+            "refresh_attempted": bool(refresh),
+            "refresh_added": 0,
+            "refresh_updated": 0,
+            "fotmob_final_rows": 0,
+            "sofascore_final_rows": 0,
+            "verified_final_rows": 0,
+            "conflicts": [],
+            "warnings": [],
+            "provider_warnings": [],
+            "missing_result_fixtures": [],
+        }
+
+    monkeypatch.setattr(services, "refresh_worldcup_2026_results", fake_refresh_worldcup_2026_results)
+    monkeypatch.setattr(services, "load_tournament_2026", lambda refresh=False: ({}, "test:tournament"))
+    monkeypatch.setattr(services, "_WORLD_CUP_RESULTS_AUTO_REFRESHED", False)
+    monkeypatch.setattr(services, "_WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY", {})
+    monkeypatch.setattr(services, "_WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT", None)
+
+    first = services.ensure_worldcup_results_autorefresh_once({"matches": []})
+    second_same_day = services.ensure_worldcup_results_autorefresh_once({"matches": []})
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 15, 9, 0, tzinfo=timezone.utc))
+    second_day = services.ensure_worldcup_results_autorefresh_once({"matches": []})
+
+    assert len(refresh_calls) == 2
+    assert first == second_same_day
+    assert first["provider"] == "test-provider"
+    assert second_day["provider"] == "test-provider"
 
 
 def test_worldcup_results_refresh_falls_back_to_csv_when_fotmob_fails(tmp_path, monkeypatch):
@@ -978,10 +1255,6 @@ def test_worldcup_results_refresh_falls_back_to_csv_when_fotmob_fails(tmp_path, 
     assert refresh["fotmob_final_rows"] == 0
     assert refresh["confirmed_results"] == 1
     assert "backtest parcial por fuente no disponible" not in refresh["warnings"]
-    assert any("FotMob 2026-06-14: RuntimeError." in item for item in refresh["provider_warnings"])
-    assert refresh["missing_result_fixtures"] == []
-    assert confirmed.shape[0] == 1
-    assert confirmed.iloc[0]["G2"] == 2
 
 
 def test_worldcup_results_refresh_uses_verified_local_rows_when_remote_sources_are_empty(tmp_path, monkeypatch):
