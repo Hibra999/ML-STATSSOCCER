@@ -86,7 +86,7 @@
       <div id="fixtures-list" class="fixtures-list"></div>
     </section>
 
-    <section id="predicciones" class="section-block worldcup-view section-shell prediction-page">
+    <section id="predicciones" class="section-block worldcup-view section-shell prediction-page future-focus">
       <div class="section-heading section-toolbar">
         <div class="section-heading-title">
           <h2>Predicciones Futuras</h2>
@@ -94,34 +94,78 @@
         </div>
         <span class="section-chip">SOTA + xG-LightGBM</span>
       </div>
-      <div class="prediction-dock clean-dock">
-        <div>
+      <div class="prediction-dock clean-dock future-forecast-dock">
+        <article class="future-command-card">
           <h3>Próximos N partidos</h3>
           <small>Poisson/SOTA, xG-LightGBM o modelos estadísticos alternativos</small>
-        </div>
-        <label>Pipeline<select id="upcoming-pipeline-mode"><option value="poisson_sota">Poisson + SOTA</option><option value="xg_lightgbm">xG-LightGBM</option><option value="alternatives_benchmark">Benchmark alternativas</option></select></label>
-        <label>N partidos<input id="upcoming-predict-limit" type="number" min="1" max="72" step="1" value="8"></label>
-        <label>Poisson últimos<input id="upcoming-poisson-recent-matches" type="number" min="3" max="50" step="1" value="15"></label>
-        <label>Grupo<select id="upcoming-group-filter"></select></label>
-        <div id="upcoming-sota-controls" class="inline-control-row">
-          <label>Cálculo<select id="upcoming-sota-calculation-mode"><option value="exact">Consenso exacto</option><option value="monte_carlo">Monte Carlo consenso</option></select></label>
-          <label>Bayes<select id="upcoming-bayes-profile"><option value="deep">Deep</option><option value="light">Light</option></select></label>
-          <label>CUDA<select id="upcoming-sota-device"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
-        </div>
-        <div id="upcoming-benchmark-controls" class="inline-control-row hidden">
-          <label class="check"><input id="upcoming-benchmark-tuning-enabled" type="checkbox"> Optuna N</label>
-          <label>Trials<input id="upcoming-benchmark-tuning-trials" type="number" min="1" max="100" step="1" value="20"></label>
-          <label>Sampler<select id="upcoming-benchmark-tuning-sampler"><option value="tpe">TPE</option><option value="random">Random</option></select></label>
-        </div>
-        <button id="upcoming-predict-btn" class="primary" type="button">Generar reporte</button>
+          <div class="future-command-badges" aria-label="Estado de corrida">
+            <span>Proyección</span>
+            <span>Consenso de modelos</span>
+          </div>
+        </article>
+        <article class="future-control-card">
+          <h4>Modelo y universo</h4>
+          <label>Pipeline
+            <select id="upcoming-pipeline-mode"><option value="poisson_sota">Poisson + SOTA</option><option value="xg_lightgbm">xG-LightGBM</option><option value="alternatives_benchmark">Benchmark alternativas</option></select>
+          </label>
+          <label>N partidos
+            <input id="upcoming-predict-limit" type="number" min="1" max="72" step="1" value="8">
+          </label>
+          <label>Poisson últimos
+            <input id="upcoming-poisson-recent-matches" type="number" min="3" max="50" step="1" value="15">
+          </label>
+          <label>Grupo
+            <select id="upcoming-group-filter"></select>
+          </label>
+        </article>
+        <article class="future-control-card">
+          <h4>Ajustes de motor</h4>
+          <div id="upcoming-sota-controls" class="inline-control-row">
+            <label>Cálculo
+              <select id="upcoming-sota-calculation-mode"><option value="exact">Consenso exacto</option><option value="monte_carlo">Monte Carlo consenso</option></select>
+            </label>
+            <label>Bayes
+              <select id="upcoming-bayes-profile"><option value="deep">Deep</option><option value="light">Light</option></select>
+            </label>
+            <label>CUDA
+              <select id="upcoming-sota-device"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select>
+            </label>
+          </div>
+          <div id="upcoming-benchmark-controls" class="inline-control-row hidden">
+            <label class="check"><input id="upcoming-benchmark-tuning-enabled" type="checkbox"> Optuna N</label>
+            <label>Trials
+              <input id="upcoming-benchmark-tuning-trials" type="number" min="1" max="100" step="1" value="20">
+            </label>
+            <label>Sampler
+              <select id="upcoming-benchmark-tuning-sampler"><option value="tpe">TPE</option><option value="random">Random</option></select>
+            </label>
+          </div>
+        </article>
+        <article class="future-control-card future-run-card">
+          <h4>Ejecutar</h4>
+          <small>Defina el horizonte y dispare una corrida de pronóstico.</small>
+          <button id="upcoming-predict-btn" class="primary" type="button">Generar reporte</button>
+        </article>
       </div>
-      <div class="control-grid compact-controls upcoming-advanced-controls">
-        <label>Iteraciones<input id="sim-iterations" type="number" min="100" max="100000" step="1000" value="5000"></label>
-        <label>Seed<input id="sim-seed" type="number" value="2026"></label>
-        <label>Peso historial<input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1"></label>
-        <label>Recencia<input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35"></label>
-        <label>Localia Elo<input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45"></label>
-        <label class="hidden">Modelo marcador<select id="sim-score-model"></select></label>
+      <div class="control-grid compact-controls upcoming-advanced-controls future-advanced-controls">
+        <label>Iteraciones
+          <input id="sim-iterations" type="number" min="100" max="100000" step="1000" value="5000">
+        </label>
+        <label>Seed
+          <input id="sim-seed" type="number" value="2026">
+        </label>
+        <label>Peso historial
+          <input id="sim-history-weight" type="number" min="0.2" max="2" step="0.05" value="1">
+        </label>
+        <label>Recencia
+          <input id="sim-recency-weight" type="number" min="0" max="1" step="0.05" value="0.35">
+        </label>
+        <label>Localia Elo
+          <input id="sim-host-advantage" type="number" min="0" max="120" step="5" value="45">
+        </label>
+        <label class="hidden">Modelo marcador
+          <select id="sim-score-model"></select>
+        </label>
         <input id="sim-max-goals" type="hidden" value="10">
         <input id="sim-poisson-recent-matches" type="hidden" value="15">
       </div>

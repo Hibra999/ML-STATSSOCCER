@@ -10,6 +10,7 @@
   --gold: #b98522;
   --field: #1d7a53;
   --shadow: 0 16px 42px rgba(18, 31, 43, 0.09);
+  --future-iris: #4f6fe2;
 }
 
 * { box-sizing: border-box; }
@@ -18,7 +19,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Manrope", "Space Grotesk", "Nunito Sans", "Segoe UI", sans-serif;
   font-size: 14px;
   letter-spacing: 0;
 }
@@ -731,6 +732,7 @@ h3 { font-size: 16px; }
 .training-panel,
 .xg-training-dock {
   align-items: start;
+  position: relative;
 }
 
 .prediction-dock > article,
@@ -738,6 +740,130 @@ h3 { font-size: 16px; }
 .xg-training-dock > details,
 .prediction-dock > details {
   margin-bottom: 0;
+}
+
+.future-focus {
+  position: relative;
+}
+.future-focus::before {
+  content: "";
+  position: absolute;
+  inset: -10px -18px auto;
+  height: 170px;
+  z-index: -1;
+  border-radius: 26px;
+  background: linear-gradient(120deg, rgba(16, 42, 73, 0.12), rgba(79, 111, 226, 0.14) 30%, rgba(15, 122, 95, 0.12) 72%);
+  pointer-events: none;
+}
+.future-focus .prediction-dock {
+  padding: 18px;
+  border: 1px solid #dae4f2;
+  border-radius: 16px;
+  background:
+    linear-gradient(140deg, rgba(16, 42, 73, 0.05), rgba(255, 255, 255, 0.96)),
+    #fff;
+  box-shadow: 0 18px 40px rgba(16, 42, 73, 0.1);
+  row-gap: 12px;
+}
+.future-focus .prediction-dock,
+.future-focus .prediction-dock > article {
+  align-items: start;
+}
+.future-focus h3 {
+  color: #0f1e34;
+  font-size: 24px;
+}
+.future-focus h4,
+.future-focus .future-command-card h3 {
+  margin-bottom: 6px;
+  color: #0f1e34;
+}
+@keyframes futureReveal {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.future-focus .future-command-card,
+.future-focus .future-control-card,
+.future-focus .future-run-card,
+.future-focus .future-advanced-controls,
+.future-focus #upcoming-report {
+  animation: futureReveal 350ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation-delay: var(--future-reveal-delay, 0ms);
+}
+.future-command-card,
+.future-control-card {
+  padding: 12px;
+  border: 1px solid #dce5f4;
+  border-radius: 12px;
+  background: linear-gradient(155deg, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.86));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+}
+.future-command-card {
+  display: grid;
+  gap: 10px;
+  min-height: 100%;
+}
+.future-command-badges {
+  margin-top: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.future-command-badges span {
+  border: 1px solid rgba(79, 111, 226, 0.4);
+  color: var(--future-iris);
+  font-size: 11px;
+  font-weight: 800;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: rgba(79, 111, 226, 0.1);
+}
+.future-forecast-dock {
+  grid-template-columns: minmax(230px, 1.2fr) minmax(260px, 1fr) minmax(250px, 1fr) minmax(170px, 1fr);
+  gap: 12px;
+}
+.future-focus .future-forecast-dock > article:nth-child(1) {
+  --future-reveal-delay: 0ms;
+}
+.future-focus .future-forecast-dock > article:nth-child(2) {
+  --future-reveal-delay: 60ms;
+}
+.future-focus .future-forecast-dock > article:nth-child(3) {
+  --future-reveal-delay: 120ms;
+}
+.future-focus .future-forecast-dock > article:nth-child(4) {
+  --future-reveal-delay: 180ms;
+}
+.future-focus .future-advanced-controls {
+  --future-reveal-delay: 230ms;
+}
+.future-control-card h4 {
+  letter-spacing: 0.015em;
+}
+.future-run-card {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
+.future-run-card button {
+  width: 100%;
+}
+.future-run-card small,
+.future-command-card small {
+  color: var(--muted);
+}
+.future-advanced-controls {
+  border: 1px solid #dce5f4;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(244, 248, 255, 0.88));
+  box-shadow: 0 12px 28px rgba(16, 42, 73, 0.08);
+  padding: 12px;
 }
 
 .prediction-page .worldcup-progress,
@@ -1604,6 +1730,22 @@ h3 { font-size: 16px; }
   gap: 14px;
   margin-bottom: 14px;
 }
+.future-focus #upcoming-report {
+  gap: 16px;
+}
+.future-focus .client-report-shell,
+.future-focus .upcoming-grid {
+  --future-reveal-delay: 0;
+}
+.future-focus .client-report-shell {
+  padding: 8px;
+  border: 1px solid #dde6f3;
+  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.98), rgba(247, 252, 255, 0.86));
+}
+.future-focus .client-report-grid {
+  margin-top: 4px;
+}
 .client-report-shell {
   display: grid;
   gap: 14px;
@@ -1642,6 +1784,16 @@ h3 { font-size: 16px; }
   border-radius: 8px;
   background: linear-gradient(180deg, #ffffff 0%, #f8fbfa 100%);
   box-shadow: 0 10px 28px rgba(18, 31, 43, 0.07);
+}
+.future-focus .client-fixture-card {
+  border-color: #d0e1f8;
+  background: linear-gradient(145deg, #ffffff 0%, #f5f8ff 100%);
+  box-shadow: 0 16px 28px rgba(16, 42, 73, 0.1);
+}
+.future-focus .client-fixture-card > header {
+  border-bottom: 1px solid rgba(79, 111, 226, 0.24);
+  padding-bottom: 8px;
+  margin-bottom: 4px;
 }
 .client-fixture-card > header,
 .client-bets-panel > header,
@@ -1889,6 +2041,12 @@ h3 { font-size: 16px; }
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fbfcfc;
+}
+.future-focus .report-panel {
+  border-color: #d8e3f2;
+  border-radius: 12px;
+  background: linear-gradient(150deg, #ffffff 0%, #f6faff 100%);
+  box-shadow: 0 8px 22px rgba(16, 42, 73, 0.06);
 }
 .report-panel > header {
   display: flex;
@@ -2181,6 +2339,26 @@ h3 { font-size: 16px; }
 .top-ranked-pick {
   background: #eef7f2;
 }
+.future-focus .future-prediction-panel {
+  position: relative;
+  overflow: hidden;
+  border-color: #d6e7de;
+  background: linear-gradient(155deg, #fbfffd 0%, #eff7f6 100%);
+}
+.future-focus .future-prediction-panel::after {
+  content: "";
+  position: absolute;
+  right: -90px;
+  top: -90px;
+  width: 160px;
+  height: 160px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(79, 111, 226, 0.12), transparent 70%);
+}
+.future-focus .future-prediction-panel.unavailable {
+  border-color: #ead8bd;
+  background: #fff8f0;
+}
 .top-ranked-pick .client-main-pick {
   margin: 0;
 }
@@ -2408,6 +2586,13 @@ h3 { font-size: 16px; }
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 7px;
+}
+.future-focus .future-score-strip {
+  margin-top: 2px;
+}
+.future-focus .future-score-strip span:nth-child(1) {
+  border-color: #9ed1ba;
+  background: linear-gradient(180deg, #eef7f2 0%, #d4ebdf 100%);
 }
 .future-score-strip span {
   display: grid;
