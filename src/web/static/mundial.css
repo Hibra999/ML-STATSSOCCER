@@ -811,6 +811,9 @@ h3 { font-size: 16px; }
 
 .future-focus {
   position: relative;
+  width: min(1720px, calc(100vw - 44px));
+  margin-left: 50%;
+  transform: translateX(-50%);
 }
 .future-focus::before {
   content: none;
@@ -829,6 +832,16 @@ h3 { font-size: 16px; }
 .future-focus .prediction-dock,
 .future-focus .prediction-dock > article {
   align-items: start;
+}
+.future-focus .section-toolbar {
+  margin-bottom: 16px;
+}
+.future-focus #upcoming-summary {
+  display: block;
+  max-width: min(980px, 100%);
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .future-focus h3 {
   color: #0f1e34;
@@ -950,9 +963,31 @@ h3 { font-size: 16px; }
   padding: 5px 9px;
   background: rgba(255, 255, 255, 0.08);
 }
-.future-forecast-dock {
-  grid-template-columns: minmax(238px, 0.95fr) minmax(330px, 1.25fr) minmax(300px, 1fr) minmax(220px, 0.72fr);
+.future-focus .future-forecast-dock {
+  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr) minmax(240px, 280px);
+  grid-template-areas:
+    "overview config run"
+    "overview engine run";
+  align-items: stretch;
   gap: 0;
+}
+.future-focus .forecast-overview-card {
+  grid-area: overview;
+}
+.future-focus .forecast-config-card {
+  grid-area: config;
+}
+.future-focus .forecast-engine-card {
+  grid-area: engine;
+  border-top: 1px solid #e1e9ee;
+  border-right: 0;
+}
+.future-focus .forecast-config-card {
+  border-right: 0;
+}
+.future-focus .forecast-run-card {
+  grid-area: run;
+  border-left: 1px solid #e1e9ee;
 }
 .future-focus .future-forecast-dock > article:nth-child(1) {
   --future-reveal-delay: 0ms;
@@ -989,10 +1024,17 @@ h3 { font-size: 16px; }
 }
 .forecast-control-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(260px, 2fr) repeat(2, minmax(128px, 0.7fr));
   gap: 10px;
+  align-items: end;
 }
 .forecast-control-wide {
+  grid-column: auto;
+}
+.forecast-config-card .forecast-control-wide:first-child {
+  grid-column: span 1;
+}
+.forecast-config-card .forecast-control-wide:last-child {
   grid-column: 1 / -1;
 }
 .forecast-control-grid label,
@@ -1009,8 +1051,8 @@ h3 { font-size: 16px; }
 .future-focus input:hover {
   border-color: #9eb2c2;
 }
-.forecast-engine-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.future-focus .forecast-engine-grid {
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
 }
 .forecast-engine-grid .check {
   min-height: 38px;
@@ -1025,7 +1067,7 @@ h3 { font-size: 16px; }
 .future-run-card {
   display: grid;
   gap: 12px;
-  align-content: start;
+  align-content: center;
   justify-items: stretch;
   background: #fbf7ed;
 }
@@ -4072,6 +4114,29 @@ th {
   min-width: 0;
 }
 
+@media (max-width: 1320px) {
+  .future-focus {
+    width: 100%;
+    margin-left: 0;
+    transform: none;
+  }
+  .future-focus .future-forecast-dock {
+    grid-template-columns: minmax(260px, 0.78fr) minmax(0, 1.22fr);
+    grid-template-areas:
+      "overview config"
+      "overview engine"
+      "run run";
+  }
+  .future-focus .forecast-run-card {
+    border-top: 1px solid #e1e9ee;
+    border-left: 0;
+    align-content: start;
+  }
+  .future-focus .forecast-control-grid {
+    grid-template-columns: minmax(230px, 1.4fr) repeat(2, minmax(118px, 0.8fr));
+  }
+}
+
 @media (max-width: 1180px) {
   .hero,
   .dashboard-hero-main,
@@ -4124,6 +4189,32 @@ th {
   }
   .control-grid {
     grid-template-columns: repeat(3, minmax(110px, 1fr));
+  }
+  .future-focus .future-forecast-dock {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "overview"
+      "config"
+      "engine"
+      "run";
+  }
+  .future-focus .forecast-overview-card,
+  .future-focus .forecast-config-card,
+  .future-focus .forecast-engine-card,
+  .future-focus .forecast-run-card {
+    border-right: 0;
+    border-left: 0;
+  }
+  .future-focus .forecast-overview-card,
+  .future-focus .forecast-config-card,
+  .future-focus .forecast-engine-card {
+    border-bottom: 1px solid #e1e9ee;
+  }
+  .future-focus .forecast-control-grid {
+    grid-template-columns: minmax(240px, 1.4fr) repeat(2, minmax(120px, 0.8fr));
+  }
+  .future-focus .forecast-engine-grid {
+    grid-template-columns: repeat(3, minmax(130px, 1fr));
   }
   .future-command-card,
   .future-control-card,
@@ -4238,6 +4329,14 @@ th {
   .forecast-engine-grid,
   .forecast-advanced-tuning {
     grid-template-columns: 1fr;
+  }
+  .future-focus .forecast-control-grid,
+  .future-focus .forecast-engine-grid {
+    grid-template-columns: 1fr;
+  }
+  .forecast-config-card .forecast-control-wide:first-child,
+  .forecast-config-card .forecast-control-wide:last-child {
+    grid-column: 1 / -1;
   }
   .forecast-status-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
