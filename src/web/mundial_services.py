@@ -1766,17 +1766,41 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
                 *[str(item) for item in (report.get("monte_carlo_consensus") or {}).get("warnings", []) if str(item)],
             ])
     table = table_payload(pd.DataFrame(upcoming_report_table_rows(fixture_reports)), page=1, page_size=max(limit * 12, 1))
-    raw_warnings = unique_strings([*hardware.get("warnings", []), *feature_source.warnings])
+    backtest = alternatives_backtest_report(
+        history_df=feature_history_df,
+        tournament=tournament,
+        config={**config, "benchmark_tuning_enabled": False},
+        model_sequence=model_sequence,
+        start_time=start_time,
+        hardware=hardware,
+        feature_source=feature_source,
+        progress_callback=progress_callback,
+    )
+    backtests = backtest.get("models", [])
+    statistical_audit = build_prediction_statistical_audit(backtests, baseline_key=DEFAULT_SCORE_MODEL)
+    best_model = best_alternative_from_backtests(backtests)
+    backtest_summary = backtest.get("summary", {})
+    generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
+    backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
+    raw_warnings = unique_strings([*hardware.get("warnings", []), *feature_source.warnings, *backtest.get("warnings", [])])
     warning_payload = public_warning_payload(raw_warnings, pipeline_mode=pipeline_mode)
     summary = {
         "pipeline_mode": pipeline_mode,
         "pipeline_label": "Poisson + SOTA",
+        "generated_at": generated_at,
         "requested": limit,
         "returned": len(fixture_reports),
         "group": group_filter or "Todos",
         "fixture_source": fixture_source,
         "history_source": history_source,
         "poisson_recent_matches": config["poisson_recent_matches"],
+        "backtest_last_n": int(config["backtest_last_n"]),
+        "backtest_auto_n": int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0),
+        "backtest_scope": backtest_summary.get("scope", config.get("backtest_scope", "")),
+        "backtest_source": backtest_summary.get("source", ""),
+        "backtest_confirmed_matches": backtest_summary.get("confirmed_matches_detail", []),
+        "backtest_range": backtest_range,
+        "anti_leakage": backtest_summary.get("anti_leakage", ""),
         "iterations": config["iterations"],
         "seed": config["seed"],
         "bayes_profile": config.get("bayes_profile", ""),
@@ -1789,6 +1813,16 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         "feature_source_warnings": unique_strings(feature_source.warnings),
         "hardware": hardware,
         "results_autorefresh": results_autorefresh,
+        "best_model": best_model,
+        "statistical_audit": {
+            "available": statistical_audit.get("available", False),
+            "evaluated_models": statistical_audit.get("evaluated_models", 0),
+            "evaluated_matches": statistical_audit.get("evaluated_matches", 0),
+            "baseline_model_key": statistical_audit.get("baseline_model_key", DEFAULT_SCORE_MODEL),
+            "recommendations": statistical_audit.get("recommendations", []),
+            "warnings": statistical_audit.get("warnings", []),
+        },
+        "backtest": backtest_summary,
         "warnings": warning_payload["visible_warnings"],
         "visible_warnings": warning_payload["visible_warnings"],
         "technical_warnings": warning_payload["technical_warnings"],
@@ -1798,6 +1832,11 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         "created_at": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "fixture_reports": fixture_reports,
+        "ranked_models": benchmark_models_with_backtests(backtests),
+        "model_backtests": backtests,
+        "statistical_audit": statistical_audit,
+        "best_model": best_model,
+        "backtest": backtest,
         "table": table,
     })
     emit_report_progress(
@@ -1828,6 +1867,8 @@ def xg_lightgbm_report(
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     base_model, history_source = build_model(tournament, config)
     base_model = apply_recent_context_model(base_model, config)
+    history_df, _ = score_history_for_tournament(tournament, config)
+    feature_source = benchmark_feature_source(tournament, history_df, config)
     limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
     group_filter = str(payload.get("group") or "").strip()
     fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter).head(limit).copy()
@@ -1861,6 +1902,34 @@ def xg_lightgbm_report(
         fixture_reports.append(xg_lightgbm_fixture_report(prediction))
     table_rows = xg_lightgbm_report_table_rows(fixture_reports)
     table = table_payload(pd.DataFrame(table_rows), page=1, page_size=max(len(table_rows), 1))
+    xg_backtest = xg_lightgbm_backtest_report(
+        history_df=history_df,
+        tournament=tournament,
+        model_id=model_id,
+        model_meta=model_meta,
+        config=config,
+        start_time=start_time,
+        hardware=hardware,
+        progress_callback=progress_callback,
+    )
+    sota_backtest = alternatives_backtest_report(
+        history_df=history_df,
+        tournament=tournament,
+        config={**config, "benchmark_tuning_enabled": False, "sota_calculation_mode": "exact"},
+        model_sequence=SOTA_SCORE_MODEL_SEQUENCE,
+        start_time=start_time,
+        hardware=hardware,
+        feature_source=feature_source,
+        progress_callback=progress_callback,
+    )
+    xg_models = xg_backtest.get("models", [])
+    sota_models = sota_backtest.get("models", [])
+    combined_backtests = rank_backtest_models([*xg_models, *sota_models], xg_backtest.get("summary", {}) or sota_backtest.get("summary", {}))
+    statistical_audit = build_prediction_statistical_audit(combined_backtests, baseline_key=DEFAULT_SCORE_MODEL)
+    best_model = best_alternative_from_backtests(combined_backtests)
+    backtest_summary = xg_backtest.get("summary", {}) if xg_models else sota_backtest.get("summary", {})
+    generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
+    backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
     fixture_warnings = [
         warning
         for report in fixture_reports
@@ -1872,6 +1941,9 @@ def xg_lightgbm_report(
         *model_warnings,
         *hardware.get("warnings", []),
         *fixture_warnings,
+        *feature_source.warnings,
+        *xg_backtest.get("warnings", []),
+        *sota_backtest.get("warnings", []),
     ])
     warning_payload = merge_warning_payloads(
         public_warning_payload(raw_warnings, pipeline_mode=XG_LIGHTGBM_PIPELINE_MODE),
@@ -1886,6 +1958,14 @@ def xg_lightgbm_report(
         "fixture_source": fixture_source,
         "history_source": history_source,
         "poisson_recent_matches": config["poisson_recent_matches"],
+        "generated_at": generated_at,
+        "backtest_last_n": int(config["backtest_last_n"]),
+        "backtest_auto_n": int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0),
+        "backtest_scope": backtest_summary.get("scope", config.get("backtest_scope", "")),
+        "backtest_source": backtest_summary.get("source", ""),
+        "backtest_confirmed_matches": backtest_summary.get("confirmed_matches_detail", []),
+        "backtest_range": backtest_range,
+        "anti_leakage": backtest_summary.get("anti_leakage", ""),
         "iterations": 0,
         "seed": config["seed"],
         "sota_device": "not_applicable",
@@ -1899,6 +1979,18 @@ def xg_lightgbm_report(
         "hardware": hardware,
         "results_autorefresh": results_autorefresh,
         "source_preflight": source_preflight,
+        "best_model": best_model,
+        "backtest": backtest_summary,
+        "xg_backtest": xg_backtest.get("summary", {}),
+        "sota_backtest": sota_backtest.get("summary", {}),
+        "statistical_audit": {
+            "available": statistical_audit.get("available", False),
+            "evaluated_models": statistical_audit.get("evaluated_models", 0),
+            "evaluated_matches": statistical_audit.get("evaluated_matches", 0),
+            "baseline_model_key": statistical_audit.get("baseline_model_key", DEFAULT_SCORE_MODEL),
+            "recommendations": statistical_audit.get("recommendations", []),
+            "warnings": statistical_audit.get("warnings", []),
+        },
         "warnings": warning_payload["visible_warnings"],
         "visible_warnings": warning_payload["visible_warnings"],
         "technical_warnings": warning_payload["technical_warnings"],
@@ -1908,6 +2000,12 @@ def xg_lightgbm_report(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "fixture_reports": fixture_reports,
+        "model_backtests": combined_backtests,
+        "xg_backtest": xg_backtest,
+        "sota_backtest": sota_backtest,
+        "statistical_audit": statistical_audit,
+        "best_model": best_model,
+        "ranked_models": benchmark_models_with_backtests(combined_backtests),
         "table": table,
     })
     emit_report_progress(
@@ -2827,6 +2925,7 @@ def tune_benchmark_poisson_recent_matches(
                 model_key=model_key,
                 history_df=historical_train_df,
                 confirmed_df=confirmed_df,
+                pre_eval_confirmed_df=None,
                 tournament=tournament,
                 config=trial_config,
                 start_time=start_time,
@@ -2933,10 +3032,10 @@ def alternatives_backtest_report(
     working["_date"] = pd.to_datetime(working["Date"], errors="coerce")
     working = working[working["_date"].notna()].sort_values("_date", kind="stable").reset_index(drop=True)
     historical_train_df = working.drop(columns=["_date"]).copy()
-    confirmed_df = confirmed_worldcup_2026_backtest_rows(tournament)
-    eval_count = int(confirmed_df.shape[0])
+    confirmed_all_df = confirmed_worldcup_2026_backtest_rows(tournament)
+    confirmed_total = int(confirmed_all_df.shape[0])
     results_status = fixture_results_status(tournament_fixtures_dataframe(tournament))
-    if eval_count <= 0:
+    if confirmed_total <= 0:
         return {
             "summary": {
                 "available": False,
@@ -2953,10 +3052,16 @@ def alternatives_backtest_report(
             "models": [],
             "warnings": ["Backtest no disponible: no hay partidos confirmados del Mundial 2026 con marcador final."],
         }
+    requested_n = int(config.get("backtest_last_n") or confirmed_total)
+    eval_count = min(max(requested_n, 1), confirmed_total)
+    prefix_count = max(confirmed_total - eval_count, 0)
+    pre_eval_confirmed_df = confirmed_all_df.iloc[:prefix_count].copy()
+    confirmed_df = confirmed_all_df.iloc[prefix_count:].reset_index(drop=True).copy()
     baseline_metrics = evaluate_score_model_walk_forward_2026(
         model_key=DEFAULT_SCORE_MODEL,
         history_df=historical_train_df,
         confirmed_df=confirmed_df,
+        pre_eval_confirmed_df=pre_eval_confirmed_df,
         tournament=tournament,
         config=config,
         start_time=start_time,
@@ -2976,6 +3081,7 @@ def alternatives_backtest_report(
                 model_key=model_key,
                 history_df=historical_train_df,
                 confirmed_df=confirmed_df,
+                pre_eval_confirmed_df=pre_eval_confirmed_df,
                 tournament=tournament,
                 config=config,
                 start_time=start_time,
@@ -2991,8 +3097,8 @@ def alternatives_backtest_report(
         "scope": scope,
         "source": results_status.get("source", ""),
         "generated_at": generated_at,
-        "requested_matches": eval_count,
-        "confirmed_matches": eval_count,
+        "requested_matches": requested_n,
+        "confirmed_matches": confirmed_total,
         "confirmed_matches_detail": confirmed_backtest_match_payloads(confirmed_df),
         "evaluated_matches": eval_count,
         "train_matches": len(historical_train_df),
@@ -3008,6 +3114,325 @@ def alternatives_backtest_report(
     }
     models = rank_backtest_models(models, summary)
     return {"summary": summary, "models": models, "warnings": []}
+
+
+def xg_lightgbm_backtest_report(
+        history_df: pd.DataFrame,
+        tournament: Dict[str, Any],
+        model_id: str,
+        model_meta: Dict[str, Any],
+        config: Dict[str, Any],
+        start_time: float,
+        hardware: Dict[str, Any],
+        progress_callback=None,
+) -> Dict[str, Any]:
+    scope = "worldcup_2026_confirmed_auto"
+    generated_at = _now_utc().isoformat()
+    if history_df is None or history_df.empty:
+        return {
+            "summary": {
+                "available": False,
+                "scope": scope,
+                "generated_at": generated_at,
+                "backtest_range": empty_backtest_range(generated_at),
+                "confirmed_matches": 0,
+                "evaluated_matches": 0,
+                "train_matches": 0,
+            },
+            "models": [],
+            "warnings": ["Backtest xG no disponible: historico vacio."],
+        }
+    required = {"Date", "Team 1", "Team 2", "G1", "G2"}
+    if not required.issubset(history_df.columns):
+        return {
+            "summary": {
+                "available": False,
+                "scope": scope,
+                "generated_at": generated_at,
+                "backtest_range": empty_backtest_range(generated_at),
+                "confirmed_matches": 0,
+                "evaluated_matches": 0,
+                "train_matches": 0,
+            },
+            "models": [],
+            "warnings": ["Backtest xG no disponible: columnas historicas incompletas."],
+        }
+    working = history_df.copy()
+    working["_date"] = pd.to_datetime(working["Date"], errors="coerce")
+    working = working[working["_date"].notna()].sort_values("_date", kind="stable").reset_index(drop=True)
+    historical_train_df = working.drop(columns=["_date"]).copy()
+    confirmed_all_df = confirmed_worldcup_2026_backtest_rows(tournament)
+    confirmed_total = int(confirmed_all_df.shape[0])
+    results_status = fixture_results_status(tournament_fixtures_dataframe(tournament))
+    if confirmed_total <= 0:
+        return {
+            "summary": {
+                "available": False,
+                "scope": scope,
+                "source": results_status.get("source", ""),
+                "generated_at": generated_at,
+                "backtest_range": empty_backtest_range(generated_at),
+                "confirmed_matches": 0,
+                "confirmed_matches_detail": [],
+                "evaluated_matches": 0,
+                "train_matches": len(historical_train_df),
+                "anti_leakage": "Sin partidos Mundial 2026 finalizados con marcador completo; no se ejecuta backtest xG.",
+            },
+            "models": [],
+            "warnings": ["Backtest xG no disponible: no hay partidos confirmados del Mundial 2026 con marcador final."],
+        }
+    requested_n = int(config.get("backtest_last_n") or confirmed_total)
+    eval_count = min(max(requested_n, 1), confirmed_total)
+    prefix_count = max(confirmed_total - eval_count, 0)
+    prefix_df = confirmed_all_df.iloc[:prefix_count].copy()
+    confirmed_df = confirmed_all_df.iloc[prefix_count:].reset_index(drop=True).copy()
+    metrics = evaluate_xg_lightgbm_walk_forward_2026(
+        history_df=historical_train_df,
+        confirmed_df=confirmed_df,
+        pre_eval_confirmed_df=prefix_df,
+        tournament=tournament,
+        model_id=model_id,
+        model_meta=model_meta,
+        config=config,
+        start_time=start_time,
+        hardware=hardware,
+        progress_callback=progress_callback,
+    )
+    summary = {
+        "available": bool(metrics.get("available")),
+        "scope": scope,
+        "source": results_status.get("source", ""),
+        "generated_at": generated_at,
+        "requested_matches": requested_n,
+        "confirmed_matches": confirmed_total,
+        "confirmed_matches_detail": confirmed_backtest_match_payloads(confirmed_df),
+        "evaluated_matches": int(metrics.get("evaluated_matches") or 0),
+        "train_matches": len(historical_train_df),
+        "holdout_start": str(confirmed_df.iloc[0].get("Date", "")) if not confirmed_df.empty else "",
+        "holdout_end": str(confirmed_df.iloc[-1].get("Date", "")) if not confirmed_df.empty else "",
+        "backtest_range": backtest_range_summary(confirmed_df, generated_at),
+        "anti_leakage": (
+            "Walk-forward xG Mundial 2026: cada partido confirmado se evalua con historico desde 2014 "
+            "y solo resultados 2026 anteriores como contexto Poisson; el partido evaluado no entra al entrenamiento base."
+        ),
+    }
+    models = rank_backtest_models([metrics], summary)
+    return {"summary": summary, "models": models, "warnings": unique_strings(metrics.get("warnings", []))}
+
+
+def evaluate_xg_lightgbm_walk_forward_2026(
+        history_df: pd.DataFrame,
+        confirmed_df: pd.DataFrame,
+        pre_eval_confirmed_df: pd.DataFrame,
+        tournament: Dict[str, Any],
+        model_id: str,
+        model_meta: Dict[str, Any],
+        config: Dict[str, Any],
+        start_time: float,
+        hardware: Dict[str, Any],
+        progress_callback=None,
+) -> Dict[str, Any]:
+    totals = empty_backtest_totals()
+    sample_rows: List[Dict[str, Any]] = []
+    match_rows: List[Dict[str, Any]] = []
+    meta_warnings = model_meta.get("warnings") or []
+    if not isinstance(meta_warnings, list):
+        meta_warnings = [meta_warnings]
+    warnings: List[str] = [str(item) for item in meta_warnings if str(item)]
+    model_available = bool(model_meta.get("trained") or model_meta.get("bundle") or model_meta.get("model_id"))
+    prefix_df = pre_eval_confirmed_df if pre_eval_confirmed_df is not None else pd.DataFrame()
+    for fixture_index, (_, eval_row) in enumerate(confirmed_df.iterrows(), start=1):
+        emit_report_progress(
+            progress_callback,
+            stage="backtesting",
+            start_time=start_time,
+            model_index=1,
+            model_total=1,
+            model_key=XG_LIGHTGBM_PIPELINE_MODE,
+            fixture_index=fixture_index,
+            fixture_total=max(int(confirmed_df.shape[0]), 1),
+            hardware=hardware,
+            message=f"Backtest {XG_LIGHTGBM_PIPELINE_LABEL}: {eval_row.get('Team 1', '')} vs {eval_row.get('Team 2', '')}",
+        )
+        previous_frames = []
+        if not prefix_df.empty:
+            previous_frames.append(prefix_df[["Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group"]])
+        current_previous = confirmed_df.iloc[:fixture_index - 1][["Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group"]]
+        if not current_previous.empty:
+            previous_frames.append(current_previous)
+        previous_2026 = pd.concat(previous_frames, ignore_index=True) if previous_frames else pd.DataFrame()
+        train_frames = [history_df]
+        if not previous_2026.empty:
+            train_frames.append(previous_2026)
+        train_df = pd.concat(train_frames, ignore_index=True)
+        teams = alternatives_backtest_teams(tournament, train_df, pd.DataFrame([eval_row]))
+        baseline_model = WorldCupModel.from_history(
+            train_df,
+            teams=teams,
+            history_weight=float(config["history_weight"]),
+            recency_weight=float(config["recency_weight"]),
+            host_advantage=float(config["host_advantage"]),
+            max_goals=int(config["max_goals"]),
+        )
+        try:
+            prediction = predict_match_payload(
+                tournament,
+                apply_recent_context_model(baseline_model, config),
+                fixture_id=eval_row.get("No.", ""),
+                home=str(eval_row.get("Team 1", "")),
+                away=str(eval_row.get("Team 2", "")),
+                use_ml_model=True,
+                ml_weight=1.0,
+                model_id=model_id,
+                poisson_recent_matches=int(config.get("poisson_recent_matches") or DEFAULT_CONFIG["poisson_recent_matches"]),
+            )
+        except Exception as exc:
+            model_available = False
+            warnings.append(f"Backtest xG omitio {eval_row.get('Team 1', '')} vs {eval_row.get('Team 2', '')}: {exc.__class__.__name__}.")
+            continue
+        row_metrics = xg_lightgbm_backtest_prediction(prediction, eval_row, config)
+        if not row_metrics:
+            continue
+        row_metrics["sample"]["recent_matches_15"] = recent_matches_for_fixture(train_df, eval_row, limit=15)
+        accumulate_backtest_totals(totals, row_metrics)
+        match_rows.append(row_metrics["sample"])
+        if len(sample_rows) < 8:
+            sample_rows.append(row_metrics["sample"])
+    return {
+        "model_key": XG_LIGHTGBM_PIPELINE_MODE,
+        "model_label": XG_LIGHTGBM_PIPELINE_LABEL,
+        "available": bool(model_available) and totals["evaluated"] > 0,
+        "warnings": unique_strings(warnings),
+        "evaluated_matches": int(totals["evaluated"]),
+        "feature_usage_counts": combined_feature_usage_counts(match_rows),
+        **backtest_metric_summary(totals),
+        "matches": match_rows,
+        "sample": sample_rows,
+    }
+
+
+def xg_lightgbm_backtest_prediction(prediction: Dict[str, Any], row: pd.Series | Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any] | None:
+    probabilities_pct = prediction.get("probabilities") or {}
+    expected = prediction.get("expected_goals") or {}
+    probabilities = {
+        "home": float_or_zero(probabilities_pct.get("home")) / 100.0,
+        "draw": float_or_zero(probabilities_pct.get("draw")) / 100.0,
+        "away": float_or_zero(probabilities_pct.get("away")) / 100.0,
+        "lambda1": float_or_zero(expected.get("home")),
+        "lambda2": float_or_zero(expected.get("away")),
+    }
+    for line in REPORT_TOTAL_GOAL_LINES:
+        suffix = total_line_suffix(line)
+        probabilities[f"over{suffix}"] = float_or_zero(probabilities_pct.get(f"over{suffix}")) / 100.0
+        probabilities[f"under{suffix}"] = float_or_zero(probabilities_pct.get(f"under{suffix}")) / 100.0
+    actual_home = int(float(row.get("G1")))
+    actual_away = int(float(row.get("G2")))
+    actual_outcome = score_outcome(actual_home, actual_away)
+    outcome_probabilities = {
+        "home": float_or_zero(probabilities.get("home")),
+        "draw": float_or_zero(probabilities.get("draw")),
+        "away": float_or_zero(probabilities.get("away")),
+    }
+    total_prob = sum(outcome_probabilities.values())
+    if total_prob > 0:
+        outcome_probabilities = {key: value / total_prob for key, value in outcome_probabilities.items()}
+    pick = outcome_decision(outcome_probabilities)
+    total_goals = actual_home + actual_away
+    max_goals = int(config.get("max_goals") or DEFAULT_CONFIG["max_goals"])
+    grid = normalize_score_grid_array(poisson_score_grid(probabilities["lambda1"], probabilities["lambda2"], max_goals=max_goals))
+    actual_score_key = f"{actual_home}-{actual_away}"
+    top_score_predictions = []
+    for rank, score_item in enumerate(
+            sorted(score_distribution_cells(grid), key=lambda item: item["probability_raw"], reverse=True)[:5],
+            start=1,
+    ):
+        top_score_predictions.append({
+            "rank": rank,
+            "score": score_item.get("score", ""),
+            "probability": score_item.get("probability", 0.0),
+            "hit": score_item.get("score") == actual_score_key,
+        })
+    modal_index = int(np.argmax(grid))
+    modal_home, modal_away = np.unravel_index(modal_index, grid.shape)
+    modal_probability = float(grid[int(modal_home), int(modal_away)])
+    score_probability = score_grid_actual_probability(grid, actual_home, actual_away)
+    actual_score_rank = score_rank_from_grid(grid, actual_home, actual_away)
+    expected_home, expected_away, expected_total, expected_margin = expected_score_from_grid(grid)
+    actual_total = float(total_goals)
+    actual_margin = float(actual_home - actual_away)
+    over_under_rows = backtest_over_under_rows(probabilities, total_goals)
+    confidence = max(outcome_probabilities.values()) if outcome_probabilities else 0.0
+    modal_score = f"{int(modal_home)}-{int(modal_away)}"
+    modal_hit = int(modal_home) == actual_home and int(modal_away) == actual_away
+    home_team = str(row.get("Team 1", ""))
+    away_team = str(row.get("Team 2", ""))
+    return {
+        "log_loss": -math.log(max(outcome_probabilities.get(actual_outcome, 0.0), 1e-12)),
+        "brier": multiclass_brier_score(outcome_probabilities, actual_outcome),
+        "score_log_loss": -math.log(max(score_probability, 1e-12)),
+        "rps": ranked_probability_score(outcome_probabilities, actual_outcome),
+        "entropy": probability_entropy(outcome_probabilities),
+        "sharpness": confidence,
+        "pick_hit": 1 if pick == actual_outcome else 0,
+        "score_hit": 1 if modal_hit else 0,
+        "top3_score_hit": 1 if actual_score_rank <= 3 else 0,
+        "top5_score_hit": 1 if actual_score_rank <= 5 else 0,
+        "expected_home_goals": expected_home,
+        "expected_away_goals": expected_away,
+        "expected_total_goals": expected_total,
+        "expected_margin": expected_margin,
+        "home_goals_abs_error": abs(expected_home - float(actual_home)),
+        "away_goals_abs_error": abs(expected_away - float(actual_away)),
+        "total_goals_abs_error": abs(expected_total - actual_total),
+        "margin_abs_error": abs(expected_margin - actual_margin),
+        "home_goals_squared_error": (expected_home - float(actual_home)) ** 2,
+        "away_goals_squared_error": (expected_away - float(actual_away)) ** 2,
+        "total_goals_squared_error": (expected_total - actual_total) ** 2,
+        "margin_squared_error": (expected_margin - actual_margin) ** 2,
+        "actual_outcome": actual_outcome,
+        "predicted_outcome": pick,
+        "confidence": confidence,
+        "over_under": over_under_rows,
+        "sample": {
+            "fixture_id": str(row.get("No.", "")),
+            "date": str(row.get("Date", "")),
+            "home": home_team,
+            "away": away_team,
+            "home_asset": team_asset(home_team),
+            "away_asset": team_asset(away_team),
+            "match": f"{home_team} vs {away_team}",
+            "actual_score": f"{actual_home}-{actual_away}",
+            "actual_home_goals": actual_home,
+            "actual_away_goals": actual_away,
+            "total_goals": int(total_goals),
+            "pick": outcome_label(pick),
+            "pick_key": pick,
+            "actual_pick": outcome_label(actual_outcome),
+            "actual_pick_key": actual_outcome,
+            "pick_hit": bool(pick == actual_outcome),
+            "modal_score": modal_score,
+            "most_probable_score": modal_score,
+            "most_probable_score_probability": round(modal_probability * 100.0, 3),
+            "most_probable_score_hit": bool(modal_hit),
+            "top_scores": top_score_predictions,
+            "expected_score": f"{expected_home:.2f}-{expected_away:.2f}",
+            "actual_score_rank": actual_score_rank,
+            "score_hit": bool(modal_hit),
+            "top3_score_hit": bool(actual_score_rank <= 3),
+            "top5_score_hit": bool(actual_score_rank <= 5),
+            "rps": round(ranked_probability_score(outcome_probabilities, actual_outcome), 6),
+            "confidence": round(confidence * 100.0, 3),
+            "actual_probability": round(outcome_probabilities.get(actual_outcome, 0.0) * 100.0, 3),
+            "score_probability": round(score_probability * 100.0, 3),
+            "feature_context": prediction.get("data_quality", {}),
+            "probabilities": {
+                "home": round(outcome_probabilities["home"] * 100.0, 3),
+                "draw": round(outcome_probabilities["draw"] * 100.0, 3),
+                "away": round(outcome_probabilities["away"] * 100.0, 3),
+            },
+            "over_under": over_under_rows,
+        },
+    }
 
 
 def empty_backtest_range(generated_at: str = "") -> Dict[str, Any]:
@@ -3254,6 +3679,7 @@ def evaluate_score_model_walk_forward_2026(
         model_key: str,
         history_df: pd.DataFrame,
         confirmed_df: pd.DataFrame,
+        pre_eval_confirmed_df: pd.DataFrame | None,
         tournament: Dict[str, Any],
         config: Dict[str, Any],
         start_time: float,
@@ -3269,6 +3695,7 @@ def evaluate_score_model_walk_forward_2026(
     warnings: List[str] = []
     model_available = True
     international_status = international_results_status() if feature_source is not None else None
+    prefix_df = pre_eval_confirmed_df if pre_eval_confirmed_df is not None else pd.DataFrame()
     for fixture_index, (_, eval_row) in enumerate(confirmed_df.iterrows(), start=1):
         emit_report_progress(
             progress_callback,
@@ -3282,12 +3709,15 @@ def evaluate_score_model_walk_forward_2026(
             hardware=hardware,
             message=f"Backtest {score_model_display_label(model_key)}: {eval_row.get('Team 1', '')} vs {eval_row.get('Team 2', '')}",
         )
-        previous_2026 = confirmed_df.iloc[:fixture_index - 1]
+        previous_frames = []
+        if not prefix_df.empty:
+            previous_frames.append(prefix_df[["Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group"]])
+        current_previous = confirmed_df.iloc[:fixture_index - 1][["Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group"]]
+        if not current_previous.empty:
+            previous_frames.append(current_previous)
+        previous_2026 = pd.concat(previous_frames, ignore_index=True) if previous_frames else pd.DataFrame()
         train_df = pd.concat(
-            [
-                history_df,
-                previous_2026[["Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group"]],
-            ],
+            [history_df, previous_2026] if not previous_2026.empty else [history_df],
             ignore_index=True,
         )
         teams = alternatives_backtest_teams(tournament, train_df, pd.DataFrame([eval_row]))
@@ -4512,9 +4942,9 @@ def sota_calculation_summary(config: Dict[str, Any]) -> str:
 def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[str, Any]:
     config = simulation_config(payload)
     config["pipeline_mode"] = pipeline_mode
-    default_backtest_last_n = 7 if pipeline_mode in {ALTERNATIVES_BENCHMARK_PIPELINE_MODE, ADVANCED_MODELS_PIPELINE_MODE} else 20
+    default_backtest_last_n = 20
     config["backtest_last_n"] = int(_clamp_int(payload.get("backtest_last_n", default_backtest_last_n), 5, 100))
-    config["backtest_scope"] = "worldcup_2026_confirmed_auto" if pipeline_mode in {ALTERNATIVES_BENCHMARK_PIPELINE_MODE, ADVANCED_MODELS_PIPELINE_MODE} else "historical_last_n"
+    config["backtest_scope"] = "worldcup_2026_confirmed_auto"
     default_bayes_profile = "light" if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE else "deep"
     config["bayes_profile"] = str(payload.get("bayes_profile") or default_bayes_profile).strip().lower()
     config["sota_device"] = str(payload.get("sota_device") or "auto").strip().lower()

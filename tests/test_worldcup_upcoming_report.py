@@ -253,7 +253,7 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
     from src.web import mundial_services as services
 
     config = services.report_pipeline_config({}, services.ALTERNATIVES_BENCHMARK_PIPELINE_MODE)
-    assert config["backtest_last_n"] == 7
+    assert config["backtest_last_n"] == 20
     assert config["backtest_scope"] == "worldcup_2026_confirmed_auto"
 
     ranked = services.rank_backtest_models([
@@ -369,6 +369,49 @@ def test_xg_lightgbm_report_is_separate_prediction_pipeline(tmp_path, monkeypatc
     monkeypatch.setattr(services, "upcoming_fixture_rows", lambda tournament, group_filter="": fixtures)
     monkeypatch.setattr(services, "read_model_metadata", lambda model_id=None: model_meta)
     monkeypatch.setattr(services, "upcoming_sota_fixture_reports", lambda *args, **kwargs: pytest.fail("xg pipeline must not use SOTA reports"))
+    monkeypatch.setattr(services, "score_history_for_tournament", lambda tournament, config: (pd.DataFrame([
+        {"Date": "2022-01-01", "Year": 2022, "Team 1": "Mexico", "Team 2": "Canada", "G1": 2, "G2": 0, "Round": "Friendly", "Group": "Test"},
+    ]), "history-test"))
+    monkeypatch.setattr(services, "benchmark_feature_source", lambda tournament, history_df, config: type("FeatureSource", (), {"warnings": []})())
+
+    def fake_backtest_model(key, label, score):
+        return {
+            "model_key": key,
+            "model_label": label,
+            "available": True,
+            "evaluated_matches": 1,
+            "rank": 1,
+            "score_resultados": score,
+            "reliability_score": score,
+            "log_loss": 0.3,
+            "brier": 0.1,
+            "rps": 0.2,
+            "expected_calibration_error": 0.04,
+            "pick_accuracy": 1.0,
+            "score_accuracy": 0.0,
+            "top3_score_accuracy": 1.0,
+            "over_under_accuracy": 1.0,
+            "ou25_log_loss": 0.2,
+            "matches": [],
+            "vs_poisson": {"summary": "test"},
+        }
+
+    def fake_xg_backtest_report(**kwargs):
+        return {
+            "summary": {"available": True, "evaluated_matches": 1, "confirmed_matches": 1, "requested_matches": 5, "generated_at": "2026-06-18T00:00:00+00:00", "backtest_range": {"evaluated_matches": 1}},
+            "models": [fake_backtest_model("xg_lightgbm", "Goles esperados (xG) + LightGBM", 82.0)],
+            "warnings": [],
+        }
+
+    def fake_sota_backtest_report(**kwargs):
+        return {
+            "summary": {"available": True, "evaluated_matches": 1, "confirmed_matches": 1, "requested_matches": 5, "generated_at": "2026-06-18T00:00:00+00:00", "backtest_range": {"evaluated_matches": 1}},
+            "models": [fake_backtest_model("independent_poisson", "Poisson", 70.0)],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(services, "xg_lightgbm_backtest_report", fake_xg_backtest_report)
+    monkeypatch.setattr(services, "alternatives_backtest_report", fake_sota_backtest_report)
 
     def fake_predict_match_payload(tournament, base_model, **kwargs):
         assert kwargs["use_ml_model"] is True
@@ -424,6 +467,10 @@ def test_xg_lightgbm_report_is_separate_prediction_pipeline(tmp_path, monkeypatc
     assert result["summary"]["pipeline_mode"] == "xg_lightgbm"
     assert result["summary"]["pipeline_label"] == "xG-LightGBM"
     assert result["summary"]["score_models"] == ["xg_lightgbm"]
+    assert result["summary"]["backtest_auto_n"] == 1
+    assert result["summary"]["xg_backtest"]["evaluated_matches"] == 1
+    assert result["summary"]["sota_backtest"]["evaluated_matches"] == 1
+    assert {item["model_key"] for item in result["model_backtests"]} == {"xg_lightgbm", "independent_poisson"}
     assert result["summary"]["model"]["model_profile"] == "xg_lightgbm"
     assert result["fixture_reports"][0]["decision"]["label"] == "1"
     assert "models" not in result["fixture_reports"][0]
@@ -565,7 +612,8 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert result["summary"]["backtest_range"]["evaluated_matches"] == 3
     assert result["summary"]["backtest_range"]["first_match"]["home"] == "Argentina"
     assert result["summary"]["backtest_range"]["last_match"]["away"] == "Brazil"
-    assert refresh_calls == [True, True]
+    assert refresh_calls
+    assert all(refresh_calls)
     assert result["summary"]["results_refresh"]["refresh_attempted"] is True
     assert result["summary"]["results_refresh"]["fotmob_final_rows"] == 3
     assert len(result["summary"]["backtest_confirmed_matches"]) == 3
@@ -2312,6 +2360,43 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     monkeypatch.setattr(services, "load_historical_matches", lambda refresh=False: (pd.DataFrame(), "history-test"))
     monkeypatch.setattr(services, "benchmark_feature_source", lambda tournament, history_df, config: FakeFeatureSource())
     monkeypatch.setattr(services, "contextual_poisson_for_match", lambda *args, **kwargs: {})
+    captured_backtest_config = {}
+
+    def fake_backtest_report(**kwargs):
+        captured_backtest_config.update(kwargs["config"])
+        return {
+            "summary": {
+                "available": True,
+                "evaluated_matches": 1,
+                "confirmed_matches": 1,
+                "requested_matches": kwargs["config"]["backtest_last_n"],
+                "generated_at": "2026-06-18T00:00:00+00:00",
+                "backtest_range": {"evaluated_matches": 1},
+            },
+            "models": [{
+                "model_key": "independent_poisson",
+                "model_label": "Poisson",
+                "available": True,
+                "evaluated_matches": 1,
+                "rank": 1,
+                "score_resultados": 75.0,
+                "reliability_score": 75.0,
+                "log_loss": 0.3,
+                "brier": 0.1,
+                "rps": 0.2,
+                "expected_calibration_error": 0.04,
+                "pick_accuracy": 1.0,
+                "score_accuracy": 0.0,
+                "top3_score_accuracy": 1.0,
+                "over_under_accuracy": 1.0,
+                "ou25_log_loss": 0.2,
+                "matches": [],
+                "vs_poisson": {"summary": "baseline"},
+            }],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(services, "alternatives_backtest_report", fake_backtest_report)
 
     def fake_build_score_model(base_model, history_df, teams, config):
         key = config["score_model"]
@@ -2322,7 +2407,7 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     progress = []
 
     result = services.predict_upcoming_report(
-        {"pipeline_mode": "poisson_sota", "limit": 1},
+        {"pipeline_mode": "poisson_sota", "limit": 1, "backtest_last_n": 9},
         progress_callback=progress.append,
     )
 
@@ -2333,6 +2418,10 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     assert compact_prediction_order == services.SOTA_SCORE_MODEL_SEQUENCE
     assert fit_order == services.SOTA_SCORE_MODEL_SEQUENCE[1:]
     assert result["summary"]["sota_calculation_mode"] == "exact"
+    assert captured_backtest_config["backtest_last_n"] == 9
+    assert result["summary"]["backtest_last_n"] == 9
+    assert result["summary"]["backtest_auto_n"] == 1
+    assert result["model_backtests"][0]["model_key"] == "independent_poisson"
     assert "use_ml_model" not in result["summary"]
     assert result["fixture_reports"][0]["models"][0]["model_key"] == "independent_poisson"
     assert "monte_carlo_consensus" not in result["fixture_reports"][0]

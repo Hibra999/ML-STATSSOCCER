@@ -537,6 +537,7 @@ function hardwareChip(label, value, detail, status) {
 async function runUpcomingPredictions() {
   clearAlert();
   const limit = Number(document.getElementById("upcoming-predict-limit").value || 8);
+  const backtestLastN = Number((document.getElementById("upcoming-backtest-last-n") || {}).value || 20);
   const group = document.getElementById("upcoming-group-filter").value || "";
   const pipelineMode = syncUpcomingPipelineControls();
   const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
@@ -561,6 +562,7 @@ async function runUpcomingPredictions() {
       pipeline_mode: pipelineMode,
       limit,
       group,
+      backtest_last_n: backtestLastN,
       bayes_profile: (document.getElementById("upcoming-bayes-profile") || {}).value || "deep",
       sota_device: (document.getElementById("upcoming-sota-device") || {}).value || "auto",
       sota_calculation_mode: sotaCalculationMode,
@@ -669,11 +671,13 @@ function renderUpcomingReport(report) {
       ${calculationLabel ? reportSummaryCard("Cálculo", calculationLabel) : ""}
       ${reportSummaryCard("Fuerza global", globalConsensusStrength(fixtures))}
       ${reportSummaryCard("Partidos", `${summary.returned || 0}/${summary.requested || 0}`)}
+      ${reportSummaryCard("Benchmark N", `${summary.backtest_auto_n || 0}/${summary.backtest_last_n || "-"}`)}
       ${reportSummaryCard("Hardware", `${hardware.actual_device || "cpu"} · ${hardware.requested_device || "auto"}`)}
       ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
     </div>
     ${reportDownloadButtonsHtml(report.downloads || {}, false)}
     ${warningsHtml(warnings)}
+    ${pipelineBenchmarkSectionHtml(report, { title: "Benchmark Poisson/SOTA", detail: "Evaluación walk-forward de los últimos N partidos confirmados." })}
     ${sotaPipelineListHtml(summary)}
     ${clientReportHtml(fixtures)}
     <details class="technical-report-drawer">
@@ -716,12 +720,14 @@ function renderXgLightgbmReport(report) {
       ${reportSummaryCard("Modelo", model.trained ? modelName : "No entrenado")}
       ${reportSummaryCard("Filas T/V/Test", rowLabel)}
       ${reportSummaryCard("Partidos", `${summary.returned || 0}/${summary.requested || 0}`)}
+      ${reportSummaryCard("Benchmark N", `${summary.backtest_auto_n || 0}/${summary.backtest_last_n || "-"}`)}
       ${reportSummaryCard("Hardware ML", `${modelDevice.actual_device || "cpu"} · ${modelDevice.requested_device || "auto"}`)}
       ${reportSummaryCard("Optuna", tuning.enabled ? `${tuning.sampler || "Optuna"} · ${formatNumber(tuning.best_value ?? "")}` : "No")}
       ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
     </div>
     ${reportDownloadButtonsHtml(report.downloads || {}, false)}
     ${warningsHtml(warnings)}
+    ${pipelineBenchmarkSectionHtml(report, { title: `Benchmark ${XG_PIPELINE_LABEL}`, detail: "xG/LightGBM evaluado contra SOTA en la misma ventana de últimos N." })}
     <section class="client-report-shell">
       <header>
         <div>
@@ -1248,7 +1254,6 @@ function normalizePathDisplay(path) {
 function renderAdvancedModelsReport(report) {
   const summary = report.summary || {};
   const fixtures = report.fixture_reports || [];
-  const backtests = report.model_backtests || [];
   const best = report.best_model || summary.best_model || {};
   const warnings = reportVisibleWarnings(summary);
   const dataStatus = summary.advanced_data_status || report.advanced_data_status || {};
@@ -1273,9 +1278,9 @@ function renderAdvancedModelsReport(report) {
     ${reportDownloadButtonsHtml(report.downloads || {}, true)}
     ${warningsHtml(warnings)}
     ${advancedDataReportHtml(dataStatus, models)}
+    ${pipelineBenchmarkSectionHtml(report, { title: "Benchmark modelos avanzados", detail: "Ranking walk-forward sobre últimos N partidos confirmados." })}
     ${statisticalAuditHtml(report.statistical_audit || summary.statistical_audit || {})}
     ${featureResearchHtml(summary.feature_research || report.feature_research || {})}
-    ${backtestTableHtml(backtests, summary.backtest || {})}
     <section class="report-panel">
       <header><strong>Predicciones avanzadas</strong><small>${escapeHtml(fixtures.length)} fixture${fixtures.length === 1 ? "" : "s"}</small></header>
       <div class="client-report-grid alternatives-fixture-grid">
@@ -1424,7 +1429,7 @@ function renderAlternativesBenchmarkReport(report) {
   document.getElementById("upcoming-report").innerHTML = `
     <div class="report-summary-grid">
       ${reportSummaryCard("Modelo #1", best.available ? (best.model_label || best.model_key || "-") : "-")}
-      ${reportSummaryCard("Evaluados", `${backtestAutoN} partidos`)}
+      ${reportSummaryCard("Benchmark N", `${backtestAutoN}/${summary.backtest_last_n || "-"}`)}
       ${reportSummaryCard("Partidos próximos", `${fixtures.length}/${summary.requested || 0}`)}
       ${reportSummaryCard("Criterio", "Score de resultados")}
       ${reportSummaryCard("Primer evaluado", firstMatch.match || `${firstMatch.home || "-"} vs ${firstMatch.away || "-"}`)}
@@ -1463,7 +1468,7 @@ function alternativesBenchmarkHtml(report) {
     ${bestAlternativeHtml(best)}
     ${featureResearchHtml(summary.feature_research || report.feature_research || {})}
     ${benchmarkTuningHtml(tuning)}
-    ${backtestTableHtml(backtests, summary.backtest || {})}
+    ${pipelineBenchmarkSectionHtml(report, { title: "Benchmark alternativas", detail: "Comparación principal sobre últimos N partidos confirmados." })}
     ${backtestPredictionReviewHtml(backtests)}
     <section class="report-panel">
       <header><strong>Predicciones futuras</strong><small>${escapeHtml(fixtures.length)} fixture${fixtures.length === 1 ? "" : "s"}</small></header>
@@ -1661,6 +1666,83 @@ function formatProbability(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "-";
   return formatNumber(number);
+}
+
+function pipelineBenchmarkSectionHtml(report, options = {}) {
+  const summary = (report || {}).summary || {};
+  const backtests = (report || {}).model_backtests || [];
+  const backtestSummary = summary.backtest || (report || {}).backtest || {};
+  const requestedN = summary.backtest_last_n || backtestSummary.requested_matches || "-";
+  const evaluated = summary.backtest_auto_n ?? backtestSummary.evaluated_matches ?? 0;
+  const confirmed = backtestSummary.confirmed_matches ?? evaluated;
+  const best = (report || {}).best_model || summary.best_model || {};
+  const range = summary.backtest_range || backtestSummary.backtest_range || {};
+  const first = range.first_match || {};
+  const last = range.last_match || {};
+  const title = options.title || "Benchmark últimos N";
+  const detail = options.detail || "Evaluación walk-forward sobre los últimos N partidos confirmados.";
+  const statusClass = backtests.length && Number(evaluated) > 0 ? "pipeline-ready" : "pipeline-fallback";
+  const bestLabel = best.available ? (best.model_label || best.model_key || "Modelo evaluado") : "Sin ganador";
+  const source = summary.backtest_source || backtestSummary.source || summary.result_source || "";
+  if (!backtests.length || Number(evaluated) <= 0) {
+    return `<section class="pipeline-benchmark-section ${escapeAttr(statusClass)}">
+      <header class="pipeline-benchmark-head">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <small>${escapeHtml(detail)}</small>
+        </div>
+        <span>0/${escapeHtml(requestedN)}</span>
+      </header>
+      <div class="pipeline-benchmark-empty-state">
+        <strong>Benchmark no disponible</strong>
+        <small>${escapeHtml(backtestSummary.anti_leakage || summary.anti_leakage || "No hay partidos confirmados suficientes para evaluar este pipeline.")}</small>
+      </div>
+    </section>`;
+  }
+  return `<section class="pipeline-benchmark-section ${escapeAttr(statusClass)}">
+    <header class="pipeline-benchmark-head">
+      <div>
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(detail)}</small>
+      </div>
+      <span>${escapeHtml(evaluated)}/${escapeHtml(requestedN)}</span>
+    </header>
+    <div class="pipeline-benchmark-strip" aria-label="Resumen de benchmark">
+      <article>
+        <span>Evaluados</span>
+        <strong>${escapeHtml(evaluated)}</strong>
+        <small>${escapeHtml(confirmed)} confirmados detectados</small>
+      </article>
+      <article>
+        <span>Modelo #1</span>
+        <strong>${escapeHtml(bestLabel)}</strong>
+        <small>${escapeHtml(best.available ? `score ${formatNumber(best.score_resultados ?? best.reliability_score ?? 0)}` : (best.reason || "pendiente"))}</small>
+      </article>
+      <article>
+        <span>Ventana</span>
+        <strong>${escapeHtml(first.date || "-")} → ${escapeHtml(last.date || "-")}</strong>
+        <small>${escapeHtml([first.home, last.away].filter(Boolean).join(" / ") || "últimos finalizados")}</small>
+      </article>
+      <article>
+        <span>Fuente</span>
+        <strong>${escapeHtml(source || "cache local")}</strong>
+        <small>${escapeHtml(backtests.length)} modelo${backtests.length === 1 ? "" : "s"}</small>
+      </article>
+    </div>
+    ${xgBenchmarkComparisonHtml(summary)}
+    ${backtestTableHtml(backtests, backtestSummary)}
+  </section>`;
+}
+
+function xgBenchmarkComparisonHtml(summary) {
+  const xg = (summary || {}).xg_backtest || {};
+  const sota = (summary || {}).sota_backtest || {};
+  if (!Object.keys(xg).length && !Object.keys(sota).length) return "";
+  return `<div class="pipeline-benchmark-comparison">
+    <span><b>xG</b>${escapeHtml(xg.evaluated_matches || 0)} evaluados</span>
+    <span><b>SOTA</b>${escapeHtml(sota.evaluated_matches || 0)} evaluados</span>
+    <span>${escapeHtml((summary || {}).anti_leakage || "Misma ventana de partidos confirmados")}</span>
+  </div>`;
 }
 
 function backtestTableHtml(backtests, summary) {

@@ -1024,7 +1024,7 @@ h3 { font-size: 16px; }
 }
 .forecast-control-grid {
   display: grid;
-  grid-template-columns: minmax(260px, 2fr) repeat(2, minmax(128px, 0.7fr));
+  grid-template-columns: minmax(220px, 1.4fr) repeat(3, minmax(116px, 0.7fr));
   gap: 10px;
   align-items: end;
 }
@@ -1032,10 +1032,10 @@ h3 { font-size: 16px; }
   grid-column: auto;
 }
 .forecast-config-card .forecast-control-wide:first-child {
-  grid-column: span 1;
+  grid-column: span 2;
 }
 .forecast-config-card .forecast-control-wide:last-child {
-  grid-column: 1 / -1;
+  grid-column: span 2;
 }
 .forecast-control-grid label,
 .forecast-engine-grid label,
@@ -3223,6 +3223,117 @@ h3 { font-size: 16px; }
   gap: 8px;
   min-width: 0;
 }
+.pipeline-benchmark-section {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--forecast-line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fbfdfc 0%, #ffffff 100%);
+  box-shadow: 0 10px 22px rgba(18, 31, 43, 0.04);
+}
+.pipeline-benchmark-section.pipeline-fallback {
+  background: #fffaf1;
+  border-color: #eadfc5;
+}
+.pipeline-benchmark-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+.pipeline-benchmark-head div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.pipeline-benchmark-head strong {
+  color: var(--forecast-ink);
+  font-size: 15px;
+}
+.pipeline-benchmark-head small {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.pipeline-benchmark-head > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #eaf6f3;
+  color: #0f735d;
+  font-weight: 900;
+}
+.pipeline-benchmark-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+.pipeline-benchmark-strip article {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #dce7eb;
+  border-radius: 8px;
+  background: #fff;
+}
+.pipeline-benchmark-strip span,
+.pipeline-benchmark-strip small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+.pipeline-benchmark-strip strong {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.pipeline-benchmark-comparison {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.pipeline-benchmark-comparison span {
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid #dce7eb;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+.pipeline-benchmark-comparison b {
+  margin-right: 6px;
+  color: var(--forecast-ink);
+}
+.pipeline-benchmark-empty-state {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px dashed #d7c59c;
+  border-radius: 8px;
+  background: #fffdf8;
+}
+.pipeline-benchmark-empty-state strong {
+  color: #7a5c12;
+}
+.pipeline-benchmark-empty-state small {
+  color: #806f49;
+  line-height: 1.4;
+}
 .benchmark-metric-card {
   display: grid;
   gap: 8px;
@@ -4183,7 +4294,10 @@ th {
     align-content: start;
   }
   .future-focus .forecast-control-grid {
-    grid-template-columns: minmax(230px, 1.4fr) repeat(2, minmax(118px, 0.8fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .future-focus .forecast-control-wide {
+    grid-column: span 2;
   }
 }
 
@@ -4228,6 +4342,9 @@ th {
   .report-summary-grid {
     grid-template-columns: repeat(2, minmax(130px, 1fr));
   }
+  .pipeline-benchmark-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .pipeline-summary-grid {
     grid-template-columns: repeat(3, minmax(120px, 1fr));
   }
@@ -4261,7 +4378,7 @@ th {
     border-bottom: 1px solid #e1e9ee;
   }
   .future-focus .forecast-control-grid {
-    grid-template-columns: minmax(240px, 1.4fr) repeat(2, minmax(120px, 0.8fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .future-focus .forecast-engine-grid {
     grid-template-columns: repeat(3, minmax(130px, 1fr));
@@ -4403,6 +4520,8 @@ th {
   .benchmark-metric-card header,
   .metric-bar-grid,
   .report-summary-grid,
+  .pipeline-benchmark-head,
+  .pipeline-benchmark-strip,
   .pipeline-summary-grid,
   .feature-bar,
   .recent15-columns,

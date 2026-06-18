@@ -449,9 +449,12 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "upcoming-benchmark-tuning-enabled" in html_source
     assert "benchmark_tuning_enabled" in app_source
     assert "Optuna N" in app_source
-    assert "Backtest N" not in html_source
-    assert "upcoming-backtest-last-n" not in html_source
-    assert "upcoming-backtest-last-n" not in app_source
+    assert "Benchmark últimos N" in html_source
+    assert "upcoming-backtest-last-n" in html_source
+    assert "upcoming-backtest-last-n" in app_source
+    assert "pipelineBenchmarkSectionHtml" in app_source
+    assert "Benchmark Poisson/SOTA" in app_source
+    assert "Benchmark modelos avanzados" in app_source
     assert "heroNextCardHtml" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" not in app_source
     assert "/api/worldcup/simulate" not in app_source
