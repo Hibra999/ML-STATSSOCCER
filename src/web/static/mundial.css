@@ -1042,6 +1042,62 @@ h3 { font-size: 16px; }
 .forecast-advanced-tuning label {
   min-width: 0;
 }
+.model-checklist-control {
+  display: grid;
+  grid-column: span 4;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #d7e1e7;
+  border-radius: 8px;
+  background: #f8fbfc;
+}
+.model-checklist-control > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+.model-checklist-control span,
+.model-checklist-control small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.model-checklist-control strong {
+  color: var(--forecast-ink);
+  overflow-wrap: anywhere;
+}
+.model-checklist-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.model-check-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.model-check-item.heavy {
+  background: #fffaf0;
+  border-color: #efd7aa;
+}
+.model-check-item input {
+  margin-top: 3px;
+}
+.model-check-item span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.model-check-item strong,
+.model-check-item small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .forecast-readonly-control {
   display: grid;
   gap: 3px;
@@ -4530,6 +4586,12 @@ th {
   }
   .future-focus .forecast-control-grid,
   .future-focus .forecast-engine-grid {
+    grid-template-columns: 1fr;
+  }
+  .model-checklist-control {
+    grid-column: 1 / -1;
+  }
+  .model-checklist-grid {
     grid-template-columns: 1fr;
   }
   .forecast-config-card .forecast-control-wide:first-child,

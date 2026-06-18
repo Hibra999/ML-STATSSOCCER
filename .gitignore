@@ -14,6 +14,8 @@ storage/network/*.pkl
 storage/worldcup/cache/*.pkl
 storage/worldcup/international/results.csv
 storage/worldcup/features/
+storage/worldcup/advanced/
+storage/worldcup/xg/
 storage/worldcup/walk_forward/*.csv
 storage/worldcup/kaggle/
 storage/worldcup/models/

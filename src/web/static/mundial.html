@@ -93,15 +93,15 @@
       <div class="section-heading section-toolbar">
         <div class="section-heading-title">
           <h2>Predicciones Futuras</h2>
-          <small id="upcoming-summary">Reporte por pipeline</small>
+          <small id="upcoming-summary">Comparación estadística por checklist</small>
         </div>
         <span class="section-chip">Consola predictiva</span>
       </div>
       <div class="prediction-dock clean-dock future-forecast-dock">
         <article class="future-command-card forecast-overview-card">
           <div class="forecast-kicker"><span></span>Forecast lab</div>
-          <h3>Próximos N partidos</h3>
-          <small>Poisson/SOTA, goles esperados (xG) + LightGBM, benchmark y modelos avanzados en un solo flujo.</small>
+          <h3>Comparar modelos estadísticos</h3>
+          <small>Selecciona modelos, resuelve fuentes, ejecuta backtest automático y genera el reporte en un solo flujo.</small>
           <div class="forecast-status-grid" aria-label="Capas de predicción">
             <span><b>01</b><small>Proyección</small></span>
             <span><b>02</b><small>Consenso</small></span>
@@ -116,12 +116,18 @@
         <article class="future-control-card forecast-config-card">
           <header class="forecast-card-head">
             <h4>Modelo y universo</h4>
-            <small>Pipeline, muestra y grupo objetivo</small>
+            <small>Modelos, muestra y grupo objetivo</small>
           </header>
           <div class="forecast-control-grid">
-            <label class="forecast-control-wide">Pipeline
-              <select id="upcoming-pipeline-mode" name="upcoming_pipeline_mode" autocomplete="off"><option value="poisson_sota">Poisson + SOTA</option><option value="advanced_models">Modelos avanzados</option><option value="xg_lightgbm">Goles esperados (xG) + LightGBM</option><option value="alternatives_benchmark">Benchmark alternativas</option></select>
-            </label>
+            <input id="upcoming-pipeline-mode" name="upcoming_pipeline_mode" type="hidden" value="model_checklist">
+            <div class="model-checklist-control forecast-control-wide">
+              <div>
+                <span>Modelos estadísticos</span>
+                <strong>Selecciona qué modelos comparar</strong>
+                <small>Sin LightGBM; el backtest se calcula automático desde 11/06/2026.</small>
+              </div>
+              <div id="upcoming-model-checklist" class="model-checklist-grid"></div>
+            </div>
             <label>N partidos
               <input id="upcoming-predict-limit" name="upcoming_predict_limit" autocomplete="off" type="number" min="1" max="72" step="1" value="8">
             </label>
@@ -141,7 +147,7 @@
         <article class="future-control-card forecast-engine-card">
           <header class="forecast-card-head">
             <h4>Ajustes de motor</h4>
-            <small>Consenso, Bayes, CUDA y tuning</small>
+            <small>Bayes, CUDA y tuning</small>
           </header>
           <div id="upcoming-sota-controls" class="inline-control-row forecast-engine-grid">
             <label>Cálculo
@@ -172,7 +178,7 @@
           <div class="forecast-run-summary">
             <span>Acción</span>
             <strong id="upcoming-run-title">Reporte completo</strong>
-            <small id="upcoming-run-copy">Resuelve fuentes, prepara datos y genera el reporte del pipeline seleccionado</small>
+            <small id="upcoming-run-copy">Resuelve fuentes, prepara datos y genera el reporte seleccionado</small>
           </div>
           <button id="upcoming-predict-btn" class="primary" type="button">Generar reporte</button>
         </article>
@@ -199,8 +205,8 @@
         <article id="upcoming-advanced-panel" class="pipeline-panel pipeline-fallback hidden">
           <header class="pipeline-panel-head">
             <div>
-              <strong>Modelos avanzados</strong>
-              <small id="advanced-status-summary">Sin cache local; este pipeline usará fallback Poisson/GLM</small>
+              <strong>Fuentes avanzadas</strong>
+              <small id="advanced-status-summary">Sin cache local; los modelos seleccionados usarán fallback Poisson/GLM</small>
             </div>
             <span id="advanced-status-pill" class="pipeline-status-pill pipeline-fallback">Fallback estadístico</span>
           </header>

@@ -155,7 +155,19 @@ def download_api_football_cache(
     if env_flag("API_FOOTBALL_FETCH_FIXTURE_DETAILS"):
         max_details = max(int(env_value("API_FOOTBALL_MAX_DETAIL_FIXTURES") or 20), 0)
         fixtures = normalize_api_football_payloads(read_api_football_cache())["fixtures"]
-        fixture_ids = fixtures["FixtureId"].dropna().astype(str).drop_duplicates().head(max_details).tolist() if not fixtures.empty else []
+        if not fixtures.empty:
+            detail_candidates = fixtures.copy()
+            if {"HG", "AG"} <= set(detail_candidates.columns):
+                detail_candidates = detail_candidates[
+                    pd.to_numeric(detail_candidates["HG"], errors="coerce").notna()
+                    & pd.to_numeric(detail_candidates["AG"], errors="coerce").notna()
+                ].copy()
+            if "Date" in detail_candidates.columns:
+                detail_candidates["Date"] = pd.to_datetime(detail_candidates["Date"], errors="coerce", utc=True)
+                detail_candidates = detail_candidates.sort_values("Date", ascending=False, kind="stable")
+            fixture_ids = detail_candidates["FixtureId"].dropna().astype(str).drop_duplicates().head(max_details).tolist()
+        else:
+            fixture_ids = []
         for fixture_id in fixture_ids:
             for endpoint in ("/fixtures/statistics", "/fixtures/lineups", "/injuries", "/odds"):
                 downloaded.append(cached_or_fetch(

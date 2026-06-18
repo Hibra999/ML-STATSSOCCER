@@ -19,6 +19,19 @@ const state = {
 
 const XG_PIPELINE_LABEL = "Goles esperados (xG) + LightGBM";
 const XG_LEGACY_PIPELINE_LABEL = ["xG", "LightGBM"].join("-");
+const DEFAULT_STAT_MODEL_KEYS = [
+  "independent_poisson",
+  "statsmodels_poisson_glm",
+  "negative_binomial_glm",
+  "dixon_coles_mle",
+  "bivariate_poisson_mle",
+  "xg_dixon_coles",
+  "negative_binomial_dixon_coles",
+  "dynamic_strength_kalman",
+  "stacked_meta_mnlogit",
+  "bayesian_hierarchical_poisson",
+  "bayesian_dynamic_poisson",
+];
 
 const jobLabels = {
   queued: "En cola",
@@ -145,6 +158,7 @@ async function loadAll(refresh) {
     state.lastSimulation = overview.last_simulation || state.lastSimulation;
     rebuildTeamAssets();
     renderScoreModelOptions(overview.score_models || []);
+    renderUpcomingModelChecklist(overview.score_models || []);
     applyDefaultConfig(overview.default_config || {});
     renderOverview(overview);
     renderGroups(groups);
@@ -209,6 +223,36 @@ function renderScoreModelOptions(options) {
   select.innerHTML = rows.map((option) => (
     `<option value="${escapeAttr(option.key || "")}">${escapeHtml(option.label || option.key || "")}</option>`
   )).join("");
+}
+
+function renderUpcomingModelChecklist(options) {
+  const container = document.getElementById("upcoming-model-checklist");
+  if (!container) return;
+  const optionByKey = new Map((options || []).map((item) => [String(item.key || ""), item]));
+  const rows = DEFAULT_STAT_MODEL_KEYS.map((key) => optionByKey.get(key) || {
+    key,
+    label: key.replace(/_/g, " "),
+    description: "",
+    heavy: key.includes("bayesian"),
+  });
+  container.innerHTML = rows.map((option) => {
+    const key = String(option.key || "");
+    const heavy = Boolean(option.heavy) || key.includes("bayesian");
+    return `<label class="model-check-item ${heavy ? "heavy" : ""}">
+      <input type="checkbox" name="upcoming_score_model" value="${escapeAttr(key)}" checked>
+      <span>
+        <strong>${escapeHtml(option.label || key)}</strong>
+        <small>${escapeHtml(heavy ? "Pesado" : (option.description || "Modelo estadístico"))}</small>
+      </span>
+    </label>`;
+  }).join("");
+}
+
+function selectedUpcomingScoreModels() {
+  const checked = [...document.querySelectorAll('input[name="upcoming_score_model"]:checked')]
+    .map((input) => input.value)
+    .filter(Boolean);
+  return checked.length ? checked : [...DEFAULT_STAT_MODEL_KEYS];
 }
 
 function renderOverview(overview) {
@@ -543,13 +587,14 @@ async function runUpcomingPredictions() {
   const group = document.getElementById("upcoming-group-filter").value || "";
   const pipelineMode = syncUpcomingPipelineControls();
   const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
-  const benchmarkTuningEnabled = pipelineMode === "alternatives_benchmark" && Boolean((document.getElementById("upcoming-benchmark-tuning-enabled") || {}).checked);
-  const advancedIncludeBayesian = pipelineMode === "advanced_models" && Boolean((document.getElementById("upcoming-advanced-include-bayesian") || {}).checked);
-  const bayesProfile = pipelineMode === "advanced_models"
-    ? advancedIncludeBayesian ? "deep" : "light"
-    : (document.getElementById("upcoming-bayes-profile") || {}).value || "deep";
+  const selectedScoreModels = selectedUpcomingScoreModels();
+  const benchmarkTuningEnabled = Boolean((document.getElementById("upcoming-benchmark-tuning-enabled") || {}).checked);
+  const advancedIncludeBayesian = selectedScoreModels.some((key) => String(key).includes("bayesian"));
+  const bayesProfile = advancedIncludeBayesian ? "deep" : ((document.getElementById("upcoming-bayes-profile") || {}).value || "light");
   const xgPayload = pipelineMode === "xg_lightgbm" ? xgLightgbmTrainingPayload() : {};
-  const calculationLabel = pipelineMode === "alternatives_benchmark"
+  const calculationLabel = pipelineMode === "model_checklist"
+    ? `Comparación estadística (${selectedScoreModels.length} modelos)${benchmarkTuningEnabled ? " + Optuna" : ""}`
+    : pipelineMode === "alternatives_benchmark"
     ? `Benchmark alternativas${benchmarkTuningEnabled ? " + Optuna" : ""}`
     : pipelineMode === "xg_lightgbm"
     ? XG_PIPELINE_LABEL
@@ -565,6 +610,8 @@ async function runUpcomingPredictions() {
         score_model: "independent_poisson",
       }),
       pipeline_mode: pipelineMode,
+      selected_score_models: selectedScoreModels,
+      include_heavy_models: advancedIncludeBayesian,
       limit,
       group,
       bayes_profile: bayesProfile,
@@ -585,22 +632,23 @@ async function runUpcomingPredictions() {
 
 function syncUpcomingPipelineControls() {
   const select = document.getElementById("upcoming-pipeline-mode");
-  const mode = (select && select.value) || "poisson_sota";
+  const mode = (select && select.value) || "model_checklist";
   const isBenchmark = mode === "alternatives_benchmark";
   const isXgLightgbm = mode === "xg_lightgbm";
   const isAdvanced = mode === "advanced_models";
+  const isChecklist = mode === "model_checklist";
   const calculation = document.getElementById("upcoming-sota-calculation-mode");
   if (calculation) calculation.disabled = isBenchmark || isXgLightgbm || isAdvanced;
   const sotaControls = document.getElementById("upcoming-sota-controls");
   if (sotaControls) sotaControls.classList.toggle("hidden", isBenchmark || isXgLightgbm || isAdvanced);
   const benchmarkControls = document.getElementById("upcoming-benchmark-controls");
-  if (benchmarkControls) benchmarkControls.classList.toggle("hidden", !isBenchmark);
+  if (benchmarkControls) benchmarkControls.classList.toggle("hidden", !(isBenchmark || isChecklist));
   const sotaPanel = document.getElementById("pipeline-sota-panel");
   if (sotaPanel) sotaPanel.classList.toggle("hidden", mode !== "poisson_sota");
   const benchmarkPanel = document.getElementById("pipeline-benchmark-panel");
   if (benchmarkPanel) benchmarkPanel.classList.toggle("hidden", !isBenchmark);
   const advancedPanel = document.getElementById("upcoming-advanced-panel");
-  if (advancedPanel) advancedPanel.classList.toggle("hidden", !isAdvanced);
+  if (advancedPanel) advancedPanel.classList.toggle("hidden", !(isAdvanced || isChecklist));
   const xgPanel = document.getElementById("upcoming-xg-panel");
   if (xgPanel) xgPanel.classList.toggle("hidden", !isXgLightgbm);
   const bayesToggle = document.querySelector(".advanced-bayes-toggle");
@@ -619,6 +667,13 @@ function syncUpcomingRunButton(mode) {
 }
 
 function upcomingPipelineActionCopy(mode) {
+  if (mode === "model_checklist") {
+    return {
+      button: "Generar reporte",
+      title: "Comparación estadística",
+      detail: "Resuelve fuentes, prepara cache avanzado, evalúa modelos seleccionados y genera el reporte.",
+    };
+  }
   if (mode === "advanced_models") {
     return {
       button: "Generar reporte avanzado",
@@ -650,7 +705,7 @@ function upcomingPipelineActionCopy(mode) {
 function renderUpcomingReport(report) {
   state.lastUpcomingReport = report;
   const summary = report.summary || {};
-  if (summary.pipeline_mode === "alternatives_benchmark") {
+  if (summary.pipeline_mode === "alternatives_benchmark" || summary.pipeline_mode === "model_checklist") {
     renderAlternativesBenchmarkReport(report);
     return;
   }
@@ -1194,13 +1249,13 @@ function advancedPipelineState(status) {
     return {
       className: "pipeline-missing",
       label: "Fuentes sin cache preparado",
-      summary: `Fuentes avanzadas detectadas (${activeSources}); prepara cache local antes de ejecutar el pipeline avanzado.`,
+      summary: `Fuentes avanzadas detectadas (${activeSources}); el reporte preparará cache local antes de ejecutar los modelos seleccionados.`,
     };
   }
   return {
     className: "pipeline-fallback",
     label: "Fallback estadístico",
-    summary: "Sin cache local; este pipeline usará fallback Poisson/GLM",
+    summary: "Sin cache local; los modelos seleccionados usarán fallback Poisson/GLM",
   };
 }
 

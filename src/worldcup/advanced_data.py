@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List
 import pandas as pd
 
 from src.worldcup.accelerators import acceleration_status, import_optional_accelerator
+from src.worldcup.api_football_provider import api_football_key, load_api_football_data
 
 
 ADVANCED_ROOT = Path("storage") / "worldcup" / "advanced"
@@ -21,6 +22,7 @@ STATUS_FILE = ADVANCED_ROOT / "status.json"
 
 LOCAL_SOURCE_FILES = {
     "manual_xg": XG_ROOT / "manual_xg.csv",
+    "api_football_xg": XG_ROOT / "api_football_xg.csv",
     "shots": XG_ROOT / "shots.csv",
     "events": XG_ROOT / "events.csv",
     "xthreat": XG_ROOT / "xthreat.csv",
@@ -81,18 +83,33 @@ def advanced_data_status() -> Dict[str, Any]:
 def prepare_advanced_data(payload: Dict[str, Any] | None = None, progress_callback=None) -> Dict[str, Any]:
     payload = payload or {}
     ADVANCED_ROOT.mkdir(parents=True, exist_ok=True)
-    _emit(progress_callback, "prepare", 0, 3, "Inspeccionando fuentes avanzadas")
+    XG_ROOT.mkdir(parents=True, exist_ok=True)
+    _emit(progress_callback, "prepare", 0, 5, "Inspeccionando fuentes avanzadas")
     rows = _normalized_match_feature_rows()
     warnings: List[str] = []
-    _emit(progress_callback, "prepare", 1, 3, "Normalizando xG/PSxG/xThreat locales")
+    _emit(progress_callback, "prepare", 1, 5, "Normalizando xG/PSxG/xThreat locales")
+    if bool(payload.get("use_api_football", False)):
+        api_rows, api_warnings = _api_football_match_feature_rows(
+            allow_download=bool(payload.get("allow_api_download", False)),
+            force_download=bool(payload.get("force_api_football", False)),
+        )
+        warnings.extend(api_warnings)
+        if api_rows:
+            _write_xg_cache(LOCAL_SOURCE_FILES["api_football_xg"], api_rows)
+            if not LOCAL_SOURCE_FILES["manual_xg"].exists():
+                _write_xg_cache(LOCAL_SOURCE_FILES["manual_xg"], api_rows)
+            rows.extend(api_rows)
+    _emit(progress_callback, "prepare", 2, 5, "API-Football xG revisado")
     if rows:
         _write_match_features(rows)
     else:
         warnings.append("No se encontraron filas locales para preparar match_features.csv.")
+    _emit(progress_callback, "prepare", 3, 5, "match_features.csv actualizado")
     if bool(payload.get("snapshot_statsbomb", False)):
         copied = _snapshot_statsbomb_cache()
         if copied:
             warnings.append(f"StatsBomb cache referenciado en {copied}.")
+    _emit(progress_callback, "prepare", 4, 5, "Fuentes opcionales revisadas")
     status = {
         "prepared_at": datetime.now(timezone.utc).isoformat(),
         "rows": len(rows),
@@ -100,22 +117,116 @@ def prepare_advanced_data(payload: Dict[str, Any] | None = None, progress_callba
     }
     STATUS_FILE.write_text(json.dumps(status, indent=2, sort_keys=True), encoding="utf-8")
     completion_message = "Preparado con filas" if rows else "Completado sin cache local"
-    _emit(progress_callback, "complete", 3, 3, completion_message)
+    _emit(progress_callback, "complete", 5, 5, completion_message)
     return advanced_data_status()
 
 
 def _normalized_match_feature_rows() -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    rows.extend(_manual_xg_rows(LOCAL_SOURCE_FILES["manual_xg"]))
+    rows.extend(_manual_xg_rows(LOCAL_SOURCE_FILES["manual_xg"], source="manual_xg"))
+    rows.extend(_manual_xg_rows(LOCAL_SOURCE_FILES["api_football_xg"], source="api_football_xg"))
     rows.extend(_generic_feature_rows(LOCAL_SOURCE_FILES["psxg"], "psxg"))
     rows.extend(_generic_feature_rows(LOCAL_SOURCE_FILES["xthreat"], "xthreat"))
     return rows
 
 
-def _manual_xg_rows(path: Path) -> List[Dict[str, Any]]:
+def _api_football_match_feature_rows(allow_download: bool, force_download: bool) -> tuple[List[Dict[str, Any]], List[str]]:
+    if allow_download and not api_football_key():
+        return [], ["API-Football no descargado: API_FOOTBALL_KEY no está definido en .env."]
+    try:
+        bundle = load_api_football_data(allow_download=allow_download, force_download=force_download)
+    except Exception as exc:
+        return [], [f"API-Football no pudo preparar xG avanzado ({exc.__class__.__name__}: {exc})."]
+    warnings = [str(item) for item in bundle.get("warnings", []) if str(item)]
+    team_stats = bundle.get("team_stats", pd.DataFrame())
+    if team_stats is None or team_stats.empty:
+        return [], warnings
+    rows = _api_football_team_stats_xg_rows(team_stats)
+    if not rows and any(str(column).lower() == "xg_for" for column in team_stats.columns):
+        warnings.append("API-Football cache no contiene pares home/away completos para xG avanzado.")
+    return rows, warnings
+
+
+def _api_football_team_stats_xg_rows(team_stats: pd.DataFrame) -> List[Dict[str, Any]]:
+    if team_stats is None or team_stats.empty or "FixtureId" not in team_stats.columns:
+        return []
+    required = {"Team", "Opponent", "Date"}
+    if not required.issubset(set(str(column) for column in team_stats.columns)):
+        return []
+    has_xg = "xg_for" in team_stats.columns
+    has_shots = any(str(column).endswith("_for") and "shot" in str(column).lower() for column in team_stats.columns)
+    if not has_xg and not has_shots:
+        return []
+    working = team_stats.copy()
+    working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
+    output: List[Dict[str, Any]] = []
+    for _, scoped in working.groupby(working["FixtureId"].astype(str), sort=True):
+        if scoped.empty:
+            continue
+        side = scoped["Side"] if "Side" in scoped.columns else pd.Series([""] * len(scoped), index=scoped.index)
+        home_rows = scoped[side.astype(str).str.lower().eq("home")]
+        if home_rows.empty:
+            home_rows = scoped.head(1)
+        home_row = home_rows.iloc[0]
+        away_name = _text(home_row, "Opponent")
+        away_rows = scoped[scoped["Team"].astype(str).eq(away_name)] if away_name else scoped.iloc[0:0]
+        away_row = away_rows.iloc[0] if not away_rows.empty else None
+        home_xg = _row_xg_or_shot_proxy(home_row, "for")
+        away_xg = _row_xg_or_shot_proxy(home_row, "against")
+        if away_row is not None:
+            away_xg = away_xg if away_xg is not None else _row_xg_or_shot_proxy(away_row, "for")
+        home = _text(home_row, "Team")
+        away = away_name or (_text(away_row, "Team") if away_row is not None else "")
+        if not home or not away or home_xg is None or away_xg is None:
+            continue
+        match_date = home_row.get("Date")
+        date_text = match_date.date().isoformat() if pd.notna(match_date) else ""
+        output.append({
+            "date": date_text,
+            "home_team": home,
+            "away_team": away,
+            "home_xg": home_xg,
+            "away_xg": away_xg,
+            "home_psxg": "",
+            "away_psxg": "",
+            "home_xthreat": "",
+            "away_xthreat": "",
+            "home_shots": _finite_number(home_row.get("total_shots_for"), default=""),
+            "away_shots": _finite_number(home_row.get("total_shots_against"), default=""),
+            "source": "api_football_xg" if has_xg else "api_football_shot_xg_proxy",
+            "cutoff": date_text,
+        })
+    return output
+
+
+def _row_xg_or_shot_proxy(row: Any, scope: str) -> float | None:
+    direct = _finite_number(row.get(f"xg_{scope}"))
+    if direct is not None:
+        return float(direct)
+    shots_on = _finite_number(row.get(f"shots_on_goal_{scope}"), default=0.0) or 0.0
+    shots_inside = _finite_number(row.get(f"shots_inside_box_{scope}"), default=0.0) or 0.0
+    shots_outside = _finite_number(row.get(f"shots_outside_box_{scope}"), default=0.0) or 0.0
+    blocked = _finite_number(row.get(f"blocked_shots_{scope}"), default=0.0) or 0.0
+    shots_off = _finite_number(row.get(f"shots_off_goal_{scope}"), default=0.0) or 0.0
+    total = _finite_number(row.get(f"total_shots_{scope}"), default=0.0) or 0.0
+    if max(shots_on, shots_inside, shots_outside, blocked, shots_off, total) <= 0:
+        return None
+    unknown = max(total - shots_on - shots_off - blocked, 0.0)
+    proxy = (
+        0.13 * shots_on
+        + 0.055 * max(shots_inside - shots_on, 0.0)
+        + 0.025 * shots_outside
+        + 0.018 * shots_off
+        + 0.012 * blocked
+        + 0.035 * unknown
+    )
+    return float(max(min(proxy, 5.5), 0.05))
+
+
+def _manual_xg_rows(path: Path, source: str = "manual_xg") -> List[Dict[str, Any]]:
     if not path.exists():
         return []
-    polars_rows = _manual_xg_rows_polars(path)
+    polars_rows = _manual_xg_rows_polars(path, source=source)
     if polars_rows is not None:
         return polars_rows
     try:
@@ -143,7 +254,7 @@ def _manual_xg_rows(path: Path) -> List[Dict[str, Any]]:
             "away_xthreat": _number(row, "away_xthreat", "xthreat_away", default=""),
             "home_shots": _number(row, "home_shots", "shots_home", default=""),
             "away_shots": _number(row, "away_shots", "shots_away", default=""),
-            "source": "manual_xg",
+            "source": source,
             "cutoff": date,
         })
     return output
@@ -207,7 +318,41 @@ def _write_match_features(rows: List[Dict[str, Any]]) -> None:
     frame.to_csv(MATCH_FEATURES_FILE, index=False)
 
 
-def _manual_xg_rows_polars(path: Path) -> List[Dict[str, Any]] | None:
+def _write_xg_cache(path: Path, rows: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cache_rows = [
+        {
+            "date": row.get("date", ""),
+            "home": row.get("home_team", ""),
+            "away": row.get("away_team", ""),
+            "home_xg": row.get("home_xg", ""),
+            "away_xg": row.get("away_xg", ""),
+            "home_shots": row.get("home_shots", ""),
+            "away_shots": row.get("away_shots", ""),
+            "source": row.get("source", "api_football_xg"),
+            "cutoff": row.get("cutoff", row.get("date", "")),
+        }
+        for row in rows
+    ]
+    pl = import_optional_accelerator("polars")
+    if pl is not None:
+        try:
+            (
+                pl.DataFrame(cache_rows)
+                .unique(subset=["date", "home", "away"], keep="last", maintain_order=True)
+                .sort(["date", "home", "away"])
+                .write_csv(path)
+            )
+            return
+        except Exception:
+            pass
+    frame = pd.DataFrame(cache_rows)
+    frame = frame.drop_duplicates(subset=["date", "home", "away"], keep="last")
+    frame = frame.sort_values(["date", "home", "away"], kind="stable")
+    frame.to_csv(path, index=False)
+
+
+def _manual_xg_rows_polars(path: Path, source: str = "manual_xg") -> List[Dict[str, Any]] | None:
     pl = import_optional_accelerator("polars")
     if pl is None:
         return None
@@ -233,7 +378,7 @@ def _manual_xg_rows_polars(path: Path) -> List[Dict[str, Any]] | None:
             pl.col("home_xg").is_not_null(),
             pl.col("away_xg").is_not_null(),
         ).with_columns(
-            source=pl.lit("manual_xg"),
+            source=pl.lit(source),
             cutoff=pl.col("date"),
         )
         return output.to_dicts()
@@ -426,6 +571,14 @@ def _number(row: Any, *keys: str, default: Any = None) -> float | str | None:
         except (TypeError, ValueError):
             continue
     return default
+
+
+def _finite_number(value: Any, default: Any = None) -> float | str | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    return numeric if pd.notna(numeric) else default
 
 
 def _read_json(path: Path) -> Dict[str, Any]:

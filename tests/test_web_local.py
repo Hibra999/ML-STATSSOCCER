@@ -124,8 +124,11 @@ def test_mundial_static_ui_exposes_advanced_models_and_accessibility_hooks():
     assert '<section id="modelos"' not in source
     assert '<section id="xg-lightgbm"' not in source
     assert '<section id="datos"' not in source
-    assert 'value="advanced_models"' in source
-    assert 'value="xg_lightgbm"' in source
+    assert 'value="model_checklist"' in source
+    assert 'id="upcoming-model-checklist"' in source
+    assert 'name="upcoming_score_model"' not in source
+    assert "DEFAULT_STAT_MODEL_KEYS" in script
+    assert "selected_score_models" in script
     assert "Goles esperados (xG) + LightGBM" in source
     assert "xG = goles esperados" in source
     assert 'id="advanced-prepare-data"' not in source
@@ -342,6 +345,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson" not in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-pipeline-mode" in html_source
+    assert "upcoming-model-checklist" in html_source
+    assert "Modelos estadísticos" in html_source
     assert "Goles esperados (xG) + LightGBM" in html_source
     assert "Benchmark alternativas" in html_source
     assert "upcoming-sota-calculation-mode" in html_source

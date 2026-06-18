@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from src.worldcup.accelerators import cupy_runtime_status
 from src.worldcup.model import (
     TOTAL_GOAL_LINES,
     dixon_coles_score_grid,
@@ -1618,10 +1619,11 @@ def _fit_dynamic_strength_state(
             "defense": defense_values.astype(float).tolist(),
             "gain": base_gain,
             "fit_backend": "recursive_kalman_style_filter",
+            "fit_note": "Fuerza dinamica usa filtro recursivo ligero; Bayes/PyMC queda como perfil profundo.",
             "predictive_overdispersion": predictive_overdispersion,
             "n_matches": len(rows),
         },
-        warnings=("Fuerza dinamica usa filtro recursivo ligero; Bayes/PyMC queda como perfil profundo.",),
+        warnings=(),
         fingerprint=fingerprint,
     )
 
@@ -2292,27 +2294,13 @@ def _cupy_backend_status() -> Dict[str, Any]:
     global _CUPY_BACKEND_STATUS
     if _CUPY_BACKEND_STATUS is not None:
         return dict(_CUPY_BACKEND_STATUS)
-    try:
-        cp = _import_cupy()
-        device_count = int(cp.cuda.runtime.getDeviceCount())
-        if device_count <= 0:
-            _CUPY_BACKEND_STATUS = {"available": False, "warning": "CuPy sin dispositivos CUDA", "device_names": []}
-            return dict(_CUPY_BACKEND_STATUS)
-        device_names: List[str] = []
-        for index in range(device_count):
-            try:
-                props = cp.cuda.runtime.getDeviceProperties(index)
-                raw_name = props.get("name", "") if isinstance(props, dict) else ""
-                if isinstance(raw_name, bytes):
-                    raw_name = raw_name.decode("utf-8", errors="ignore")
-                device_names.append(str(raw_name or f"CUDA device {index}").strip())
-            except Exception:
-                device_names.append(f"CUDA device {index}")
-        _CUPY_BACKEND_STATUS = {"available": True, "warning": "", "device_names": device_names}
-        return dict(_CUPY_BACKEND_STATUS)
-    except Exception as exc:
-        _CUPY_BACKEND_STATUS = {"available": False, "warning": f"CuPy no disponible: {exc.__class__.__name__}: {exc}", "device_names": []}
-        return dict(_CUPY_BACKEND_STATUS)
+    status = cupy_runtime_status()
+    _CUPY_BACKEND_STATUS = {
+        "available": bool(status.get("cuda_available")),
+        "warning": str(status.get("warning") or ""),
+        "device_names": list(status.get("device_names") or []),
+    }
+    return dict(_CUPY_BACKEND_STATUS)
 
 
 def _import_cupy() -> Any:

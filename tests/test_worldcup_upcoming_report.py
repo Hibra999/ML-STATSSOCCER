@@ -103,6 +103,8 @@ def test_sota_and_alternative_sequences_are_statistical_score_models():
     assert removed.isdisjoint(services.BENCHMARK_SCORE_MODEL_SEQUENCE)
     assert services.XG_LIGHTGBM_PIPELINE_MODE not in services.SOTA_SCORE_MODEL_SEQUENCE
     assert services.XG_LIGHTGBM_PIPELINE_MODE not in services.BENCHMARK_SCORE_MODEL_SEQUENCE
+    assert services.XG_LIGHTGBM_PIPELINE_MODE not in services.STATISTICAL_MODEL_CHECKLIST_SEQUENCE
+    assert disabled <= set(services.STATISTICAL_MODEL_CHECKLIST_SEQUENCE)
 
 
 def test_alternatives_benchmark_aliases_and_statistical_registry():
@@ -117,7 +119,8 @@ def test_alternatives_benchmark_aliases_and_statistical_registry():
     assert services.normalize_report_pipeline_mode("modelos_avanzados") == "advanced_models"
     assert services.normalize_report_pipeline_mode("todo documento") == "advanced_models"
     assert services.normalize_report_pipeline_mode("poisson_sota") == "poisson_sota"
-    assert services.normalize_report_pipeline_mode("modo_desconocido") == "poisson_sota"
+    assert services.normalize_report_pipeline_mode("modo_desconocido") == "model_checklist"
+    assert services.normalize_report_pipeline_mode("comparacion estadistica") == "model_checklist"
     assert services.SOTA_SCORE_MODEL_SEQUENCE == [
         "independent_poisson",
         "statsmodels_poisson_glm",
@@ -131,6 +134,31 @@ def test_alternatives_benchmark_aliases_and_statistical_registry():
     registry_text = json.dumps(alternatives).lower()
     assert not any(term in registry_text for term in forbidden)
     assert all(item["model_name"] and item["description"] for item in alternatives)
+
+
+def test_model_checklist_config_filters_lightgbm_and_uses_selected_models():
+    from src.web import mundial_services as services
+
+    config = services.report_pipeline_config(
+        {
+            "selected_score_models": [
+                "independent_poisson",
+                "xg_lightgbm",
+                "negative_binomial_dixon_coles",
+                "bayesian_dynamic_poisson",
+            ],
+        },
+        services.MODEL_CHECKLIST_PIPELINE_MODE,
+    )
+
+    assert config["pipeline_mode"] == services.MODEL_CHECKLIST_PIPELINE_MODE
+    assert config["selected_score_models"] == [
+        "independent_poisson",
+        "negative_binomial_dixon_coles",
+        "bayesian_dynamic_poisson",
+    ]
+    assert config["sota_calculation_mode"] == "exact"
+    assert services.selected_models_require_advanced_sources(config["selected_score_models"]) is True
 
 
 def test_advanced_models_pipeline_registry_and_config():
@@ -275,6 +303,8 @@ def test_advanced_source_preflight_prepares_data_and_uses_downloadable_sources(m
     assert calls[0][1]["allow_download"] is True
     assert calls[1][1]["allow_download"] is True
     assert calls[2][1]["force"] is True
+    assert calls[2][1]["use_api_football"] is True
+    assert calls[2][1]["allow_api_download"] is True
     assert config["_advanced_data_status"]["prepared_rows"] == 4
     assert preflight["sources"]["advanced_data"]["status"] == "prepared"
     assert preflight["sources"]["football_data"]["sources"][0] == "storage/worldcup/market/WorldCup2026.xlsx"
