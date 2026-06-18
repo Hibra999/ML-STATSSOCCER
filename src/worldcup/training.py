@@ -28,6 +28,7 @@ from sklearn.preprocessing import StandardScaler
 
 from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_names
 from src.models.classifiers.boosting import catboost_device_params, lightgbm_device_params, xgboost_cuda_params
+from src.worldcup.accelerators import acceleration_status, import_optional_accelerator
 from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
 from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, group_letter, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
 from src.worldcup.international_provider import (
@@ -601,6 +602,7 @@ def detect_hardware() -> Dict[str, Any]:
         "cuda_error": cuda_error,
         "cuda_warning": cuda_warning,
         "device_default": "cuda" if cuda_available else "cpu",
+        "accelerators": acceleration_status(),
     }
 
 
@@ -721,9 +723,42 @@ def _coerce_feature_matrix(
     columns = list(feature_columns or x.columns)
     if x.empty:
         return pd.DataFrame(columns=columns, dtype=dtype)
+    accelerated = _coerce_feature_matrix_polars(x, columns=columns, dtype=dtype, fill_value=fill_value)
+    if accelerated is not None:
+        return accelerated
     aligned = x.reindex(columns=columns)
     output = aligned.apply(pd.to_numeric, errors="coerce").fillna(fill_value)
     return output.astype(dtype, copy=False)
+
+
+def _coerce_feature_matrix_polars(
+        x: pd.DataFrame,
+        columns: List[str],
+        dtype: Any,
+        fill_value: float,
+) -> pd.DataFrame | None:
+    pl = import_optional_accelerator("polars")
+    if pl is None:
+        return None
+    try:
+        np_dtype = np.dtype(dtype)
+        pl_dtype = pl.Float32 if np_dtype == np.dtype(np.float32) else pl.Float64
+        aligned = x.reindex(columns=columns)
+        frame = pl.from_pandas(aligned)
+        output = frame.select([
+            pl.col(column)
+            .cast(pl_dtype, strict=False)
+            .fill_null(float(fill_value))
+            .fill_nan(float(fill_value))
+            .alias(column)
+            for column in columns
+        ])
+        result = pd.DataFrame(output.to_dict(as_series=False), columns=columns)
+        if len(result.index) == len(x.index):
+            result.index = x.index
+        return result.astype(dtype, copy=False)
+    except Exception:
+        return None
 
 
 def _coerce_matrix_for_training(x: Any, model_key: str, device: str) -> Any:
@@ -3412,10 +3447,38 @@ def merge_team_features(frames: List[pd.DataFrame]) -> pd.DataFrame:
     numeric_cols = [column for column in df.columns if column not in {"Team", "Source"} and pd.api.types.is_numeric_dtype(df[column])]
     if not numeric_cols:
         return pd.DataFrame(columns=["Team"])
+    accelerated = _merge_team_features_polars(df, numeric_cols)
+    if accelerated is not None:
+        return accelerated
     if "version" in numeric_cols:
         latest = df.sort_values(["Team", "version"], kind="stable").groupby("Team", as_index=False).tail(1)
         return latest[["Team"] + numeric_cols].reset_index(drop=True)
     return df.groupby("Team", as_index=False)[numeric_cols].mean(numeric_only=True)
+
+
+def _merge_team_features_polars(df: pd.DataFrame, numeric_cols: List[str]) -> pd.DataFrame | None:
+    pl = import_optional_accelerator("polars")
+    if pl is None:
+        return None
+    try:
+        frame = pl.from_pandas(df[["Team", *numeric_cols]])
+        if "version" in numeric_cols:
+            output = (
+                frame
+                .sort(["Team", "version"])
+                .unique(subset=["Team"], keep="last", maintain_order=True)
+                .select(["Team", *numeric_cols])
+            )
+        else:
+            output = (
+                frame
+                .group_by("Team")
+                .agg([pl.col(column).mean().alias(column) for column in numeric_cols])
+                .sort("Team")
+            )
+        return pd.DataFrame(output.to_dict(as_series=False), columns=["Team", *numeric_cols])
+    except Exception:
+        return None
 
 
 def build_team_training_matrix(

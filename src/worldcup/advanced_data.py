@@ -9,6 +9,8 @@ from typing import Any, Dict, Iterable, List
 
 import pandas as pd
 
+from src.worldcup.accelerators import acceleration_status, import_optional_accelerator
+
 
 ADVANCED_ROOT = Path("storage") / "worldcup" / "advanced"
 XG_ROOT = Path("storage") / "worldcup" / "xg"
@@ -69,6 +71,7 @@ def advanced_data_status() -> Dict[str, Any]:
         "socceraction_available": socceraction_available,
         "families": families,
         "active_feature_families": [item["key"] for item in families if item["status"] in {"active", "cached"}],
+        "accelerators": acceleration_status(),
         "warnings": _unique([*warnings, *[str(item) for item in metadata.get("warnings", []) if str(item)]]),
         "last_prepared_at": metadata.get("prepared_at", ""),
         "anti_leakage": "Features avanzadas se preparan cache-first y deben usarse con corte temporal anterior al fixture.",
@@ -83,10 +86,7 @@ def prepare_advanced_data(payload: Dict[str, Any] | None = None, progress_callba
     warnings: List[str] = []
     _emit(progress_callback, "prepare", 1, 3, "Normalizando xG/PSxG/xThreat locales")
     if rows:
-        frame = pd.DataFrame(rows)
-        frame = frame.drop_duplicates(subset=["date", "home_team", "away_team", "source"], keep="last")
-        frame = frame.sort_values(["date", "home_team", "away_team"], kind="stable")
-        frame.to_csv(MATCH_FEATURES_FILE, index=False)
+        _write_match_features(rows)
     else:
         warnings.append("No se encontraron filas locales para preparar match_features.csv.")
     if bool(payload.get("snapshot_statsbomb", False)):
@@ -115,6 +115,9 @@ def _normalized_match_feature_rows() -> List[Dict[str, Any]]:
 def _manual_xg_rows(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
+    polars_rows = _manual_xg_rows_polars(path)
+    if polars_rows is not None:
+        return polars_rows
     try:
         frame = pd.read_csv(path)
     except Exception:
@@ -149,6 +152,9 @@ def _manual_xg_rows(path: Path) -> List[Dict[str, Any]]:
 def _generic_feature_rows(path: Path, family: str) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
+    polars_rows = _generic_feature_rows_polars(path, family)
+    if polars_rows is not None:
+        return polars_rows
     try:
         frame = pd.read_csv(path)
     except Exception:
@@ -182,6 +188,136 @@ def _generic_feature_rows(path: Path, family: str) -> List[Dict[str, Any]]:
     return output
 
 
+def _write_match_features(rows: List[Dict[str, Any]]) -> None:
+    pl = import_optional_accelerator("polars")
+    if pl is not None:
+        try:
+            (
+                pl.DataFrame(rows)
+                .unique(subset=["date", "home_team", "away_team", "source"], keep="last", maintain_order=True)
+                .sort(["date", "home_team", "away_team"])
+                .write_csv(MATCH_FEATURES_FILE)
+            )
+            return
+        except Exception:
+            pass
+    frame = pd.DataFrame(rows)
+    frame = frame.drop_duplicates(subset=["date", "home_team", "away_team", "source"], keep="last")
+    frame = frame.sort_values(["date", "home_team", "away_team"], kind="stable")
+    frame.to_csv(MATCH_FEATURES_FILE, index=False)
+
+
+def _manual_xg_rows_polars(path: Path) -> List[Dict[str, Any]] | None:
+    pl = import_optional_accelerator("polars")
+    if pl is None:
+        return None
+    try:
+        frame = pl.read_csv(path, ignore_errors=True)
+        if frame.is_empty():
+            return []
+        output = frame.select(
+            _pl_text_expr(pl, frame, ("home", "Home", "Equipo 1", "home_team"), "home_team"),
+            _pl_text_expr(pl, frame, ("away", "Away", "Equipo 2", "away_team"), "away_team"),
+            _pl_text_expr(pl, frame, ("date", "Date", "Fecha"), "date"),
+            _pl_number_expr(pl, frame, ("home_xg", "xg_home", "xG Local", "home_expected_goals"), "home_xg"),
+            _pl_number_expr(pl, frame, ("away_xg", "xg_away", "xG Visita", "away_expected_goals"), "away_xg"),
+            _pl_number_expr(pl, frame, ("home_psxg", "psxg_home"), "home_psxg"),
+            _pl_number_expr(pl, frame, ("away_psxg", "psxg_away"), "away_psxg"),
+            _pl_number_expr(pl, frame, ("home_xthreat", "xthreat_home"), "home_xthreat"),
+            _pl_number_expr(pl, frame, ("away_xthreat", "xthreat_away"), "away_xthreat"),
+            _pl_number_expr(pl, frame, ("home_shots", "shots_home"), "home_shots"),
+            _pl_number_expr(pl, frame, ("away_shots", "shots_away"), "away_shots"),
+        ).filter(
+            pl.col("home_team").str.len_chars() > 0,
+            pl.col("away_team").str.len_chars() > 0,
+            pl.col("home_xg").is_not_null(),
+            pl.col("away_xg").is_not_null(),
+        ).with_columns(
+            source=pl.lit("manual_xg"),
+            cutoff=pl.col("date"),
+        )
+        return output.to_dicts()
+    except Exception:
+        return None
+
+
+def _generic_feature_rows_polars(path: Path, family: str) -> List[Dict[str, Any]] | None:
+    pl = import_optional_accelerator("polars")
+    if pl is None:
+        return None
+    home_key = f"home_{family}"
+    away_key = f"away_{family}"
+    try:
+        frame = pl.read_csv(path, ignore_errors=True)
+        if frame.is_empty():
+            return []
+        output = frame.select(
+            _pl_text_expr(pl, frame, ("home", "Home", "Equipo 1", "home_team"), "home_team"),
+            _pl_text_expr(pl, frame, ("away", "Away", "Equipo 2", "away_team"), "away_team"),
+            _pl_text_expr(pl, frame, ("date", "Date", "Fecha"), "date"),
+            _pl_number_expr(pl, frame, (home_key, f"{family}_home", f"{family} Local"), "home_value"),
+            _pl_number_expr(pl, frame, (away_key, f"{family}_away", f"{family} Visita"), "away_value"),
+        ).filter(
+            pl.col("home_team").str.len_chars() > 0,
+            pl.col("away_team").str.len_chars() > 0,
+            pl.col("home_value").is_not_null(),
+            pl.col("away_value").is_not_null(),
+        ).with_columns(
+            home_xg=pl.lit(None),
+            away_xg=pl.lit(None),
+            home_psxg=pl.when(pl.lit(family) == "psxg").then(pl.col("home_value")).otherwise(pl.lit(None)),
+            away_psxg=pl.when(pl.lit(family) == "psxg").then(pl.col("away_value")).otherwise(pl.lit(None)),
+            home_xthreat=pl.when(pl.lit(family) == "xthreat").then(pl.col("home_value")).otherwise(pl.lit(None)),
+            away_xthreat=pl.when(pl.lit(family) == "xthreat").then(pl.col("away_value")).otherwise(pl.lit(None)),
+            home_shots=pl.lit(None),
+            away_shots=pl.lit(None),
+            source=pl.lit(family),
+            cutoff=pl.col("date"),
+        ).select(
+            "date",
+            "home_team",
+            "away_team",
+            "home_xg",
+            "away_xg",
+            "home_psxg",
+            "away_psxg",
+            "home_xthreat",
+            "away_xthreat",
+            "home_shots",
+            "away_shots",
+            "source",
+            "cutoff",
+        )
+        return output.to_dicts()
+    except Exception:
+        return None
+
+
+def _pl_first_existing_column(frame: Any, keys: Iterable[str]) -> str:
+    columns = {str(column): str(column) for column in frame.columns}
+    lower_lookup = {str(column).lower(): str(column) for column in frame.columns}
+    for key in keys:
+        if str(key) in columns:
+            return columns[str(key)]
+        if str(key).lower() in lower_lookup:
+            return lower_lookup[str(key).lower()]
+    return ""
+
+
+def _pl_text_expr(pl: Any, frame: Any, keys: Iterable[str], alias: str):
+    column = _pl_first_existing_column(frame, keys)
+    if not column:
+        return pl.lit("").alias(alias)
+    return pl.col(column).cast(pl.String, strict=False).fill_null("").str.strip_chars().alias(alias)
+
+
+def _pl_number_expr(pl: Any, frame: Any, keys: Iterable[str], alias: str):
+    column = _pl_first_existing_column(frame, keys)
+    if not column:
+        return pl.lit(None).cast(pl.Float64).alias(alias)
+    return pl.col(column).cast(pl.Float64, strict=False).alias(alias)
+
+
 def _file_status(path: Path) -> Dict[str, Any]:
     exists = path.exists()
     stat = path.stat() if exists else None
@@ -195,6 +331,12 @@ def _file_status(path: Path) -> Dict[str, Any]:
 
 
 def _csv_row_count(path: Path) -> int:
+    pl = import_optional_accelerator("polars")
+    if pl is not None:
+        try:
+            return int(pl.scan_csv(path).select(pl.len()).collect().item())
+        except Exception:
+            pass
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.reader(handle)

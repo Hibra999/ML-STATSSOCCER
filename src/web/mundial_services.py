@@ -31,6 +31,7 @@ from src.worldcup import (
     teams_dataframe,
     tournament_fixtures_dataframe,
 )
+from src.worldcup.accelerators import acceleration_status, import_optional_accelerator
 from src.worldcup.model import TOTAL_GOAL_LINES, poisson_score_grid, total_line_suffix
 from src.worldcup.score_models import (
     DEFAULT_SCORE_MODEL,
@@ -1208,7 +1209,7 @@ def fixture_player_stats(fixture_id: str, refresh: bool = False) -> Dict[str, An
     payload = player_stats_payload_for_fixture(tournament=tournament, fixture_id=fixture_id, refresh=bool(refresh))
     return {
         "stats": enrich_lineup_payload(payload),
-        "features": table_payload(pd.DataFrame(payload.get("features", [])), page=1, page_size=10),
+        "features": table_payload_from_records(payload.get("features", []), page=1, page_size=10),
         "players": table_payload(lineups_table(payload), page=1, page_size=40),
     }
 
@@ -1301,7 +1302,7 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         rows.append(upcoming_prediction_row(result))
     return {
         "predictions": predictions,
-        "table": table_payload(pd.DataFrame(rows), page=1, page_size=limit),
+        "table": table_payload_from_records(rows, page=1, page_size=limit),
         "summary": {
             "requested": limit,
             "returned": len(predictions),
@@ -1343,7 +1344,7 @@ def predict_upcoming_monte_carlo(payload: Dict[str, Any] | None = None) -> Dict[
         rows.append(monte_carlo_match_row(result))
     return {
         "predictions": predictions,
-        "table": table_payload(pd.DataFrame(rows), page=1, page_size=limit),
+        "table": table_payload_from_records(rows, page=1, page_size=limit),
         "summary": {
             "method": "Monte Carlo Poisson por partido",
             "requested": limit,
@@ -1767,7 +1768,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
                 *report["warnings"],
                 *[str(item) for item in (report.get("monte_carlo_consensus") or {}).get("warnings", []) if str(item)],
             ])
-    table = table_payload(pd.DataFrame(upcoming_report_table_rows(fixture_reports)), page=1, page_size=max(limit * 12, 1))
+    table = table_payload_from_records(upcoming_report_table_rows(fixture_reports), page=1, page_size=max(limit * 12, 1))
     backtest = alternatives_backtest_report(
         history_df=feature_history_df,
         tournament=tournament,
@@ -1903,7 +1904,7 @@ def xg_lightgbm_report(
         )
         fixture_reports.append(xg_lightgbm_fixture_report(prediction))
     table_rows = xg_lightgbm_report_table_rows(fixture_reports)
-    table = table_payload(pd.DataFrame(table_rows), page=1, page_size=max(len(table_rows), 1))
+    table = table_payload_from_records(table_rows, page=1, page_size=max(len(table_rows), 1))
     xg_backtest = xg_lightgbm_backtest_report(
         history_df=history_df,
         tournament=tournament,
@@ -2099,7 +2100,7 @@ def advanced_models_report(
         fixture_report["warnings"] = fixture_report_warnings(fixture_report)
     ranked_models = advanced_models_with_backtests(backtests, data_status)
     table_rows = alternatives_benchmark_table_rows(fixture_reports, backtest_by_key)
-    table = table_payload(pd.DataFrame(table_rows), page=1, page_size=max(len(table_rows), 1))
+    table = table_payload_from_records(table_rows, page=1, page_size=max(len(table_rows), 1))
     backtest_summary = backtest.get("summary", {})
     generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
     backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
@@ -2723,7 +2724,7 @@ def alternatives_benchmark_report(
     ranked_models = benchmark_models_with_backtests(backtests)
     alternatives = alternatives_with_backtests(sota_alternatives_catalog(), backtest_by_key)
     table_rows = alternatives_benchmark_table_rows(fixture_reports, backtest_by_key)
-    table = table_payload(pd.DataFrame(table_rows), page=1, page_size=max(len(table_rows), 1))
+    table = table_payload_from_records(table_rows, page=1, page_size=max(len(table_rows), 1))
     raw_warnings = unique_strings([
         *hardware.get("warnings", []),
         *results_refresh.get("warnings", []),
@@ -5242,6 +5243,7 @@ def detect_hardware() -> Dict[str, Any]:
         "cuda_error": cuda_error,
         "cuda_warning": warning,
         "device_default": "cuda" if cuda_available else "cpu",
+        "accelerators": acceleration_status(),
     }
 
 
@@ -7563,9 +7565,21 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def table_payload(df: pd.DataFrame, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+def table_payload_from_records(rows: List[Dict[str, Any]], page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+    pl = import_optional_accelerator("polars")
+    if pl is not None:
+        try:
+            return table_payload(pl.DataFrame(rows), page=page, page_size=page_size)
+        except Exception:
+            pass
+    return table_payload(pd.DataFrame(rows), page=page, page_size=page_size)
+
+
+def table_payload(df: Any, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
     page = max(int(page or 1), 1)
     page_size = min(max(int(page_size or 50), 1), 500)
+    if _is_polars_dataframe(df):
+        return polars_table_payload(df, page=page, page_size=page_size)
     total = int(df.shape[0])
     start = (page - 1) * page_size
     page_df = df.iloc[start:start + page_size].copy()
@@ -7573,6 +7587,28 @@ def table_payload(df: pd.DataFrame, page: int = 1, page_size: int = 50) -> Dict[
     return {
         "columns": [str(column) for column in page_df.columns],
         "rows": jsonable(page_df.to_dict(orient="records")),
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": int(math.ceil(total / page_size)) if page_size else 0,
+    }
+
+
+def _is_polars_dataframe(value: Any) -> bool:
+    return value.__class__.__module__.split(".", 1)[0] == "polars" and value.__class__.__name__ == "DataFrame"
+
+
+def polars_table_payload(df: Any, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+    total = int(df.height)
+    start = (page - 1) * page_size
+    page_df = df.slice(start, page_size)
+    rows = [
+        {str(key): ("" if value is None else value) for key, value in row.items()}
+        for row in page_df.to_dicts()
+    ]
+    return {
+        "columns": [str(column) for column in page_df.columns],
+        "rows": jsonable(rows),
         "page": page,
         "page_size": page_size,
         "total": total,
@@ -7590,6 +7626,8 @@ def metrics_dataframe(metrics: Dict[str, Any]) -> pd.DataFrame:
 
 
 def jsonable(value: Any) -> Any:
+    if _is_polars_dataframe(value):
+        return table_payload(value)
     if isinstance(value, pd.DataFrame):
         return table_payload(value)
     if isinstance(value, pd.Series):
