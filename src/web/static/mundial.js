@@ -14,6 +14,7 @@ const state = {
   lastSimulation: null,
   lastUpcomingReport: null,
   xgLightgbm: null,
+  advancedData: null,
 };
 
 const jobLabels = {
@@ -65,6 +66,9 @@ function bindEvents() {
   bind("xg-refresh-status", "click", () => loadXgLightgbmStatus(true));
   bind("xg-prepare-etl", "click", runXgLightgbmPrepare);
   bind("xg-train", "click", runXgLightgbmTraining);
+  bind("advanced-refresh-status", "click", () => loadAdvancedDataStatus(true));
+  bind("advanced-prepare-data", "click", runAdvancedDataPrepare);
+  bind("advanced-open-predictions", "click", openAdvancedPredictions);
   poissonRecentInputIds.forEach((id) => {
     const input = document.getElementById(id);
     if (input) input.addEventListener("change", () => syncPoissonRecentInputs(input));
@@ -115,7 +119,7 @@ async function loadAll(refresh) {
   clearAlert();
   setLoading();
   try {
-    const [overview, groups, fixtures, teams, players, procedure, xgStatus] = await Promise.all([
+    const [overview, groups, fixtures, teams, players, procedure, xgStatus, advancedStatus] = await Promise.all([
       api(`/api/mundial/overview?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/groups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/fixtures?refresh=${refresh ? "true" : "false"}`),
@@ -123,6 +127,7 @@ async function loadAll(refresh) {
       api(`/api/mundial/players?refresh=${refresh ? "true" : "false"}`),
       api("/api/mundial/procedure"),
       api("/api/mundial/xg-lightgbm/training/status"),
+      api("/api/mundial/advanced-data/status"),
     ]);
     state.overview = overview;
     state.groups = groups.groups || [];
@@ -143,6 +148,7 @@ async function loadAll(refresh) {
     renderPlayers(players);
     renderProcedure(procedure);
     renderXgLightgbmTrainingStatus(xgStatus);
+    renderAdvancedDataStatus(advancedStatus || overview.advanced_data || {});
   } catch (error) {
     showError(error.message);
   }
@@ -161,6 +167,11 @@ function setLoading() {
   const xgStatus = document.getElementById("xg-status-cards");
   if (xgStatus) xgStatus.innerHTML = loadingHtml("Cargando entrenamiento xG-LightGBM");
   renderWorldcupJobProgress("xg-training");
+  const advancedSummary = document.getElementById("advanced-status-summary");
+  if (advancedSummary) advancedSummary.textContent = "Cargando modelos avanzados";
+  const advancedCards = document.getElementById("advanced-status-cards");
+  if (advancedCards) advancedCards.innerHTML = loadingHtml("Cargando datos avanzados");
+  renderWorldcupJobProgress("advanced-prepare");
   document.getElementById("match-simulation-grid").innerHTML = loadingHtml("Monte Carlo pendiente");
   document.getElementById("match-simulation-table").innerHTML = "";
   document.getElementById("simulation-summary").innerHTML = "";
@@ -213,12 +224,28 @@ function renderOverview(overview) {
     : `<article class="hero-featured-card empty"><strong>Sin próximos partidos</strong><small>Todos los partidos cargados ya iniciaron o finalizaron.</small></article>`;
   renderHeroCountdown(overview.countdown_target, overview.countdown_state, highlight);
   renderHeroHardware(overview.hardware || {});
+  renderTopbarStatus(overview);
   document.getElementById("overview-next-source").textContent = overview.fixture_source || "";
   document.getElementById("overview-standings-source").textContent = overview.result_source || "fixture-cache";
   document.getElementById("hero-next-grid").innerHTML = (overview.next_matches || []).map((fixture) => heroNextCardHtml(fixture)).join("")
     || `<article class="hero-next-card empty"><strong>Sin más partidos cargados</strong><small>El calendario adicional aparecerá aquí.</small></article>`;
   renderOverviewStandings(overview.group_standings || [], overview);
   renderQuickSimulationPanel(state.lastSimulation);
+}
+
+function renderTopbarStatus(overview) {
+  const data = overview.advanced_data || state.advancedData || {};
+  const dataNode = document.getElementById("topbar-data-status");
+  const modelNode = document.getElementById("topbar-model-status");
+  if (dataNode) {
+    const prepared = Number(data.prepared_rows || 0);
+    const sources = (data.active_sources || []).length;
+    dataNode.textContent = prepared ? `Datos: ${prepared} advanced` : `Datos: ${sources} fuentes`;
+  }
+  if (modelNode) {
+    const catalog = overview.advanced_model_catalog || data.models || [];
+    modelNode.textContent = `Modelos: ${catalog.length || 5} avanzados`;
+  }
 }
 
 function matchTeamHtml(asset, side) {
@@ -528,10 +555,13 @@ async function runUpcomingPredictions() {
   const pipelineMode = syncUpcomingPipelineControls();
   const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
   const benchmarkTuningEnabled = pipelineMode === "alternatives_benchmark" && Boolean((document.getElementById("upcoming-benchmark-tuning-enabled") || {}).checked);
+  const advancedIncludeBayesian = pipelineMode === "advanced_models" && Boolean((document.getElementById("upcoming-advanced-include-bayesian") || {}).checked);
   const calculationLabel = pipelineMode === "alternatives_benchmark"
     ? `Benchmark alternativas${benchmarkTuningEnabled ? " + Optuna" : ""}`
     : pipelineMode === "xg_lightgbm"
     ? "xG-LightGBM"
+    : pipelineMode === "advanced_models"
+    ? `Modelos avanzados${advancedIncludeBayesian ? " + Bayes" : ""}`
     : sotaCalculationMode === "monte_carlo"
     ? `SOTA Monte Carlo consenso N=${formatInteger(currentMonteCarloSimulations())}`
     : "Consenso exacto";
@@ -550,6 +580,7 @@ async function runUpcomingPredictions() {
       benchmark_tuning_enabled: benchmarkTuningEnabled,
       benchmark_tuning_trials: Number((document.getElementById("upcoming-benchmark-tuning-trials") || {}).value || 20),
       benchmark_tuning_sampler: (document.getElementById("upcoming-benchmark-tuning-sampler") || {}).value || "tpe",
+      advanced_include_bayesian: advancedIncludeBayesian,
     }));
     trackWorldcupJob(job, "upcoming-report");
   } catch (error) {
@@ -563,12 +594,17 @@ function syncUpcomingPipelineControls() {
   const mode = (select && select.value) || "poisson_sota";
   const isBenchmark = mode === "alternatives_benchmark";
   const isXgLightgbm = mode === "xg_lightgbm";
+  const isAdvanced = mode === "advanced_models";
   const calculation = document.getElementById("upcoming-sota-calculation-mode");
-  if (calculation) calculation.disabled = isBenchmark || isXgLightgbm;
+  if (calculation) calculation.disabled = isBenchmark || isXgLightgbm || isAdvanced;
   const sotaControls = document.getElementById("upcoming-sota-controls");
   if (sotaControls) sotaControls.classList.toggle("hidden", isBenchmark || isXgLightgbm);
   const benchmarkControls = document.getElementById("upcoming-benchmark-controls");
   if (benchmarkControls) benchmarkControls.classList.toggle("hidden", !isBenchmark);
+  const bayesToggle = document.querySelector(".advanced-bayes-toggle");
+  if (bayesToggle) bayesToggle.classList.toggle("hidden", !isAdvanced);
+  const bayesProfile = document.getElementById("upcoming-bayes-profile");
+  if (bayesProfile && isAdvanced && !bayesProfile.value) bayesProfile.value = "light";
   return mode;
 }
 
@@ -577,6 +613,10 @@ function renderUpcomingReport(report) {
   const summary = report.summary || {};
   if (summary.pipeline_mode === "alternatives_benchmark") {
     renderAlternativesBenchmarkReport(report);
+    return;
+  }
+  if (summary.pipeline_mode === "advanced_models") {
+    renderAdvancedModelsReport(report);
     return;
   }
   if (summary.pipeline_mode === "xg_lightgbm") {
@@ -1053,6 +1093,205 @@ function xgFeatureImportanceHtml(model) {
   }).join("");
 }
 
+async function loadAdvancedDataStatus(manual = false) {
+  clearAlert();
+  if (manual) document.getElementById("advanced-status-summary").textContent = "Actualizando datos avanzados...";
+  try {
+    const status = await api("/api/mundial/advanced-data/status");
+    renderAdvancedDataStatus(status);
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function runAdvancedDataPrepare() {
+  clearAlert();
+  document.getElementById("advanced-status-summary").textContent = "Preparando datos avanzados...";
+  try {
+    const job = await api("/api/mundial/advanced-data/prepare", jsonOptions({
+      force: true,
+      snapshot_statsbomb: false,
+    }));
+    trackWorldcupJob(job, "advanced-prepare");
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+function openAdvancedPredictions() {
+  const select = document.getElementById("upcoming-pipeline-mode");
+  if (select) select.value = "advanced_models";
+  syncUpcomingPipelineControls();
+  switchWorldcupView("predicciones", true);
+}
+
+function renderAdvancedDataStatus(payload) {
+  state.advancedData = payload || {};
+  const status = state.advancedData;
+  const models = status.models || [];
+  const families = status.families || [];
+  const activeSources = status.active_sources || [];
+  const warnings = status.warnings || [];
+  const preparedRows = Number(status.prepared_rows || 0);
+  document.getElementById("advanced-status-summary").textContent =
+    `Modelos avanzados - ${preparedRows} filas preparadas - ${activeSources.length} fuente${activeSources.length === 1 ? "" : "s"} - ${models.length} modelos`;
+  document.getElementById("advanced-source-count").textContent = activeSources.length || 0;
+  document.getElementById("advanced-feature-count").textContent = formatInteger(preparedRows || 0);
+  document.getElementById("advanced-family-count").textContent = families.length || 0;
+  document.getElementById("advanced-status-cards").innerHTML = `
+    ${reportSummaryCard("Preparado", status.prepared ? "Si" : "No")}
+    ${reportSummaryCard("Filas", formatInteger(preparedRows || 0))}
+    ${reportSummaryCard("Fuentes", activeSources.length || 0)}
+    ${reportSummaryCard("StatsBomb", (status.statsbomb || {}).available ? `${(status.statsbomb || {}).json_files || 0} json` : "No")}
+    ${reportSummaryCard("socceraction", status.socceraction_available ? "Instalado" : "Opcional")}
+    ${reportSummaryCard("Ultimo prepare", formatReportDateTime(status.last_prepared_at || ""))}
+  `;
+  document.getElementById("advanced-family-list").innerHTML = advancedFamiliesHtml(families);
+  document.getElementById("advanced-model-catalog").innerHTML = advancedModelCatalogHtml(models);
+  document.getElementById("advanced-sources-list").innerHTML = advancedSourcesHtml(status);
+  const dataNode = document.getElementById("topbar-data-status");
+  if (dataNode) dataNode.textContent = preparedRows ? `Datos: ${formatInteger(preparedRows)} advanced` : `Datos: ${activeSources.length} fuentes`;
+  const modelNode = document.getElementById("topbar-model-status");
+  if (modelNode) modelNode.textContent = `Modelos: ${models.length || 5} avanzados`;
+  if (warnings.length) {
+    document.getElementById("advanced-sources-list").insertAdjacentHTML(
+      "beforeend",
+      `<div class="warning-list compact">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`,
+    );
+  }
+}
+
+function advancedFamiliesHtml(families) {
+  const rows = families || [];
+  if (!rows.length) return loadingHtml("Familias pendientes");
+  return rows.map((item) => `<article class="advanced-status-row ${escapeAttr(item.status || "")}">
+    <div><strong>${escapeHtml(item.label || item.key || "")}</strong><small>${escapeHtml(item.detail || "")}</small></div>
+    <b>${escapeHtml(item.status || "-")}</b>
+  </article>`).join("");
+}
+
+function advancedModelCatalogHtml(models) {
+  const rows = models || [];
+  if (!rows.length) return loadingHtml("Catalogo pendiente");
+  return rows.map((item) => `<article class="advanced-status-row ${escapeAttr(item.status || "")}">
+    <div><strong>${escapeHtml(item.label || item.model_name || item.key || "")}</strong><small>${escapeHtml(item.detail || item.description || "")}</small></div>
+    <b>${escapeHtml(item.family || item.status || "-")}</b>
+  </article>`).join("");
+}
+
+function advancedSourcesHtml(status) {
+  const sourceFiles = status.source_files || {};
+  const rows = Object.entries(sourceFiles).map(([key, item]) => ({
+    key,
+    label: key.replace(/_/g, " "),
+    status: item.exists ? `${formatInteger(item.rows || 0)} filas` : "No",
+    detail: item.path || "",
+  }));
+  const statsbomb = status.statsbomb || {};
+  rows.push({
+    key: "statsbomb",
+    label: "StatsBomb cache",
+    status: statsbomb.available ? `${formatInteger(statsbomb.json_files || 0)} json` : "No",
+    detail: statsbomb.path || "",
+  });
+  return rows.map((item) => `<article class="advanced-status-row ${escapeAttr(item.status === "No" ? "missing" : "cached")}">
+    <div><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.detail)}</small></div>
+    <b>${escapeHtml(item.status)}</b>
+  </article>`).join("");
+}
+
+function renderAdvancedModelsReport(report) {
+  const summary = report.summary || {};
+  const fixtures = report.fixture_reports || [];
+  const backtests = report.model_backtests || [];
+  const best = report.best_model || summary.best_model || {};
+  const warnings = summary.warnings || [];
+  const dataStatus = summary.advanced_data_status || report.advanced_data_status || {};
+  const models = summary.advanced_models_catalog || report.advanced_models_catalog || dataStatus.models || [];
+  const backtestAutoN = summary.backtest_auto_n ?? (summary.backtest || {}).evaluated_matches ?? 0;
+  document.getElementById("upcoming-summary").textContent =
+    `${summary.pipeline_label || "Modelos avanzados"} - ${fixtures.length}/${summary.requested || 0} próximos - ${models.length} familias - ${backtestAutoN} evaluados - ${summary.report_id || report.report_id || ""}`;
+  document.getElementById("upcoming-predictions").innerHTML = "";
+  document.getElementById("upcoming-report").innerHTML = `
+    <div class="report-summary-grid">
+      ${reportSummaryCard("Pipeline", summary.pipeline_label || "Modelos avanzados")}
+      ${reportSummaryCard("Modelo #1", best.available ? (best.model_label || best.model_key || "-") : "Pendiente")}
+      ${reportSummaryCard("Datos advanced", `${formatInteger(dataStatus.prepared_rows || 0)} filas`)}
+      ${reportSummaryCard("Fuentes", (dataStatus.active_sources || []).length || 0)}
+      ${reportSummaryCard("Modelos", models.length || 0)}
+      ${reportSummaryCard("Bayes", summary.advanced_include_bayesian ? "Incluido" : "Ligero")}
+      ${reportSummaryCard("Partidos", `${fixtures.length}/${summary.requested || 0}`)}
+      ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
+    </div>
+    ${reportDownloadButtonsHtml(report.downloads || {}, true)}
+    ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${advancedDataReportHtml(dataStatus, models)}
+    ${statisticalAuditHtml(report.statistical_audit || summary.statistical_audit || {})}
+    ${featureResearchHtml(summary.feature_research || report.feature_research || {})}
+    ${backtestTableHtml(backtests, summary.backtest || {})}
+    <section class="report-panel">
+      <header><strong>Predicciones avanzadas</strong><small>${escapeHtml(fixtures.length)} fixture${fixtures.length === 1 ? "" : "s"}</small></header>
+      <div class="client-report-grid alternatives-fixture-grid">
+        ${fixtures.map((fixtureReport) => alternativeFixtureCardHtml(fixtureReport)).join("") || loadingHtml("Sin fixtures futuros")}
+      </div>
+    </section>
+    <section class="report-panel">
+      <header><strong>Detalles por modelo</strong><small>Backtest y disponibilidad por familia</small></header>
+      <div class="alternatives-model-list">
+        ${(report.ranked_models || []).map((item) => alternativeBenchmarkCardHtml(item)).join("") || loadingHtml("Sin modelos")}
+      </div>
+    </section>`;
+  refreshCountdowns();
+  renderTable("upcoming-predictions-table", report.table);
+}
+
+function advancedDataReportHtml(dataStatus, models) {
+  const status = dataStatus || {};
+  const families = status.families || [];
+  const sources = status.active_sources || [];
+  return `<section class="report-panel advanced-data-report">
+    <header><strong>Datos y modelos avanzados</strong><small>${escapeHtml(status.anti_leakage || "Cache-first, corte temporal antes del partido")}</small></header>
+    <div class="technical-meta-row">
+      <span>Preparado ${escapeHtml(status.prepared ? "si" : "no")}</span>
+      <span>Filas ${escapeHtml(formatInteger(status.prepared_rows || 0))}</span>
+      <span>Fuentes ${escapeHtml(sources.length || 0)}</span>
+      <span>StatsBomb ${escapeHtml((status.statsbomb || {}).available ? "cacheado" : "no")}</span>
+      <span>socceraction ${escapeHtml(status.socceraction_available ? "instalado" : "opcional")}</span>
+    </div>
+    <div class="advanced-report-grid">
+      <div>${advancedFamiliesHtml(families)}</div>
+      <div>${advancedModelCatalogHtml(models || [])}</div>
+    </div>
+  </section>`;
+}
+
+function statisticalAuditHtml(audit) {
+  const item = audit || {};
+  const recommendations = item.recommendations || [];
+  const warnings = item.warnings || [];
+  if (!item.available && !recommendations.length && !warnings.length) return "";
+  return `<section class="report-panel statistical-audit-panel">
+    <header><strong>Auditoria estadistica</strong><small>${escapeHtml(item.evaluated_models || 0)} modelos · ${escapeHtml(item.evaluated_matches || 0)} partidos</small></header>
+    <div class="technical-meta-row">
+      <span>Disponible ${escapeHtml(item.available ? "si" : "no")}</span>
+      <span>Baseline ${escapeHtml(item.baseline_model_key || "independent_poisson")}</span>
+      <span>Modelos ${escapeHtml(item.evaluated_models || 0)}</span>
+      <span>Partidos ${escapeHtml(item.evaluated_matches || 0)}</span>
+    </div>
+    ${recommendations.length ? `<div class="audit-list">${recommendations.map((rec) => auditRecommendationHtml(rec)).join("")}</div>` : ""}
+    ${warnings.length ? `<div class="warning-list compact">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
+  </section>`;
+}
+
+function auditRecommendationHtml(rec) {
+  const item = rec || {};
+  if (typeof item === "string") return `<article><strong>Revision</strong><small>${escapeHtml(item)}</small></article>`;
+  return `<article>
+    <strong>${escapeHtml(item.title || item.model_label || item.model_key || "Recomendacion")}</strong>
+    <small>${escapeHtml(item.detail || item.reason || item.message || JSON.stringify(item))}</small>
+  </article>`;
+}
+
 function renderAlternativesBenchmarkReport(report) {
   const summary = report.summary || {};
   const fixtures = report.fixture_reports || [];
@@ -1153,7 +1392,38 @@ function bestAlternativeHtml(best) {
 }
 
 function featureResearchHtml(featureResearch) {
-  return "";
+  const item = featureResearch || {};
+  const families = item.families || [];
+  const basis = item.research_basis || [];
+  const source = item.source_status || {};
+  if (!families.length && !basis.length) return "";
+  return `<section class="report-panel feature-research-panel">
+    <header><strong>Feature research</strong><small>${escapeHtml(item.anti_leakage || "Features as-of antes del partido")}</small></header>
+    <div class="technical-meta-row">
+      <span>Historia ${escapeHtml(source.history_rows || 0)}</span>
+      <span>Odds ${escapeHtml(source.odds_rows || 0)}</span>
+      <span>API ${escapeHtml(source.api_team_stats_rows || 0)}</span>
+      <span>XI ${escapeHtml(source.xi_rows || 0)}</span>
+      <span>Familias ${escapeHtml((item.active_or_cached_families || []).length || 0)}</span>
+    </div>
+    <div class="feature-family-grid">
+      ${families.map((family) => `<article class="${escapeAttr(family.status || "")}">
+        <strong>${escapeHtml(family.label || family.key || "")}</strong>
+        <small>${escapeHtml(family.impact || "")}</small>
+        <span>${escapeHtml(family.status || "-")}</span>
+      </article>`).join("")}
+    </div>
+    ${basis.length ? `<details class="research-basis-drawer">
+      <summary>Base tecnica</summary>
+      <div class="feature-family-grid research">
+        ${basis.map((entry) => `<article>
+          <strong>${escapeHtml(entry.title || "")}</strong>
+          <small>${escapeHtml(entry.finding || entry.apply || "")}</small>
+          ${entry.url ? `<a href="${escapeAttr(entry.url)}" target="_blank" rel="noopener">Fuente</a>` : ""}
+        </article>`).join("")}
+      </div>
+    </details>` : ""}
+  </section>`;
 }
 
 function benchmarkTuningHtml(tuning) {
@@ -2454,6 +2724,7 @@ function worldcupJobPollDelay(job) {
   const stage = progress.stage || "";
   if (kind === "upcoming-report") return 1000;
   if (kind === "xg-prepare" || kind === "xg-training") return 1500;
+  if (kind === "advanced-prepare") return 1500;
   const base = kind === "simulation" ? 2000 : 3000;
   const idleCount = Number(job.pollIdleCount || 0);
   if (idleCount >= 4) return 10000;
@@ -2481,6 +2752,9 @@ async function handleWorldcupJobComplete(job) {
   if (job.kind === "xg-training") {
     renderXgLightgbmTrainingStatus((result.status || result));
   }
+  if (job.kind === "advanced-prepare") {
+    renderAdvancedDataStatus(result);
+  }
 }
 
 function renderWorldcupJobProgress(kind) {
@@ -2490,6 +2764,8 @@ function renderWorldcupJobProgress(kind) {
         ? "worldcup-upcoming-progress"
         : kind === "xg-prepare" || kind === "xg-training"
           ? "worldcup-xg-progress"
+          : kind === "advanced-prepare"
+            ? "worldcup-advanced-progress"
         : "";
   if (!targetId) return;
   const target = document.getElementById(targetId);
@@ -2580,11 +2856,13 @@ function setWorldcupJobBusy(kind, busy) {
   const ids = kind === "simulation"
     ? ["simulate-poisson-btn"]
     : kind === "upcoming-report"
-      ? ["upcoming-predict-btn"]
-      : kind === "xg-prepare"
-        ? ["xg-prepare-etl", "xg-train"]
+        ? ["upcoming-predict-btn"]
+        : kind === "xg-prepare"
+          ? ["xg-prepare-etl", "xg-train"]
         : kind === "xg-training"
           ? ["xg-prepare-etl", "xg-train"]
+          : kind === "advanced-prepare"
+            ? ["advanced-prepare-data", "advanced-refresh-status"]
       : [];
   ids.forEach((id) => {
     const button = document.getElementById(id);
@@ -2727,9 +3005,10 @@ function flagHtml(asset, size = "") {
   const flag = asset || {};
   const url = flag.flag_url || "";
   const fallbackClass = url ? "visual-fallback" : "visual-fallback visible";
+  const dimension = size === "large" ? 42 : 30;
   return `<span class="flag-wrap ${escapeAttr(size)}">
     <span class="${fallbackClass}">${escapeHtml(flag.flag_fallback || initials(flag.name || ""))}</span>
-    ${url ? `<img src="${escapeAttr(url)}" alt="Bandera ${escapeAttr(flag.name || "")}" onerror="handleImageError(this)">` : ""}
+    ${url ? `<img src="${escapeAttr(url)}" width="${escapeAttr(dimension)}" height="${escapeAttr(dimension)}" alt="Bandera ${escapeAttr(flag.name || "")}" onerror="handleImageError(this)">` : ""}
   </span>`;
 }
 
@@ -2738,7 +3017,7 @@ function playerPhotoHtml(player) {
   const fallbackClass = url ? "visual-fallback" : "visual-fallback visible";
   return `<span class="player-photo">
     <span class="${fallbackClass}">${escapeHtml(player.initials || initials(player.name || ""))}</span>
-    ${url ? `<img src="${escapeAttr(url)}" alt="${escapeAttr(player.name || "Jugador")}" onerror="handleImageError(this)">` : ""}
+    ${url ? `<img src="${escapeAttr(url)}" width="42" height="42" alt="${escapeAttr(player.name || "Jugador")}" onerror="handleImageError(this)">` : ""}
   </span>`;
 }
 

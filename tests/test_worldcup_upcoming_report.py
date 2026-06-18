@@ -113,6 +113,8 @@ def test_alternatives_benchmark_aliases_and_statistical_registry():
     assert services.normalize_report_pipeline_mode("modelos mejores") == "alternatives_benchmark"
     assert services.normalize_report_pipeline_mode("xg_lightgbm") == "xg_lightgbm"
     assert services.normalize_report_pipeline_mode("xg-lightgbm-cuda") == "xg_lightgbm"
+    assert services.normalize_report_pipeline_mode("modelos_avanzados") == "advanced_models"
+    assert services.normalize_report_pipeline_mode("todo documento") == "advanced_models"
     assert services.normalize_report_pipeline_mode("poisson_sota") == "poisson_sota"
     assert services.normalize_report_pipeline_mode("modo_desconocido") == "poisson_sota"
     assert services.SOTA_SCORE_MODEL_SEQUENCE == [
@@ -128,6 +130,34 @@ def test_alternatives_benchmark_aliases_and_statistical_registry():
     registry_text = json.dumps(alternatives).lower()
     assert not any(term in registry_text for term in forbidden)
     assert all(item["model_name"] and item["description"] for item in alternatives)
+
+
+def test_advanced_models_pipeline_registry_and_config():
+    from src.web import mundial_services as services
+
+    config = services.report_pipeline_config({}, services.ADVANCED_MODELS_PIPELINE_MODE)
+    assert config["bayes_profile"] == "light"
+    assert config["backtest_scope"] == "worldcup_2026_confirmed_auto"
+    assert services.active_advanced_score_model_sequence(config) == [
+        "xg_dixon_coles",
+        "negative_binomial_dixon_coles",
+        "dynamic_strength_kalman",
+        "stacked_meta_mnlogit",
+    ]
+
+    deep_config = services.report_pipeline_config(
+        {"bayes_profile": "deep"},
+        services.ADVANCED_MODELS_PIPELINE_MODE,
+    )
+    assert "bayesian_dynamic_poisson" in services.active_advanced_score_model_sequence(deep_config)
+    catalog = services.advanced_models_catalog({"families": [{"key": "xg_shot_quality", "status": "active"}]})
+    assert {item["key"] for item in catalog} >= {
+        "xg_dixon_coles",
+        "negative_binomial_dixon_coles",
+        "dynamic_strength_kalman",
+        "stacked_meta_mnlogit",
+        "bayesian_dynamic_poisson",
+    }
 
 
 def test_alternatives_benchmark_default_backtest_and_ranking_policy():
@@ -1112,7 +1142,7 @@ def test_backtest_alternatives_refresca_fixtures_sin_reinicio_si_cambia_dia(tmp_
             return FakeModel()
 
     worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
-    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 10, 0, tzinfo=timezone.utc))
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 13, 0, tzinfo=timezone.utc))
     load_calls: list[bool] = []
 
     def fake_load_tournament(refresh=False):
@@ -1268,7 +1298,7 @@ def test_backtest_alternatives_refresca_fixtures_sin_reinicio_si_cambia_dia(tmp_
 
     assert result_dia14["summary"]["backtest_auto_n"] == 1
 
-    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 16, 10, 0, tzinfo=timezone.utc))
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 16, 13, 0, tzinfo=timezone.utc))
     result_dia16 = services.alternatives_benchmark_report(
         payload={"limit": 1},
         config=config,

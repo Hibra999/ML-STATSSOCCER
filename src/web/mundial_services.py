@@ -34,8 +34,12 @@ from src.worldcup import (
 from src.worldcup.model import TOTAL_GOAL_LINES, poisson_score_grid, total_line_suffix
 from src.worldcup.score_models import (
     DEFAULT_SCORE_MODEL,
+    DYNAMIC_STRENGTH_KALMAN_MODEL,
+    NEGATIVE_BINOMIAL_DIXON_COLES_MODEL,
     NEGATIVE_BINOMIAL_GLM_MODEL,
+    STACKED_META_MNLOGIT_MODEL,
     STATSMODELS_POISSON_GLM_MODEL,
+    XG_DIXON_COLES_MODEL,
     build_score_model,
     normalize_score_model_key,
     probabilities_from_score_grid,
@@ -44,6 +48,10 @@ from src.worldcup.score_models import (
     score_backend_status,
     score_grids_from_lambdas_with_backend,
     score_model_options,
+)
+from src.worldcup.advanced_data import (
+    advanced_data_status as worldcup_advanced_data_status,
+    prepare_advanced_data as prepare_worldcup_advanced_data,
 )
 from src.worldcup.sota_alternatives import (
     ALTERNATIVE_SCORE_MODEL_KEYS,
@@ -124,12 +132,23 @@ WALK_FORWARD_ROOT = Path("storage") / "worldcup" / "walk_forward"
 POISSON_SOTA_PIPELINE_MODE = "poisson_sota"
 XG_LIGHTGBM_PIPELINE_MODE = "xg_lightgbm"
 XG_LIGHTGBM_PIPELINE_LABEL = "xG-LightGBM"
+ADVANCED_MODELS_PIPELINE_MODE = "advanced_models"
+ADVANCED_MODELS_PIPELINE_LABEL = "Modelos avanzados"
 SOTA_SCORE_MODEL_SEQUENCE = [
     "independent_poisson",
     STATSMODELS_POISSON_GLM_MODEL,
     NEGATIVE_BINOMIAL_GLM_MODEL,
     "dixon_coles_mle",
     "bivariate_poisson_mle",
+]
+ADVANCED_SCORE_MODEL_SEQUENCE = [
+    XG_DIXON_COLES_MODEL,
+    NEGATIVE_BINOMIAL_DIXON_COLES_MODEL,
+    DYNAMIC_STRENGTH_KALMAN_MODEL,
+    STACKED_META_MNLOGIT_MODEL,
+]
+ADVANCED_HEAVY_SCORE_MODEL_SEQUENCE = [
+    "bayesian_dynamic_poisson",
 ]
 ALTERNATIVE_SCORE_MODEL_SEQUENCE = list(ALTERNATIVE_SCORE_MODEL_KEYS)
 BENCHMARK_SCORE_MODEL_SEQUENCE = list(dict.fromkeys([*SOTA_SCORE_MODEL_SEQUENCE, *ALTERNATIVE_SCORE_MODEL_KEYS]))
@@ -160,6 +179,7 @@ DEFAULT_CONFIG = {
     "bayes_chains": 2,
     "bayes_target_accept": 0.92,
     "bayes_max_treedepth": 12,
+    "advanced_include_bayesian": False,
     "refresh": False,
 }
 LAST_SIMULATION_RESULT: Dict[str, Any] = {}
@@ -957,6 +977,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
     standings = group_standings_payload(groups, fixture_df)
     results_status = fixture_results_status(fixture_df)
     international_status = international_results_status()
+    advanced_status = advanced_data_status()
     return {
         "name": tournament.get("name", "World Cup 2026"),
         "teams": sum(len(teams) for teams in groups.values()),
@@ -981,6 +1002,8 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
         "group_standings": standings,
         "default_config": DEFAULT_CONFIG,
         "score_models": score_model_options(),
+        "advanced_data": advanced_status,
+        "advanced_model_catalog": advanced_models_catalog(advanced_status),
         "international_recent": international_status,
         "hardware": detect_hardware(),
         "model": "Elo + modelos de marcador Monte Carlo",
@@ -1476,6 +1499,14 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
             hardware=hardware,
             progress_callback=progress_callback,
         )
+    if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE:
+        return advanced_models_report(
+            payload=payload,
+            config=config,
+            start_time=start_time,
+            hardware=hardware,
+            progress_callback=progress_callback,
+        )
     if pipeline_mode == XG_LIGHTGBM_PIPELINE_MODE:
         return xg_lightgbm_report(
             payload=payload,
@@ -1676,6 +1707,197 @@ def xg_lightgbm_report(
         force_complete=True,
     )
     return report
+
+
+def active_advanced_score_model_sequence(config: Dict[str, Any]) -> List[str]:
+    sequence = list(ADVANCED_SCORE_MODEL_SEQUENCE)
+    include_bayes = bool(config.get("advanced_include_bayesian")) or str(config.get("bayes_profile") or "").lower() == "deep"
+    if include_bayes:
+        sequence.extend(ADVANCED_HEAVY_SCORE_MODEL_SEQUENCE)
+    return list(dict.fromkeys(sequence))
+
+
+def advanced_models_report(
+        payload: Dict[str, Any],
+        config: Dict[str, Any],
+        start_time: float,
+        hardware: Dict[str, Any],
+        progress_callback=None,
+) -> Dict[str, Any]:
+    tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
+    results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
+    history_df, history_source = score_history_for_tournament(tournament, config)
+    feature_source = benchmark_feature_source(tournament, history_df, config)
+    data_status = advanced_data_status()
+    model_sequence = active_advanced_score_model_sequence(config)
+    group_map = groups_from_tournament(tournament)
+    team_names = [team for group_teams in group_map.values() for team in group_teams]
+    base_model = WorldCupModel.from_history(
+        history_df,
+        teams=team_names,
+        history_weight=float(config["history_weight"]),
+        recency_weight=float(config["recency_weight"]),
+        host_advantage=float(config["host_advantage"]),
+        max_goals=int(config["max_goals"]),
+    )
+    limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
+    group_filter = str(payload.get("group") or "").strip()
+    fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter).head(limit).copy()
+    fixture_records = [fixture for _, fixture in fixture_df.iterrows()]
+    fixture_reports = upcoming_sota_fixture_reports(
+        tournament=tournament,
+        base_model=base_model,
+        fixtures=fixture_records,
+        config=config,
+        start_time=start_time,
+        hardware=hardware,
+        model_sequence=model_sequence,
+        history_df=history_df,
+        feature_source=feature_source,
+        progress_callback=progress_callback,
+    )
+    backtest = alternatives_backtest_report(
+        history_df=history_df,
+        tournament=tournament,
+        config={**config, "benchmark_tuning_enabled": False},
+        model_sequence=model_sequence,
+        start_time=start_time,
+        hardware=hardware,
+        feature_source=feature_source,
+        progress_callback=progress_callback,
+    )
+    backtests = backtest.get("models", [])
+    statistical_audit = build_prediction_statistical_audit(backtests, baseline_key=DEFAULT_SCORE_MODEL)
+    best_model = best_alternative_from_backtests(backtests)
+    backtest_by_key = {str(item.get("model_key") or ""): item for item in backtests}
+    ranked_model_keys = [str(item.get("model_key") or "") for item in backtests if str(item.get("model_key") or "")]
+    fixture_reports = rank_fixture_report_models(fixture_reports, ranked_model_keys or model_sequence)
+    for fixture_report, fixture in zip(fixture_reports, fixture_records):
+        fixture_report["baseline_poisson"] = poisson_baseline_report_for_fixture(base_model, fixture, config)
+        fixture_report["primary_model"] = primary_model_for_fixture(fixture_report, best_model, backtest_by_key)
+        if not fixture_report["primary_model"].get("available") and fixture_report.get("models"):
+            fixture_report["primary_model"] = dict(fixture_report["models"][0])
+            fixture_report["primary_model"]["selection_policy"] = "Fallback visual: primer modelo avanzado disponible; auditoria aun no eligio ganador."
+        strip_consensus_fields_from_alternative_report(fixture_report)
+        fixture_report["warnings"] = fixture_report_warnings(fixture_report)
+    ranked_models = advanced_models_with_backtests(backtests, data_status)
+    table_rows = alternatives_benchmark_table_rows(fixture_reports, backtest_by_key)
+    table = table_payload(pd.DataFrame(table_rows), page=1, page_size=max(len(table_rows), 1))
+    backtest_summary = backtest.get("summary", {})
+    generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
+    backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
+    warnings = unique_strings([
+        *hardware.get("warnings", []),
+        *data_status.get("warnings", []),
+        *feature_source.warnings,
+        *backtest.get("warnings", []),
+        *[
+            warning
+            for report in fixture_reports
+            for warning in report.get("warnings", [])
+        ],
+    ])
+    summary = {
+        "pipeline_mode": ADVANCED_MODELS_PIPELINE_MODE,
+        "pipeline_label": ADVANCED_MODELS_PIPELINE_LABEL,
+        "evidence_policy": "advanced_models_local_backtest_vs_poisson",
+        "generated_at": generated_at,
+        "requested": limit,
+        "returned": len(fixture_reports),
+        "group": group_filter or "Todos",
+        "fixture_source": fixture_source,
+        "history_source": history_source,
+        "poisson_recent_matches": config["poisson_recent_matches"],
+        "backtest_last_n": int(config["backtest_last_n"]),
+        "backtest_auto_n": int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0),
+        "backtest_scope": backtest_summary.get("scope", config.get("backtest_scope", "")),
+        "backtest_range": backtest_range,
+        "anti_leakage": backtest_summary.get("anti_leakage", data_status.get("anti_leakage", "")),
+        "iterations": 0,
+        "seed": config["seed"],
+        "bayes_profile": config.get("bayes_profile", ""),
+        "advanced_include_bayesian": bool(config.get("advanced_include_bayesian")),
+        "sota_device": config.get("sota_device", "auto"),
+        "sota_calculation_mode": "not_applicable",
+        "sota_calculation_label": "Familias avanzadas exactas",
+        "monte_carlo_iterations": 0,
+        "score_models": model_sequence,
+        "advanced_data_status": data_status,
+        "advanced_models_catalog": advanced_models_catalog(data_status),
+        "feature_research": worldcup_feature_research_summary(feature_source),
+        "statistical_audit": {
+            "available": statistical_audit.get("available", False),
+            "evaluated_models": statistical_audit.get("evaluated_models", 0),
+            "evaluated_matches": statistical_audit.get("evaluated_matches", 0),
+            "baseline_model_key": statistical_audit.get("baseline_model_key", DEFAULT_SCORE_MODEL),
+            "recommendations": statistical_audit.get("recommendations", []),
+            "warnings": statistical_audit.get("warnings", []),
+        },
+        "hardware": hardware,
+        "warnings": warnings,
+        "config": config,
+        "best_model": best_model,
+        "backtest": backtest_summary,
+    }
+    report = persist_upcoming_report({
+        "created_at": generated_at,
+        "summary": summary,
+        "advanced_data_status": data_status,
+        "advanced_models_catalog": summary["advanced_models_catalog"],
+        "feature_research": summary["feature_research"],
+        "fixture_reports": fixture_reports,
+        "ranked_models": ranked_models,
+        "model_backtests": backtests,
+        "statistical_audit": statistical_audit,
+        "best_model": best_model,
+        "backtest": backtest,
+        "table": table,
+    })
+    emit_report_progress(
+        progress_callback,
+        stage="complete",
+        start_time=start_time,
+        model_index=len(model_sequence),
+        model_total=max(len(model_sequence), 1),
+        model_key="",
+        fixture_index=len(fixture_reports),
+        fixture_total=max(len(fixture_reports), 1),
+        hardware=hardware,
+        message="Reporte avanzado guardado",
+        force_complete=True,
+    )
+    return report
+
+
+def advanced_models_with_backtests(backtests: List[Dict[str, Any]], data_status: Dict[str, Any]) -> List[Dict[str, Any]]:
+    catalog_by_key = {str(item.get("key") or ""): item for item in advanced_models_catalog(data_status)}
+    output = []
+    for index, backtest in enumerate(backtests or [], start=1):
+        key = str(backtest.get("model_key") or "")
+        catalog = dict(catalog_by_key.get(key, {"key": key, "label": backtest.get("model_label", key)}))
+        output.append({
+            "rank": backtest.get("rank", index),
+            "key": key,
+            "model_name": catalog.get("label") or catalog.get("model_name") or backtest.get("model_label", key),
+            "family": catalog.get("family", "advanced"),
+            "description": catalog.get("detail", ""),
+            "status": catalog.get("status", ""),
+            "backtest": backtest,
+        })
+    if output:
+        return output
+    return [
+        {
+            "rank": index,
+            "key": item.get("key", ""),
+            "model_name": item.get("label", ""),
+            "family": item.get("family", ""),
+            "description": item.get("detail", ""),
+            "status": item.get("status", ""),
+            "backtest": {},
+        }
+        for index, item in enumerate(advanced_models_catalog(data_status), start=1)
+    ]
 
 
 def resolve_xg_lightgbm_model(payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any], List[str]]:
@@ -1890,6 +2112,61 @@ def xg_lightgbm_training_status() -> Dict[str, Any]:
         "default_model_id": default_id,
         "anti_leakage": "Features historicas, recent15, API/xG y mercados se calculan as-of antes de la fecha del partido; Optuna usa validation temporal y test queda bloqueado.",
     })
+
+
+def advanced_data_status() -> Dict[str, Any]:
+    status = worldcup_advanced_data_status()
+    status["models"] = advanced_models_catalog(status)
+    return json_safe(status)
+
+
+def advanced_data_prepare(payload: Dict[str, Any] | None = None, progress_callback=None) -> Dict[str, Any]:
+    status = prepare_worldcup_advanced_data(payload or {}, progress_callback=progress_callback)
+    status["models"] = advanced_models_catalog(status)
+    return json_safe(status)
+
+
+def advanced_models_catalog(status: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
+    status = status or worldcup_advanced_data_status()
+    family_status = {str(item.get("key") or ""): item for item in status.get("families", [])}
+    xg_active = (family_status.get("xg_shot_quality") or {}).get("status") in {"active", "cached"}
+    return [
+        {
+            "key": XG_DIXON_COLES_MODEL,
+            "label": score_model_display_label(XG_DIXON_COLES_MODEL),
+            "family": "xg_dixon_coles",
+            "status": "active" if xg_active else "missing_data",
+            "detail": "xG agregado por partido como lambda y correccion de marcadores bajos.",
+        },
+        {
+            "key": NEGATIVE_BINOMIAL_DIXON_COLES_MODEL,
+            "label": score_model_display_label(NEGATIVE_BINOMIAL_DIXON_COLES_MODEL),
+            "family": "overdispersed_counts",
+            "status": "active",
+            "detail": "NB2 para sobredispersion + rho Dixon-Coles.",
+        },
+        {
+            "key": DYNAMIC_STRENGTH_KALMAN_MODEL,
+            "label": score_model_display_label(DYNAMIC_STRENGTH_KALMAN_MODEL),
+            "family": "dynamic_strength",
+            "status": "active",
+            "detail": "Estado latente ligero de ataque/defensa con recencia.",
+        },
+        {
+            "key": STACKED_META_MNLOGIT_MODEL,
+            "label": score_model_display_label(STACKED_META_MNLOGIT_MODEL),
+            "family": "stacking",
+            "status": "active",
+            "detail": "Meta-modelo MNLogit sobre probabilidades base y lambdas.",
+        },
+        {
+            "key": "bayesian_dynamic_poisson",
+            "label": score_model_display_label("bayesian_dynamic_poisson"),
+            "family": "bayesian_dynamic",
+            "status": "optional_heavy",
+            "detail": "PyMC dinamico disponible solo con perfil profundo o bandera explicita.",
+        },
+    ]
 
 
 def xg_lightgbm_training_procedure() -> Dict[str, Any]:
@@ -3967,6 +4244,16 @@ def normalize_report_pipeline_mode(value: Any) -> str:
     }:
         return XG_LIGHTGBM_PIPELINE_MODE
     if normalized in {
+        ADVANCED_MODELS_PIPELINE_MODE,
+        "advanced",
+        "advanced_modelos",
+        "modelos_avanzados",
+        "todo_documento",
+        "all_advanced_models",
+        "document_models",
+    }:
+        return ADVANCED_MODELS_PIPELINE_MODE
+    if normalized in {
         ALTERNATIVES_BENCHMARK_PIPELINE_MODE,
         "alternatives",
         "alternative_benchmark",
@@ -3997,18 +4284,26 @@ def sota_calculation_summary(config: Dict[str, Any]) -> str:
 def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[str, Any]:
     config = simulation_config(payload)
     config["pipeline_mode"] = pipeline_mode
-    default_backtest_last_n = 7 if pipeline_mode == ALTERNATIVES_BENCHMARK_PIPELINE_MODE else 20
+    default_backtest_last_n = 7 if pipeline_mode in {ALTERNATIVES_BENCHMARK_PIPELINE_MODE, ADVANCED_MODELS_PIPELINE_MODE} else 20
     config["backtest_last_n"] = int(_clamp_int(payload.get("backtest_last_n", default_backtest_last_n), 5, 100))
-    config["backtest_scope"] = "worldcup_2026_confirmed_auto" if pipeline_mode == ALTERNATIVES_BENCHMARK_PIPELINE_MODE else "historical_last_n"
-    config["bayes_profile"] = str(payload.get("bayes_profile") or "deep").strip().lower()
+    config["backtest_scope"] = "worldcup_2026_confirmed_auto" if pipeline_mode in {ALTERNATIVES_BENCHMARK_PIPELINE_MODE, ADVANCED_MODELS_PIPELINE_MODE} else "historical_last_n"
+    default_bayes_profile = "light" if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE else "deep"
+    config["bayes_profile"] = str(payload.get("bayes_profile") or default_bayes_profile).strip().lower()
     config["sota_device"] = str(payload.get("sota_device") or "auto").strip().lower()
     config["sota_calculation_mode"] = normalize_sota_calculation_mode(payload.get("sota_calculation_mode"))
+    config["advanced_include_bayesian"] = bool(payload.get("advanced_include_bayesian", DEFAULT_CONFIG["advanced_include_bayesian"]))
     if config["sota_device"] not in {"auto", "cpu", "cuda"}:
         config["sota_device"] = "auto"
     config["score_model"] = DEFAULT_SCORE_MODEL
     if pipeline_mode == XG_LIGHTGBM_PIPELINE_MODE:
         config["sota_calculation_mode"] = "not_applicable"
         config["bayes_profile"] = "not_applicable"
+        config["stat_model_cache"] = True
+        config["stat_model_refit"] = False
+    if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE and config["bayes_profile"] != "deep":
+        config["bayes_draws"] = 100
+        config["bayes_tune"] = 100
+        config["bayes_chains"] = 1
         config["stat_model_cache"] = True
         config["stat_model_refit"] = False
     if config["bayes_profile"] == "deep":
@@ -6015,6 +6310,7 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         "bayes_chains": int(_clamp_int(payload.get("bayes_chains", DEFAULT_CONFIG["bayes_chains"]), 1, 8)),
         "bayes_target_accept": float(np.clip(float(payload.get("bayes_target_accept", DEFAULT_CONFIG["bayes_target_accept"])), 0.8, 0.995)),
         "bayes_max_treedepth": int(_clamp_int(payload.get("bayes_max_treedepth", DEFAULT_CONFIG["bayes_max_treedepth"]), 6, 15)),
+        "advanced_include_bayesian": bool(payload.get("advanced_include_bayesian", DEFAULT_CONFIG["advanced_include_bayesian"])),
         "refresh": bool(payload.get("refresh", DEFAULT_CONFIG["refresh"])),
         "include_confirmed_results": bool(payload.get("include_confirmed_results", mode == "poisson_live")),
     }

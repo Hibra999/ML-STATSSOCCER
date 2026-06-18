@@ -95,6 +95,8 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/mundial/xg-lightgbm/training/status" in paths
     assert "/api/mundial/xg-lightgbm/training/prepare" in paths
     assert "/api/mundial/xg-lightgbm/training/train" in paths
+    assert "/api/mundial/advanced-data/status" in paths
+    assert "/api/mundial/advanced-data/prepare" in paths
     assert "/api/mundial/models" not in paths
     assert "/api/mundial/models/train" not in paths
     assert "/api/mundial/models/select" not in paths
@@ -107,6 +109,25 @@ def test_mundial_app_imports_as_independent_fastapi_app():
     assert "/api/jobs/{job_id}" in paths
     assert "/api/worldcup/overview" not in paths
     assert "/assets" in paths
+
+
+def test_mundial_static_ui_exposes_advanced_models_and_accessibility_hooks():
+    source = open("src/web/static/mundial.html", "r", encoding="utf-8").read()
+    script = open("src/web/static/mundial.js", "r", encoding="utf-8").read()
+    styles = open("src/web/static/mundial.css", "r", encoding="utf-8").read()
+
+    assert 'class="skip-link"' in source
+    assert 'main id="main-content"' in source
+    assert 'data-section="modelos"' in source
+    assert 'value="advanced_models"' in source
+    assert 'id="advanced-prepare-data"' in source
+    assert 'aria-live="polite"' in source
+    assert 'name="fixture_search"' in source
+    assert "function featureResearchHtml(featureResearch)" in script
+    feature_research_body = script[script.index("function featureResearchHtml(featureResearch)"):script.index("function benchmarkTuningHtml")]
+    assert "feature-research-panel" in feature_research_body
+    assert "feature-family-grid" in feature_research_body
+    assert "prefers-reduced-motion" in styles
 
 
 def test_public_storage_assets_only_serves_graphics():
@@ -233,8 +254,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
 
     assert "Mundial 2026" in html_source
     assert "worldcup-view active" in html_source
-    nav_source = html_source.split("<nav>", 1)[1].split("</nav>", 1)[0]
-    nav_order = ["Resumen", "Grupos", "Calendario", "Predicciones Futuras", "Datos"]
+    nav_start = html_source.index("<nav")
+    nav_source = html_source[nav_start:html_source.index("</nav>", nav_start)]
+    nav_order = ["Resumen", "Grupos", "Calendario", "Prediccion", "Modelos", "xG", "Datos"]
     assert [nav_source.index(label) for label in nav_order] == sorted(nav_source.index(label) for label in nav_order)
     assert "Simulación" not in nav_source
     assert "11 Iniciales" not in nav_source

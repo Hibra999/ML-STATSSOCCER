@@ -23,6 +23,10 @@ from src.worldcup.model import (
 DEFAULT_SCORE_MODEL = "independent_poisson"
 STATSMODELS_POISSON_GLM_MODEL = "statsmodels_poisson_glm"
 NEGATIVE_BINOMIAL_GLM_MODEL = "negative_binomial_glm"
+XG_DIXON_COLES_MODEL = "xg_dixon_coles"
+NEGATIVE_BINOMIAL_DIXON_COLES_MODEL = "negative_binomial_dixon_coles"
+DYNAMIC_STRENGTH_KALMAN_MODEL = "dynamic_strength_kalman"
+STACKED_META_MNLOGIT_MODEL = "stacked_meta_mnlogit"
 STAT_MODEL_ROOT = Path("storage") / "worldcup" / "stat_models"
 LOCAL_XG_FILE = Path("storage") / "worldcup" / "xg" / "manual_xg.csv"
 _CUPY_BACKEND_STATUS: Dict[str, Any] | None = None
@@ -50,6 +54,30 @@ SCORE_MODEL_OPTIONS = [
         "key": NEGATIVE_BINOMIAL_GLM_MODEL,
         "label": "Negative Binomial GLM",
         "description": "Variante de conteo sobredispersa: lambdas GLM y margenes Negative Binomial NB2.",
+        "heavy": False,
+    },
+    {
+        "key": XG_DIXON_COLES_MODEL,
+        "label": "xG + Dixon-Coles",
+        "description": "Usa xG local/cacheado como intensidad y aplica correccion Dixon-Coles para marcadores bajos.",
+        "heavy": False,
+    },
+    {
+        "key": NEGATIVE_BINOMIAL_DIXON_COLES_MODEL,
+        "label": "Negative Binomial Dixon-Coles",
+        "description": "Margenes NB2 sobredispersos con ajuste Dixon-Coles generalizado en 0-0, 1-0, 0-1 y 1-1.",
+        "heavy": False,
+    },
+    {
+        "key": DYNAMIC_STRENGTH_KALMAN_MODEL,
+        "label": "Fuerza dinamica Kalman",
+        "description": "Estados latentes ataque/defensa suavizados por recencia como aproximacion Kalman ligera.",
+        "heavy": False,
+    },
+    {
+        "key": STACKED_META_MNLOGIT_MODEL,
+        "label": "Stacking MNLogit",
+        "description": "Meta-modelo statsmodels MNLogit sobre probabilidades base, lambdas y senales estadisticas.",
         "heavy": False,
     },
     {
@@ -137,7 +165,7 @@ class AdvancedScoreWorldCupModel:
         return self.expected_goals_for_match(team1, team2, match=None)
 
     def expected_goals_for_match(self, team1: str, team2: str, match: Dict[str, Any] | None = None) -> Tuple[float, float]:
-        if self.state.key == "xg_poisson_local":
+        if self.state.key in {"xg_poisson_local", XG_DIXON_COLES_MODEL}:
             xg_lambdas = _xg_lambdas_for_match(self.state, team1, team2, match)
             if xg_lambdas is not None:
                 return xg_lambdas
@@ -150,6 +178,10 @@ class AdvancedScoreWorldCupModel:
             base_lambdas = method(team1, team2, match=match)
         else:
             base_lambdas = self.base_model.expected_goals(team1, team2)
+        if self.state.key == DYNAMIC_STRENGTH_KALMAN_MODEL:
+            dynamic_lambdas = _dynamic_strength_lambdas_for_match(self.state, team1, team2, base_lambdas)
+            if dynamic_lambdas is not None:
+                return dynamic_lambdas
         calibrated = _statsmodels_lambdas_for_match(self.state, team1, team2, base_lambdas)
         return calibrated if calibrated is not None else base_lambdas
 
@@ -215,6 +247,11 @@ class AdvancedScoreWorldCupModel:
         output["score_model"] = self.state.key
         output["score_model_label"] = self.state.label
         output["score_model_available"] = bool(self.state.available)
+        if self.state.key == STACKED_META_MNLOGIT_MODEL:
+            stacked = _stacked_meta_probabilities_for_match(self.state, output)
+            if stacked is not None:
+                output.update(stacked)
+                output["stacked_meta_active"] = True
         if self.state.warnings:
             output["score_model_warning"] = "; ".join(self.state.warnings)
         return output
@@ -300,6 +337,13 @@ def fit_score_model_state(
     rows = _history_model_rows(history_df, base_model, recency_weight=config.get("score_mle_recency_weight", config.get("recency_weight", 0.0)))
     if key == "xg_poisson_local":
         state = _fit_xg_local_state(label=label, fingerprint=fingerprint)
+    elif key == XG_DIXON_COLES_MODEL:
+        state = _fit_xg_dixon_coles_state(
+            label=label,
+            fingerprint=fingerprint,
+            rows=rows,
+            backend=config.get("score_backend") or config.get("sota_device", "auto"),
+        )
     elif key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
         state = _fit_bayesian_state(key, label, fingerprint, rows, teams, config)
     elif not rows:
@@ -332,6 +376,32 @@ def fit_score_model_state(
             warnings=tuple(fit_warnings),
             fingerprint=fingerprint,
         )
+    elif key == NEGATIVE_BINOMIAL_DIXON_COLES_MODEL:
+        lambda_model, lambda_warnings = _fit_statsmodels_lambda_model(rows, teams=teams, config=config)
+        mle_rows = _rows_with_lambda_model(rows, lambda_model) if lambda_model else rows
+        alpha = _negative_binomial_alpha(lambda_model) if lambda_model else _negative_binomial_alpha_from_rows(mle_rows)
+        rho, fit_backend, fit_warnings = _estimate_negative_binomial_dixon_coles_rho(
+            mle_rows,
+            alpha=alpha,
+            backend=config.get("score_backend") or config.get("sota_device", "auto"),
+        )
+        params = {"alpha": alpha, "rho": rho, "fit_backend": fit_backend}
+        if lambda_model:
+            params["lambda_model"] = lambda_model
+        state = ScoreModelState(
+            key,
+            label,
+            True,
+            params,
+            warnings=tuple(_merge_warnings(lambda_warnings, fit_warnings)),
+            fingerprint=fingerprint,
+        )
+    elif key == DYNAMIC_STRENGTH_KALMAN_MODEL:
+        state = _fit_dynamic_strength_state(key, label, fingerprint, rows, teams, config)
+    elif key == STACKED_META_MNLOGIT_MODEL:
+        lambda_model, lambda_warnings = _fit_statsmodels_lambda_model(rows, teams=teams, config=config)
+        meta_rows = _rows_with_lambda_model(rows, lambda_model) if lambda_model else rows
+        state = _fit_stacked_meta_state(key, label, fingerprint, meta_rows, lambda_warnings)
     elif key == "dixon_coles_mle":
         lambda_model, lambda_warnings = _fit_statsmodels_lambda_model(rows, teams=teams, config=config)
         mle_rows = _rows_with_lambda_model(rows, lambda_model) if lambda_model else rows
@@ -414,10 +484,20 @@ def score_grid_from_lambdas_with_overdispersion(
     max_goals = int(min(max(int(max_goals or 10), 4), 14))
     if key == "dixon_coles_mle":
         return dixon_coles_score_grid(lambda1, lambda2, rho=float(params.get("rho", 0.0)), max_goals=max_goals)
+    if key == XG_DIXON_COLES_MODEL:
+        return dixon_coles_score_grid(lambda1, lambda2, rho=float(params.get("rho", 0.0)), max_goals=max_goals)
     if key == "bivariate_poisson_mle":
         return bivariate_poisson_score_grid(lambda1, lambda2, float(params.get("corr_share", 0.0)), max_goals=max_goals)
     if key == NEGATIVE_BINOMIAL_GLM_MODEL:
         return negative_binomial_score_grid(lambda1, lambda2, alpha=float(params.get("alpha", 0.0)), max_goals=max_goals)
+    if key == NEGATIVE_BINOMIAL_DIXON_COLES_MODEL:
+        return negative_binomial_dixon_coles_score_grid(
+            lambda1,
+            lambda2,
+            alpha=float(params.get("alpha", 0.0)),
+            rho=float(params.get("rho", 0.0)),
+            max_goals=max_goals,
+        )
     if key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
         alpha = float(params.get("predictive_overdispersion", 0.0))
         if predictive_overdispersion is not None:
@@ -586,6 +666,20 @@ def negative_binomial_score_grid(lambda1: float, lambda2: float, alpha: float, m
     return _normalize_grid(np.outer(home, away))
 
 
+def negative_binomial_dixon_coles_score_grid(
+        lambda1: float,
+        lambda2: float,
+        alpha: float,
+        rho: float,
+        max_goals: int = 10,
+) -> np.ndarray:
+    grid = negative_binomial_score_grid(lambda1, lambda2, alpha=alpha, max_goals=max_goals)
+    rho = float(np.clip(rho, -0.24, 0.24))
+    adjusted = grid.copy()
+    adjusted[:2, :2] *= np.asarray(_low_score_adjustment_factors(lambda1, lambda2, rho), dtype=float)
+    return _normalize_grid(adjusted)
+
+
 def _negative_binomial_pmf_vector(rate: float, alpha: float, max_goals: int) -> np.ndarray:
     rate = _clamp_rate(rate)
     alpha = float(np.clip(alpha, 0.0, 2.0))
@@ -645,7 +739,7 @@ def _score_grids_from_lambdas_xp(
 ) -> Any:
     lambda1 = xp.clip(xp.asarray(lambda1_values, dtype=xp.float64), 0.05, 6.5)
     lambda2 = xp.clip(xp.asarray(lambda2_values, dtype=xp.float64), 0.05, 6.5)
-    if key == "dixon_coles_mle":
+    if key in {"dixon_coles_mle", XG_DIXON_COLES_MODEL}:
         return _dixon_coles_score_grids_xp(
             xp,
             lambda1,
@@ -667,6 +761,15 @@ def _score_grids_from_lambdas_xp(
             lambda1,
             lambda2,
             alpha=float(params.get("alpha", 0.0)),
+            max_goals=max_goals,
+        )
+    if key == NEGATIVE_BINOMIAL_DIXON_COLES_MODEL:
+        return _negative_binomial_dixon_coles_score_grids_xp(
+            xp,
+            lambda1,
+            lambda2,
+            alpha=float(params.get("alpha", 0.0)),
+            rho=float(params.get("rho", 0.0)),
             max_goals=max_goals,
         )
     if key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
@@ -701,11 +804,7 @@ def _dixon_coles_score_grids_xp(xp: Any, lambda1: Any, lambda2: Any, rho: float,
     grids = _poisson_score_grids_xp(xp, lambda1, lambda2, max_goals=max_goals)
     adjusted = grids.copy()
     rho = float(np.clip(rho, -0.25, 0.25))
-    low_factors = xp.empty((int(adjusted.shape[0]), 2, 2), dtype=xp.float64)
-    low_factors[:, 0, 0] = xp.maximum(1.0 - lambda1 * lambda2 * rho, 1e-6)
-    low_factors[:, 0, 1] = xp.maximum(1.0 + lambda1 * rho, 1e-6)
-    low_factors[:, 1, 0] = xp.maximum(1.0 + lambda2 * rho, 1e-6)
-    low_factors[:, 1, 1] = xp.maximum(1.0 - rho, 1e-6)
+    low_factors = _low_score_adjustment_factors_xp(xp, lambda1, lambda2, rho)
     adjusted[:, :2, :2] *= low_factors
     return _normalize_batched_grids_xp(xp, adjusted)
 
@@ -755,6 +854,42 @@ def _negative_binomial_score_grids_xp(xp: Any, lambda1: Any, lambda2: Any, alpha
     away = _negative_binomial_pmf_matrix_xp(xp, lambda2, alpha=alpha, max_goals=max_goals)
     grids = home[:, :, None] * away[:, None, :]
     return _normalize_batched_grids_xp(xp, grids)
+
+
+def _negative_binomial_dixon_coles_score_grids_xp(
+        xp: Any,
+        lambda1: Any,
+        lambda2: Any,
+        alpha: float,
+        rho: float,
+        max_goals: int,
+) -> Any:
+    grids = _negative_binomial_score_grids_xp(xp, lambda1, lambda2, alpha=alpha, max_goals=max_goals)
+    adjusted = grids.copy()
+    adjusted[:, :2, :2] *= _low_score_adjustment_factors_xp(xp, lambda1, lambda2, rho)
+    return _normalize_batched_grids_xp(xp, adjusted)
+
+
+def _low_score_adjustment_factors(lambda1: float, lambda2: float, rho: float) -> List[List[float]]:
+    lambda1 = _clamp_rate(lambda1)
+    lambda2 = _clamp_rate(lambda2)
+    rho = float(np.clip(rho, -0.24, 0.24))
+    return [
+        [max(1.0 - lambda1 * lambda2 * rho, 1e-6), max(1.0 + lambda1 * rho, 1e-6)],
+        [max(1.0 + lambda2 * rho, 1e-6), max(1.0 - rho, 1e-6)],
+    ]
+
+
+def _low_score_adjustment_factors_xp(xp: Any, lambda1: Any, lambda2: Any, rho: float) -> Any:
+    rho = float(np.clip(rho, -0.24, 0.24))
+    low_factors = xp.empty((int(xp.asarray(lambda1).size), 2, 2), dtype=xp.float64)
+    lambda1 = xp.asarray(lambda1, dtype=xp.float64).reshape(-1)
+    lambda2 = xp.asarray(lambda2, dtype=xp.float64).reshape(-1)
+    low_factors[:, 0, 0] = xp.maximum(1.0 - lambda1 * lambda2 * rho, 1e-6)
+    low_factors[:, 0, 1] = xp.maximum(1.0 + lambda1 * rho, 1e-6)
+    low_factors[:, 1, 0] = xp.maximum(1.0 + lambda2 * rho, 1e-6)
+    low_factors[:, 1, 1] = xp.maximum(1.0 - rho, 1e-6)
+    return low_factors
 
 
 def _negative_binomial_pmf_matrix_xp(xp: Any, rate: Any, alpha: float, max_goals: int) -> Any:
@@ -1330,6 +1465,319 @@ def _negative_binomial_alpha(lambda_model: Dict[str, Any]) -> float:
     return float(np.clip(alpha, 0.0, 2.0))
 
 
+def _negative_binomial_alpha_from_rows(rows: List[Dict[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    observed: List[float] = []
+    expected: List[float] = []
+    weights: List[float] = []
+    for row in rows:
+        observed.extend([float(row.get("g1", 0)), float(row.get("g2", 0))])
+        expected.extend([_clamp_rate(row.get("lambda1", 1.0)), _clamp_rate(row.get("lambda2", 1.0))])
+        weight = max(float(row.get("weight", 1.0) or 1.0), 1e-6)
+        weights.extend([weight, weight])
+    y = np.asarray(observed, dtype=float)
+    mu = np.asarray(expected, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    if y.size < 4:
+        return 0.0
+    pearson = np.sum(w * np.square(y - mu) / np.clip(mu, 1e-6, None))
+    dispersion = pearson / max(float(np.sum(w) - 1.0), 1.0)
+    mean_mu = max(float(np.average(mu, weights=w)), 1e-6)
+    return float(np.clip(max((dispersion - 1.0) / mean_mu, 0.0), 0.0, 2.0))
+
+
+def _fit_xg_dixon_coles_state(
+        label: str,
+        fingerprint: str,
+        rows: List[Dict[str, Any]],
+        backend: Any = "auto",
+) -> ScoreModelState:
+    xg_state = _fit_xg_local_state(label=label, fingerprint=fingerprint)
+    params = dict(xg_state.params or {})
+    if not xg_state.available:
+        return ScoreModelState(
+            key=XG_DIXON_COLES_MODEL,
+            label=label,
+            available=False,
+            params=params,
+            warnings=tuple(xg_state.warnings),
+            fingerprint=fingerprint,
+        )
+    rho = 0.0
+    fit_backend = "numpy"
+    fit_warnings: List[str] = []
+    if rows:
+        rho, fit_backend, fit_warnings = _estimate_dixon_coles_rho(rows, backend=backend)
+    params.update({"rho": float(rho), "fit_backend": fit_backend, "xg_source": params.get("path", str(LOCAL_XG_FILE))})
+    warnings = list(xg_state.warnings)
+    if not rows:
+        warnings.append("Rho xG-Dixon-Coles queda en 0.0: sin historico suficiente para MLE.")
+    return ScoreModelState(
+        key=XG_DIXON_COLES_MODEL,
+        label=label,
+        available=True,
+        params=params,
+        warnings=tuple(_merge_warnings(warnings, fit_warnings)),
+        fingerprint=fingerprint,
+    )
+
+
+def _fit_dynamic_strength_state(
+        key: str,
+        label: str,
+        fingerprint: str,
+        rows: List[Dict[str, Any]],
+        teams: Iterable[str],
+        config: Dict[str, Any],
+) -> ScoreModelState:
+    if len(rows) < 4:
+        return ScoreModelState(
+            key=key,
+            label=label,
+            available=False,
+            params={},
+            warnings=("Sin historico suficiente para fuerza dinamica; se usa Poisson independiente.",),
+            fingerprint=fingerprint,
+        )
+    team_list = sorted(set(str(team) for team in teams) | {row["home"] for row in rows} | {row["away"] for row in rows})
+    attack = {team: 0.0 for team in team_list}
+    defense = {team: 0.0 for team in team_list}
+    recency = float(np.clip(config.get("recency_weight", 0.35), 0.0, 1.0))
+    base_gain = float(np.clip(0.18 + 0.22 * recency, 0.12, 0.45))
+    sorted_rows = sorted(rows, key=lambda item: str(item.get("date", "")))
+    for row in sorted_rows:
+        home = str(row.get("home", ""))
+        away = str(row.get("away", ""))
+        if home not in attack or away not in attack:
+            continue
+        weight = float(np.clip(float(row.get("weight", 1.0) or 1.0), 0.1, 2.0))
+        gain = float(np.clip(base_gain * weight, 0.05, 0.55))
+        home_signal = math.log((float(row.get("g1", 0)) + 0.35) / (_clamp_rate(row.get("lambda1", 1.0)) + 0.35))
+        away_signal = math.log((float(row.get("g2", 0)) + 0.35) / (_clamp_rate(row.get("lambda2", 1.0)) + 0.35))
+        home_signal = float(np.clip(home_signal, -0.9, 0.9))
+        away_signal = float(np.clip(away_signal, -0.9, 0.9))
+        attack[home] = (1.0 - gain) * attack[home] + gain * home_signal
+        defense[away] = (1.0 - gain) * defense[away] - gain * home_signal
+        attack[away] = (1.0 - gain) * attack[away] + gain * away_signal
+        defense[home] = (1.0 - gain) * defense[home] - gain * away_signal
+    attack_values = np.asarray([attack[team] for team in team_list], dtype=float)
+    defense_values = np.asarray([defense[team] for team in team_list], dtype=float)
+    attack_values = np.clip(attack_values - float(np.mean(attack_values)), -0.85, 0.85)
+    defense_values = np.clip(defense_values - float(np.mean(defense_values)), -0.85, 0.85)
+    residuals = []
+    for row in rows:
+        residuals.append(float(row.get("g1", 0)) - _clamp_rate(row.get("lambda1", 1.0)))
+        residuals.append(float(row.get("g2", 0)) - _clamp_rate(row.get("lambda2", 1.0)))
+    predictive_overdispersion = float(np.clip(np.var(residuals) / max(np.mean([abs(item) for item in residuals]) + 1.0, 1e-6), 0.0, 1.2))
+    return ScoreModelState(
+        key=key,
+        label=label,
+        available=True,
+        params={
+            "teams": team_list,
+            "attack": attack_values.astype(float).tolist(),
+            "defense": defense_values.astype(float).tolist(),
+            "gain": base_gain,
+            "fit_backend": "recursive_kalman_style_filter",
+            "predictive_overdispersion": predictive_overdispersion,
+            "n_matches": len(rows),
+        },
+        warnings=("Fuerza dinamica usa filtro recursivo ligero; Bayes/PyMC queda como perfil profundo.",),
+        fingerprint=fingerprint,
+    )
+
+
+def _dynamic_strength_lambdas_for_match(
+        state: ScoreModelState,
+        home: str,
+        away: str,
+        base_lambdas: Tuple[float, float],
+) -> Tuple[float, float] | None:
+    params = state.params or {}
+    teams = [str(team) for team in params.get("teams", [])]
+    if not teams:
+        return None
+    try:
+        home_idx = teams.index(str(home))
+        away_idx = teams.index(str(away))
+    except ValueError:
+        return None
+    attack = np.asarray(params.get("attack") or [], dtype=float)
+    defense = np.asarray(params.get("defense") or [], dtype=float)
+    if attack.size <= max(home_idx, away_idx) or defense.size <= max(home_idx, away_idx):
+        return None
+    blend = 0.72
+    home_eta = math.log(max(_clamp_rate(base_lambdas[0]), 1e-9)) + blend * (attack[home_idx] - defense[away_idx])
+    away_eta = math.log(max(_clamp_rate(base_lambdas[1]), 1e-9)) + blend * (attack[away_idx] - defense[home_idx])
+    return _clamp_rate(math.exp(float(np.clip(home_eta, -4.0, 2.2)))), _clamp_rate(math.exp(float(np.clip(away_eta, -4.0, 2.2))))
+
+
+def _fit_stacked_meta_state(
+        key: str,
+        label: str,
+        fingerprint: str,
+        rows: List[Dict[str, Any]],
+        lambda_warnings: Iterable[Any],
+) -> ScoreModelState:
+    frame = _stacked_meta_training_frame(rows)
+    warnings = [str(item) for item in lambda_warnings if str(item)]
+    if frame.empty or frame["target"].nunique() < 3 or frame.shape[0] < 12:
+        return ScoreModelState(
+            key=key,
+            label=label,
+            available=False,
+            params={},
+            warnings=tuple(_merge_warnings(warnings, ["Stacking omitido: se requieren al menos 12 filas y las 3 clases 1/X/2."])),
+            fingerprint=fingerprint,
+        )
+    columns = ["const", "p_home", "p_draw", "p_away", "lambda_diff", "lambda_total", "home_lambda", "away_lambda"]
+    x = frame[columns].to_numpy(dtype=float)
+    y = frame["target"].to_numpy(dtype=int)
+    try:
+        from statsmodels.discrete.discrete_model import MNLogit  # type: ignore
+
+        result = MNLogit(y, x).fit(method="lbfgs", maxiter=200, disp=False)
+        params = np.asarray(result.params, dtype=float)
+        if params.ndim != 2 or not np.all(np.isfinite(params)):
+            raise ValueError("MNLogit devolvio parametros no finitos.")
+        return ScoreModelState(
+            key=key,
+            label=label,
+            available=True,
+            params={
+                "backend": "statsmodels_mnlogit",
+                "columns": columns,
+                "params": params.tolist(),
+                "outcome_order": ["home", "draw", "away"],
+                "n_matches": int(frame.shape[0]),
+                "pseudo_r2": float(getattr(result, "prsquared", 0.0) or 0.0),
+            },
+            warnings=tuple(warnings),
+            fingerprint=fingerprint,
+        )
+    except Exception as exc:
+        warnings.append(f"MNLogit statsmodels fallo ({exc.__class__.__name__}: {exc}); se intenta sklearn LogisticRegression.")
+    try:
+        from sklearn.linear_model import LogisticRegression  # type: ignore
+
+        model = LogisticRegression(max_iter=400, multi_class="auto")
+        model.fit(x[:, 1:], y)
+        return ScoreModelState(
+            key=key,
+            label=label,
+            available=True,
+            params={
+                "backend": "sklearn_logistic_fallback",
+                "columns": columns[1:],
+                "classes": [int(item) for item in model.classes_.tolist()],
+                "coef": np.asarray(model.coef_, dtype=float).tolist(),
+                "intercept": np.asarray(model.intercept_, dtype=float).tolist(),
+                "outcome_order": ["home", "draw", "away"],
+                "n_matches": int(frame.shape[0]),
+            },
+            warnings=tuple(warnings),
+            fingerprint=fingerprint,
+        )
+    except Exception as exc:
+        warnings.append(f"Fallback sklearn fallo ({exc.__class__.__name__}: {exc}); se usa Poisson independiente.")
+    return ScoreModelState(
+        key=key,
+        label=label,
+        available=False,
+        params={},
+        warnings=tuple(warnings),
+        fingerprint=fingerprint,
+    )
+
+
+def _stacked_meta_training_frame(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    records: List[Dict[str, Any]] = []
+    for row in rows:
+        lambda1 = _clamp_rate(row.get("lambda1", 1.0))
+        lambda2 = _clamp_rate(row.get("lambda2", 1.0))
+        probabilities = probabilities_from_score_grid(poisson_score_grid(lambda1, lambda2, max_goals=10), lambda1, lambda2)
+        records.append({
+            "const": 1.0,
+            "p_home": float(probabilities.get("home", 0.0)),
+            "p_draw": float(probabilities.get("draw", 0.0)),
+            "p_away": float(probabilities.get("away", 0.0)),
+            "lambda_diff": lambda1 - lambda2,
+            "lambda_total": lambda1 + lambda2,
+            "home_lambda": lambda1,
+            "away_lambda": lambda2,
+            "target": _outcome_code(int(row.get("g1", 0)), int(row.get("g2", 0))),
+        })
+    return pd.DataFrame(records)
+
+
+def _outcome_code(home_goals: int, away_goals: int) -> int:
+    if home_goals > away_goals:
+        return 0
+    if away_goals > home_goals:
+        return 2
+    return 1
+
+
+def _stacked_meta_probabilities_for_match(state: ScoreModelState, base_probabilities: Dict[str, Any]) -> Dict[str, float] | None:
+    if not state.available:
+        return None
+    params = state.params or {}
+    row = {
+        "const": 1.0,
+        "p_home": float(base_probabilities.get("home", 0.0) or 0.0),
+        "p_draw": float(base_probabilities.get("draw", 0.0) or 0.0),
+        "p_away": float(base_probabilities.get("away", 0.0) or 0.0),
+        "lambda_diff": float(base_probabilities.get("lambda1", 0.0) or 0.0) - float(base_probabilities.get("lambda2", 0.0) or 0.0),
+        "lambda_total": float(base_probabilities.get("lambda1", 0.0) or 0.0) + float(base_probabilities.get("lambda2", 0.0) or 0.0),
+        "home_lambda": float(base_probabilities.get("lambda1", 0.0) or 0.0),
+        "away_lambda": float(base_probabilities.get("lambda2", 0.0) or 0.0),
+    }
+    backend = str(params.get("backend") or "")
+    try:
+        if backend == "statsmodels_mnlogit":
+            columns = [str(item) for item in params.get("columns", [])]
+            x = np.asarray([row[column] for column in columns], dtype=float)
+            beta = np.asarray(params.get("params") or [], dtype=float)
+            eta = np.asarray(x @ beta, dtype=float).reshape(-1)
+            eta = np.clip(eta, -12.0, 12.0)
+            numerators = np.concatenate([[1.0], np.exp(eta)])
+            probs = numerators / max(float(numerators.sum()), 1e-12)
+        elif backend == "sklearn_logistic_fallback":
+            columns = [str(item) for item in params.get("columns", [])]
+            x = np.asarray([row[column] for column in columns], dtype=float)
+            coef = np.asarray(params.get("coef") or [], dtype=float)
+            intercept = np.asarray(params.get("intercept") or [], dtype=float)
+            classes = [int(item) for item in params.get("classes", [])]
+            logits = np.clip(coef @ x + intercept, -12.0, 12.0)
+            exp_logits = np.exp(logits - float(np.max(logits)))
+            class_probs = exp_logits / max(float(exp_logits.sum()), 1e-12)
+            probs = np.zeros(3, dtype=float)
+            for cls, value in zip(classes, class_probs):
+                if 0 <= cls <= 2:
+                    probs[cls] = float(value)
+            if probs.sum() <= 0:
+                return None
+            probs = probs / probs.sum()
+        else:
+            return None
+    except Exception:
+        return None
+    blend = 0.72
+    base = np.asarray([
+        float(base_probabilities.get("home", 0.0) or 0.0),
+        float(base_probabilities.get("draw", 0.0) or 0.0),
+        float(base_probabilities.get("away", 0.0) or 0.0),
+    ], dtype=float)
+    if base.sum() <= 0:
+        base = np.ones(3, dtype=float) / 3.0
+    else:
+        base = base / base.sum()
+    final = blend * probs + (1.0 - blend) * base
+    final = final / max(float(final.sum()), 1e-12)
+    return {"home": float(final[0]), "draw": float(final[1]), "away": float(final[2])}
+
+
 def _predict_lambda_frame(frame: pd.DataFrame, columns: Sequence[str], params: np.ndarray) -> np.ndarray:
     x = _lambda_design_matrix(frame, columns)
     offset = np.log(np.clip(pd.to_numeric(frame["base_lambda"], errors="coerce").fillna(1.0).to_numpy(dtype=float), 1e-9, None))
@@ -1582,6 +2030,46 @@ def _estimate_dixon_coles_rho(rows: List[Dict[str, Any]], backend: Any = "auto")
     return float(np.clip(result, -0.24, 0.24)), "numpy", warnings
 
 
+def _estimate_negative_binomial_dixon_coles_rho(
+        rows: List[Dict[str, Any]],
+        alpha: float,
+        backend: Any = "auto",
+) -> Tuple[float, str, List[str]]:
+    candidates = np.linspace(-0.24, 0.24, 121, dtype=float)
+    try:
+        value, backend_name, warnings = _estimate_negative_binomial_dixon_coles_rho_batched(rows, candidates, alpha=alpha, backend=backend)
+        step = float(candidates[1] - candidates[0])
+        fine_candidates = np.linspace(max(-0.24, value - step), min(0.24, value + step), 81, dtype=float)
+        value, backend_name, fine_warnings = _estimate_negative_binomial_dixon_coles_rho_batched(
+            rows,
+            fine_candidates,
+            alpha=alpha,
+            backend=backend_name,
+        )
+        return float(np.clip(value, -0.24, 0.24)), backend_name, _merge_warnings(warnings, fine_warnings)
+    except Exception as exc:
+        warnings = [f"MLE NB-Dixon-Coles batched fallo ({exc.__class__.__name__}: {exc}); se usa optimizacion CPU."]
+
+    def objective(rho: float) -> float:
+        return -sum(
+            float(row.get("weight", 1.0) or 1.0)
+            * _grid_log_probability(
+                negative_binomial_dixon_coles_score_grid(
+                    row["lambda1"],
+                    row["lambda2"],
+                    alpha=alpha,
+                    rho=rho,
+                    max_goals=10,
+                ),
+                row,
+            )
+            for row in rows
+        )
+
+    result = _minimize_scalar(objective, -0.24, 0.24)
+    return float(np.clip(result, -0.24, 0.24)), "numpy", warnings
+
+
 def _estimate_bivariate_corr_share(rows: List[Dict[str, Any]], backend: Any = "auto") -> Tuple[float, str, List[str]]:
     candidates = np.linspace(0.0, 0.55, 111, dtype=float)
     try:
@@ -1639,6 +2127,39 @@ def _estimate_dixon_coles_rho_batched(
     probabilities = base_observed * factors / xp.maximum(adjusted_totals, 1e-12)
     likelihoods = xp.sum(weights[None, :] * xp.log(xp.maximum(probabilities, 1e-12)), axis=1)
     index = int(_scalar_from_xp(xp, xp.argmax(likelihoods)))
+    return float(candidates[index]), backend_name, warnings
+
+
+def _estimate_negative_binomial_dixon_coles_rho_batched(
+        rows: List[Dict[str, Any]],
+        candidates: np.ndarray,
+        alpha: float,
+        backend: Any,
+) -> Tuple[float, str, List[str]]:
+    row_arrays = _row_arrays_for_mle(rows, max_goals=10)
+    xp, backend_name, warnings = _array_module_for_backend(backend)
+    lambda1 = xp.asarray(row_arrays["lambda1"], dtype=xp.float64)
+    lambda2 = xp.asarray(row_arrays["lambda2"], dtype=xp.float64)
+    goals_home = xp.asarray(row_arrays["g1"], dtype=xp.int64)
+    goals_away = xp.asarray(row_arrays["g2"], dtype=xp.int64)
+    weights = xp.asarray(row_arrays["weight"], dtype=xp.float64)
+    row_index = xp.arange(int(goals_home.size), dtype=xp.int64)
+    base_grids = _negative_binomial_score_grids_xp(
+        xp,
+        lambda1,
+        lambda2,
+        alpha=alpha,
+        max_goals=10,
+    )
+    likelihoods = []
+    for rho in candidates:
+        grids = base_grids.copy()
+        grids[:, :2, :2] *= _low_score_adjustment_factors_xp(xp, lambda1, lambda2, float(rho))
+        grids = _normalize_batched_grids_xp(xp, grids)
+        observed = grids[row_index, goals_home, goals_away]
+        likelihoods.append(xp.sum(weights * xp.log(xp.maximum(observed, xp.float64(1e-12)))))
+    likelihood_array = xp.asarray(likelihoods, dtype=xp.float64)
+    index = int(_scalar_from_xp(xp, xp.argmax(likelihood_array)))
     return float(candidates[index]), backend_name, warnings
 
 
@@ -1873,7 +2394,7 @@ def _fit_fingerprint(key: str, history_df: pd.DataFrame | None, teams: Iterable[
     if history_df is not None and not history_df.empty:
         columns = [column for column in ("Date", "Team 1", "Team 2", "G1", "G2") if column in history_df.columns]
         digest.update(pd.util.hash_pandas_object(history_df[columns].astype(str), index=False).values.tobytes())
-    if normalize_score_model_key(key) == "xg_poisson_local" and LOCAL_XG_FILE.exists():
+    if normalize_score_model_key(key) in {"xg_poisson_local", XG_DIXON_COLES_MODEL} and LOCAL_XG_FILE.exists():
         stat = LOCAL_XG_FILE.stat()
         digest.update(f"{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8"))
     return digest.hexdigest()[:16]
