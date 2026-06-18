@@ -621,6 +621,39 @@ def test_job_manager_rejects_duplicate_active_lock_key():
         manager._executor.shutdown(wait=True)
 
 
+def test_job_manager_expires_stale_active_lock_key():
+    from datetime import datetime, timedelta, timezone
+    from threading import Event
+
+    from src.web.jobs import JOB_STALE_TIMEOUT_SECONDS, STALE_JOB_ERROR, JobManager
+
+    manager = JobManager(max_workers=1)
+    started = Event()
+    release = Event()
+
+    def waits(progress_callback=None):
+        started.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    try:
+        first = manager.submit("train", waits, with_progress=True, lock_key="mundial-report")
+        assert started.wait(timeout=2)
+        stale_time = datetime.now(timezone.utc) - timedelta(seconds=JOB_STALE_TIMEOUT_SECONDS + 5)
+        with manager._lock:
+            manager._jobs[first["job_id"]].updated_at = stale_time.isoformat()
+        expired = manager.get(first["job_id"])
+        assert expired["status"] == "failed"
+        assert expired["error"] == STALE_JOB_ERROR
+        release.set()
+        second = manager.submit("train again", lambda progress_callback=None: {"ok": True}, with_progress=True, lock_key="mundial-report")
+        second_job = wait_for_manager_job(manager, second["job_id"])
+        assert second_job["status"] == "succeeded"
+    finally:
+        release.set()
+        manager._executor.shutdown(wait=True)
+
+
 def test_worldcup_training_progress_prints_optuna_details(capsys):
     from src.worldcup.training import emit_training_progress
 

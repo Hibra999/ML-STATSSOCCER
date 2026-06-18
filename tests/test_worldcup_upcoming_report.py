@@ -146,9 +146,14 @@ def test_advanced_models_pipeline_registry_and_config():
     ]
 
     deep_config = services.report_pipeline_config(
+        {"bayes_profile": "deep", "advanced_include_bayesian": True},
+        services.ADVANCED_MODELS_PIPELINE_MODE,
+    )
+    ignored_deep_config = services.report_pipeline_config(
         {"bayes_profile": "deep"},
         services.ADVANCED_MODELS_PIPELINE_MODE,
     )
+    assert "bayesian_dynamic_poisson" not in services.active_advanced_score_model_sequence(ignored_deep_config)
     assert "bayesian_dynamic_poisson" in services.active_advanced_score_model_sequence(deep_config)
     catalog = services.advanced_models_catalog({"families": [{"key": "xg_shot_quality", "status": "active"}]})
     assert {item["key"] for item in catalog} >= {

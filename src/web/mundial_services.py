@@ -2026,7 +2026,7 @@ def xg_lightgbm_report(
 
 def active_advanced_score_model_sequence(config: Dict[str, Any]) -> List[str]:
     sequence = list(ADVANCED_SCORE_MODEL_SEQUENCE)
-    include_bayes = bool(config.get("advanced_include_bayesian")) or str(config.get("bayes_profile") or "").lower() == "deep"
+    include_bayes = bool(config.get("advanced_include_bayesian"))
     if include_bayes:
         sequence.extend(ADVANCED_HEAVY_SCORE_MODEL_SEQUENCE)
     return list(dict.fromkeys(sequence))
@@ -4950,6 +4950,10 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
     config["sota_device"] = str(payload.get("sota_device") or "auto").strip().lower()
     config["sota_calculation_mode"] = normalize_sota_calculation_mode(payload.get("sota_calculation_mode"))
     config["advanced_include_bayesian"] = bool(payload.get("advanced_include_bayesian", DEFAULT_CONFIG["advanced_include_bayesian"]))
+    if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE and not config["advanced_include_bayesian"]:
+        config["bayes_profile"] = "light"
+    if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE and config["advanced_include_bayesian"]:
+        config["bayes_profile"] = "deep"
     if config["sota_device"] not in {"auto", "cpu", "cuda"}:
         config["sota_device"] = "auto"
     config["score_model"] = DEFAULT_SCORE_MODEL

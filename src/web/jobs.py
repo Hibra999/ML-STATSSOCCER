@@ -11,6 +11,8 @@ from typing import Any, Callable, Dict, Optional
 
 
 logger = logging.getLogger("uvicorn.error")
+JOB_STALE_TIMEOUT_SECONDS = 10 * 60
+STALE_JOB_ERROR = "Proceso detenido por falta de progreso. Vuelve a ejecutar con un perfil ligero."
 
 
 @dataclass
@@ -51,6 +53,7 @@ class JobManager:
         now = self._now()
         job = Job(id=job_id, status="queued", message=message, created_at=now, updated_at=now, lock_key=str(lock_key or ""))
         with self._lock:
+            self._expire_stale_jobs_locked(now)
             if lock_key:
                 active = [
                     item for item in self._jobs.values()
@@ -64,6 +67,7 @@ class JobManager:
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
+            self._expire_stale_jobs_locked(self._now())
             job = self._jobs.get(job_id)
             return None if job is None else job.to_dict()
 
@@ -97,6 +101,8 @@ class JobManager:
     ):
         with self._lock:
             job = self._jobs[job_id]
+            if job.status == "failed" and job.error == STALE_JOB_ERROR:
+                return
             if status is not None:
                 job.status = status
             if result is not None:
@@ -108,6 +114,30 @@ class JobManager:
             if traceback_text is not None:
                 job.traceback = traceback_text
             job.updated_at = self._now()
+
+    def _expire_stale_jobs_locked(self, now: str) -> None:
+        now_dt = self._parse_time(now)
+        for job in self._jobs.values():
+            if job.status not in {"queued", "running"}:
+                continue
+            updated_dt = self._parse_time(job.updated_at)
+            if updated_dt is None or now_dt is None:
+                continue
+            if (now_dt - updated_dt).total_seconds() < JOB_STALE_TIMEOUT_SECONDS:
+                continue
+            job.status = "failed"
+            job.error = STALE_JOB_ERROR
+            job.updated_at = now
+
+    @staticmethod
+    def _parse_time(value: str) -> Optional[datetime]:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     @staticmethod
     def _now() -> str:

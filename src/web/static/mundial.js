@@ -543,6 +543,9 @@ async function runUpcomingPredictions() {
   const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
   const benchmarkTuningEnabled = pipelineMode === "alternatives_benchmark" && Boolean((document.getElementById("upcoming-benchmark-tuning-enabled") || {}).checked);
   const advancedIncludeBayesian = pipelineMode === "advanced_models" && Boolean((document.getElementById("upcoming-advanced-include-bayesian") || {}).checked);
+  const bayesProfile = pipelineMode === "advanced_models"
+    ? advancedIncludeBayesian ? "deep" : "light"
+    : (document.getElementById("upcoming-bayes-profile") || {}).value || "deep";
   const xgPayload = pipelineMode === "xg_lightgbm" ? xgLightgbmTrainingPayload() : {};
   const calculationLabel = pipelineMode === "alternatives_benchmark"
     ? `Benchmark alternativas${benchmarkTuningEnabled ? " + Optuna" : ""}`
@@ -563,7 +566,7 @@ async function runUpcomingPredictions() {
       limit,
       group,
       backtest_last_n: backtestLastN,
-      bayes_profile: (document.getElementById("upcoming-bayes-profile") || {}).value || "deep",
+      bayes_profile: bayesProfile,
       sota_device: (document.getElementById("upcoming-sota-device") || {}).value || "auto",
       sota_calculation_mode: sotaCalculationMode,
       benchmark_tuning_enabled: benchmarkTuningEnabled,
@@ -1136,19 +1139,21 @@ function renderAdvancedDataStatus(payload) {
   const activeSources = status.active_sources || [];
   const warnings = status.warnings || [];
   const preparedRows = Number(status.prepared_rows || 0);
+  const runnableFamilies = families.filter((item) => ["active", "cached"].includes(String(item.status || ""))).length;
   const pipelineState = advancedPipelineState(status);
   setText("advanced-status-summary", pipelineState.summary);
   setText("advanced-status-pill", pipelineState.label);
   setPipelineStateClass("upcoming-advanced-panel", pipelineState.className);
   setPipelineStateClass("advanced-status-pill", pipelineState.className);
-  setText("advanced-source-count", activeSources.length || 0);
-  setText("advanced-feature-count", formatInteger(preparedRows || 0));
-  setText("advanced-family-count", families.length || 0);
+  setText("advanced-source-count", activeSources.length ? activeSources.length : "Fallback");
+  setText("advanced-feature-count", preparedRows ? formatInteger(preparedRows) : "Sin cache");
+  setText("advanced-family-count", families.length ? `${runnableFamilies}/${families.length}` : "0/0");
   setHtml("advanced-status-cards", `
     ${reportSummaryCard("Estado", pipelineState.label)}
-    ${reportSummaryCard("Filas", formatInteger(preparedRows || 0))}
-    ${reportSummaryCard("Fuentes", activeSources.length || 0)}
-    ${reportSummaryCard("StatsBomb", (status.statsbomb || {}).available ? `${(status.statsbomb || {}).json_files || 0} json` : "No")}
+    ${reportSummaryCard("Cache local", preparedRows ? `${formatInteger(preparedRows)} filas` : "Sin cache")}
+    ${reportSummaryCard("Fuente activa", activeSources.length ? `${activeSources.length} cache${activeSources.length === 1 ? "" : "s"}` : "Fallback Poisson/GLM")}
+    ${reportSummaryCard("Familias", families.length ? `${runnableFamilies}/${families.length} activas` : "0/0")}
+    ${reportSummaryCard("StatsBomb", (status.statsbomb || {}).available ? `${(status.statsbomb || {}).json_files || 0} json` : "Opcional")}
     ${reportSummaryCard("socceraction", status.socceraction_available ? "Instalado" : "Opcional")}
     ${reportSummaryCard("Ultimo prepare", formatReportDateTime(status.last_prepared_at || ""))}
   `);
@@ -1307,15 +1312,18 @@ function advancedDataReportHtml(dataStatus, models) {
   const families = status.families || [];
   const sources = status.active_sources || [];
   const readyFamilies = families.filter((item) => ["active", "cached"].includes(String(item.status || ""))).length;
+  const preparedRows = Number(status.prepared_rows || 0);
+  const cacheLabel = preparedRows > 0 ? `${formatInteger(preparedRows)} filas cacheadas` : "Sin cache local; fallback estadístico activo";
+  const sourceLabel = sources.length ? `${sources.length} fuente${sources.length === 1 ? "" : "s"}` : "Fallback Poisson/GLM";
   return `<section class="report-panel advanced-data-report">
     <header><strong>Datos avanzados</strong><small>${escapeHtml(status.anti_leakage || "Cache-first, corte temporal antes del partido")}</small></header>
     <div class="technical-meta-row">
-      <span>Preparado ${escapeHtml(status.prepared ? "si" : "no")}</span>
-      <span>Filas ${escapeHtml(formatInteger(status.prepared_rows || 0))}</span>
-      <span>Fuentes ${escapeHtml(sources.length || 0)}</span>
+      <span>Modo ${escapeHtml(preparedRows > 0 ? "cache avanzado" : "fallback estadístico")}</span>
+      <span>Cache ${escapeHtml(cacheLabel)}</span>
+      <span>Fuente activa ${escapeHtml(sourceLabel)}</span>
       <span>Familias listas ${escapeHtml(readyFamilies)}/${escapeHtml(families.length || 0)}</span>
       <span>Modelos ${escapeHtml((models || []).length || 0)}</span>
-      <span>StatsBomb ${escapeHtml((status.statsbomb || {}).available ? "cacheado" : "no")}</span>
+      <span>StatsBomb ${escapeHtml((status.statsbomb || {}).available ? "cacheado" : "opcional")}</span>
       <span>socceraction ${escapeHtml(status.socceraction_available ? "instalado" : "opcional")}</span>
     </div>
     <details class="inline-technical-drawer">
