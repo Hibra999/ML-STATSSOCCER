@@ -17,6 +17,9 @@ const state = {
   advancedData: null,
 };
 
+const XG_PIPELINE_LABEL = "Goles esperados (xG) + LightGBM";
+const XG_LEGACY_PIPELINE_LABEL = ["xG", "LightGBM"].join("-");
+
 const jobLabels = {
   queued: "En cola",
   running: "En proceso",
@@ -60,7 +63,6 @@ function bindEvents() {
   bind("simulate-poisson-btn", "click", runMatchMonteCarlo);
   bind("fixture-group-filter", "change", renderFixtures);
   bind("fixture-search", "input", renderFixtures);
-  bind("players-refresh", "click", () => loadPlayers(true));
   bind("upcoming-predict-btn", "click", runUpcomingPredictions);
   bind("upcoming-pipeline-mode", "change", syncUpcomingPipelineControls);
   bind("xg-refresh-status", "click", () => loadXgLightgbmStatus(true));
@@ -68,7 +70,6 @@ function bindEvents() {
   bind("xg-train", "click", runXgLightgbmTraining);
   bind("advanced-refresh-status", "click", () => loadAdvancedDataStatus(true));
   bind("advanced-prepare-data", "click", runAdvancedDataPrepare);
-  bind("advanced-open-predictions", "click", openAdvancedPredictions);
   poissonRecentInputIds.forEach((id) => {
     const input = document.getElementById(id);
     if (input) input.addEventListener("change", () => syncPoissonRecentInputs(input));
@@ -78,6 +79,7 @@ function bindEvents() {
   const activeButton = document.querySelector(".nav-pill.active");
   const activeId = (activeButton && activeButton.dataset.section) || "resumen";
   switchWorldcupView(activeId, false, sections);
+  syncUpcomingPipelineControls();
 }
 
 function handleWorldcupTabKeyboard(event) {
@@ -108,6 +110,20 @@ function bind(id, event, handler) {
   if (node) node.addEventListener(event, handler);
 }
 
+function setText(id, value) {
+  const node = document.getElementById(id);
+  if (node) node.textContent = value;
+}
+
+function setHtml(id, value) {
+  const node = document.getElementById(id);
+  if (node) node.innerHTML = value;
+}
+
+function xgDisplayLabel(value) {
+  return String(value || XG_PIPELINE_LABEL).split(XG_LEGACY_PIPELINE_LABEL).join(XG_PIPELINE_LABEL);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   const payload = await response.json();
@@ -119,13 +135,11 @@ async function loadAll(refresh) {
   clearAlert();
   setLoading();
   try {
-    const [overview, groups, fixtures, teams, players, procedure, xgStatus, advancedStatus] = await Promise.all([
+    const [overview, groups, fixtures, teams, xgStatus, advancedStatus] = await Promise.all([
       api(`/api/mundial/overview?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/groups?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/fixtures?refresh=${refresh ? "true" : "false"}`),
       api(`/api/mundial/teams?refresh=${refresh ? "true" : "false"}`),
-      api(`/api/mundial/players?refresh=${refresh ? "true" : "false"}`),
-      api("/api/mundial/procedure"),
       api("/api/mundial/xg-lightgbm/training/status"),
       api("/api/mundial/advanced-data/status"),
     ]);
@@ -133,7 +147,6 @@ async function loadAll(refresh) {
     state.groups = groups.groups || [];
     state.fixtures = fixtures.fixtures || [];
     state.teams = teams.teams || [];
-    state.players = players.players || [];
     state.lastSimulation = overview.last_simulation || state.lastSimulation;
     rebuildTeamAssets();
     renderScoreModelOptions(overview.score_models || []);
@@ -145,36 +158,34 @@ async function loadAll(refresh) {
     renderFixtures();
     fillUpcomingGroupFilter();
     fillSimulationGroupFilter();
-    renderPlayers(players);
-    renderProcedure(procedure);
     renderXgLightgbmTrainingStatus(xgStatus);
     renderAdvancedDataStatus(advancedStatus || overview.advanced_data || {});
+    syncUpcomingPipelineControls();
   } catch (error) {
     showError(error.message);
   }
 }
 
 function setLoading() {
-  document.getElementById("groups-grid").innerHTML = loadingHtml("Cargando grupos");
-  document.getElementById("teams-grid").innerHTML = loadingHtml("Cargando equipos");
-  document.getElementById("fixtures-list").innerHTML = loadingHtml("Cargando fixtures");
-  document.getElementById("players-list").innerHTML = loadingHtml("Cargando jugadores");
-  document.getElementById("upcoming-predictions").innerHTML = loadingHtml("Predicciones pendientes");
-  document.getElementById("upcoming-report").innerHTML = loadingHtml("Reporte pendiente");
+  setHtml("groups-grid", loadingHtml("Cargando grupos"));
+  setHtml("teams-grid", loadingHtml("Cargando equipos"));
+  setHtml("fixtures-list", loadingHtml("Cargando fixtures"));
+  setHtml("upcoming-predictions", loadingHtml("Predicciones pendientes"));
+  setHtml("upcoming-report", loadingHtml("Reporte pendiente"));
   renderWorldcupJobProgress("upcoming-report");
   const xgSummary = document.getElementById("xg-lightgbm-summary");
-  if (xgSummary) xgSummary.textContent = "Cargando pipeline xG-LightGBM";
+  if (xgSummary) xgSummary.textContent = `Cargando ${XG_PIPELINE_LABEL}`;
   const xgStatus = document.getElementById("xg-status-cards");
-  if (xgStatus) xgStatus.innerHTML = loadingHtml("Cargando entrenamiento xG-LightGBM");
+  if (xgStatus) xgStatus.innerHTML = loadingHtml(`Cargando entrenamiento ${XG_PIPELINE_LABEL}`);
   renderWorldcupJobProgress("xg-training");
   const advancedSummary = document.getElementById("advanced-status-summary");
-  if (advancedSummary) advancedSummary.textContent = "Cargando modelos avanzados";
+  if (advancedSummary) advancedSummary.textContent = "Cargando datos y modelos avanzados";
   const advancedCards = document.getElementById("advanced-status-cards");
   if (advancedCards) advancedCards.innerHTML = loadingHtml("Cargando datos avanzados");
   renderWorldcupJobProgress("advanced-prepare");
-  document.getElementById("match-simulation-grid").innerHTML = loadingHtml("Monte Carlo pendiente");
-  document.getElementById("match-simulation-table").innerHTML = "";
-  document.getElementById("simulation-summary").innerHTML = "";
+  setHtml("match-simulation-grid", loadingHtml("Monte Carlo pendiente"));
+  setHtml("match-simulation-table", "");
+  setHtml("simulation-summary", "");
   renderWorldcupJobProgress("simulation");
 }
 
@@ -240,7 +251,11 @@ function renderTopbarStatus(overview) {
   if (dataNode) {
     const prepared = Number(data.prepared_rows || 0);
     const sources = (data.active_sources || []).length;
-    dataNode.textContent = prepared ? `Datos: ${prepared} advanced` : `Datos: ${sources} fuentes`;
+    dataNode.textContent = prepared
+      ? `Datos: ${formatInteger(prepared)} advanced`
+      : sources
+      ? `Datos: ${sources} fuente${sources === 1 ? "" : "s"} sin cache`
+      : "Datos: fallback estadístico";
   }
   if (modelNode) {
     const catalog = overview.advanced_model_catalog || data.models || [];
@@ -526,28 +541,6 @@ function hardwareChip(label, value, detail, status) {
   return `<div class="hardware-chip ${status ? `hardware-${escapeAttr(status)}` : ""}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small></div>`;
 }
 
-async function loadPlayers(refresh) {
-  try {
-    const result = await api(`/api/mundial/players?refresh=${refresh ? "true" : "false"}`);
-    state.players = result.players || [];
-    renderPlayers(result);
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-function renderPlayers(payload) {
-  document.getElementById("players-source").textContent = payload.source || "";
-  const players = payload.players || [];
-  document.getElementById("players-list").innerHTML = players.slice(0, 90).map((player) => `
-    <article class="player-row">
-      ${playerPhotoHtml(player)}
-      <div><strong>${escapeHtml(player.name)}</strong><small>${escapeHtml(player.team.name)} - ${escapeHtml(player.position || "Posicion pendiente")}</small></div>
-      ${flagHtml(player.team)}
-    </article>`).join("") || loadingHtml("Jugadores pendientes");
-  renderTable("players-table", payload.table);
-}
-
 async function runUpcomingPredictions() {
   clearAlert();
   const limit = Number(document.getElementById("upcoming-predict-limit").value || 8);
@@ -559,7 +552,7 @@ async function runUpcomingPredictions() {
   const calculationLabel = pipelineMode === "alternatives_benchmark"
     ? `Benchmark alternativas${benchmarkTuningEnabled ? " + Optuna" : ""}`
     : pipelineMode === "xg_lightgbm"
-    ? "xG-LightGBM"
+    ? XG_PIPELINE_LABEL
     : pipelineMode === "advanced_models"
     ? `Modelos avanzados${advancedIncludeBayesian ? " + Bayes" : ""}`
     : sotaCalculationMode === "monte_carlo"
@@ -598,9 +591,17 @@ function syncUpcomingPipelineControls() {
   const calculation = document.getElementById("upcoming-sota-calculation-mode");
   if (calculation) calculation.disabled = isBenchmark || isXgLightgbm || isAdvanced;
   const sotaControls = document.getElementById("upcoming-sota-controls");
-  if (sotaControls) sotaControls.classList.toggle("hidden", isBenchmark || isXgLightgbm);
+  if (sotaControls) sotaControls.classList.toggle("hidden", isBenchmark || isXgLightgbm || isAdvanced);
   const benchmarkControls = document.getElementById("upcoming-benchmark-controls");
   if (benchmarkControls) benchmarkControls.classList.toggle("hidden", !isBenchmark);
+  const sotaPanel = document.getElementById("pipeline-sota-panel");
+  if (sotaPanel) sotaPanel.classList.toggle("hidden", mode !== "poisson_sota");
+  const benchmarkPanel = document.getElementById("pipeline-benchmark-panel");
+  if (benchmarkPanel) benchmarkPanel.classList.toggle("hidden", !isBenchmark);
+  const advancedPanel = document.getElementById("upcoming-advanced-panel");
+  if (advancedPanel) advancedPanel.classList.toggle("hidden", !isAdvanced);
+  const xgPanel = document.getElementById("upcoming-xg-panel");
+  if (xgPanel) xgPanel.classList.toggle("hidden", !isXgLightgbm);
   const bayesToggle = document.querySelector(".advanced-bayes-toggle");
   if (bayesToggle) bayesToggle.classList.toggle("hidden", !isAdvanced);
   const bayesProfile = document.getElementById("upcoming-bayes-profile");
@@ -672,13 +673,14 @@ function renderXgLightgbmReport(report) {
   const warnings = summary.warnings || [];
   const tuning = model.tuning || {};
   const rowLabel = `${model.train_rows || 0}/${model.validation_rows || 0}/${model.test_rows || 0}`;
-  const modelName = model.model_name || model.model_id || summary.model_id || "xG-LightGBM";
+  const modelName = xgDisplayLabel(model.model_name || model.model_id || summary.model_id || XG_PIPELINE_LABEL);
+  const pipelineLabel = xgDisplayLabel(summary.pipeline_label || XG_PIPELINE_LABEL);
   document.getElementById("upcoming-summary").textContent =
-    `${summary.pipeline_label || "xG-LightGBM"} - ${fixtures.length}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - ${modelName} - ${summary.report_id || report.report_id || ""}`;
+    `${pipelineLabel} - ${fixtures.length}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - ${modelName} - ${summary.report_id || report.report_id || ""}`;
   document.getElementById("upcoming-predictions").innerHTML = "";
   document.getElementById("upcoming-report").innerHTML = `
     <div class="report-summary-grid">
-      ${reportSummaryCard("Pipeline", summary.pipeline_label || "xG-LightGBM")}
+      ${reportSummaryCard("Pipeline", pipelineLabel)}
       ${reportSummaryCard("Modelo", model.trained ? modelName : "No entrenado")}
       ${reportSummaryCard("Filas T/V/Test", rowLabel)}
       ${reportSummaryCard("Partidos", `${summary.returned || 0}/${summary.requested || 0}`)}
@@ -691,13 +693,13 @@ function renderXgLightgbmReport(report) {
     <section class="client-report-shell">
       <header>
         <div>
-          <h3>Reporte xG-LightGBM</h3>
+          <h3>Reporte ${escapeHtml(XG_PIPELINE_LABEL)}</h3>
           <small>Clasificación ML 1X2 y U/O 0.5-3.5</small>
         </div>
         <span>${escapeHtml(fixtures.length)} partido${fixtures.length === 1 ? "" : "s"}</span>
       </header>
       <div class="client-report-grid">
-        ${fixtures.map((fixtureReport) => xgLightgbmFixtureCardHtml(fixtureReport)).join("") || loadingHtml("Sin predicciones xG-LightGBM")}
+        ${fixtures.map((fixtureReport) => xgLightgbmFixtureCardHtml(fixtureReport)).join("") || loadingHtml(`Sin predicciones ${XG_PIPELINE_LABEL}`)}
       </div>
     </section>
     ${xgLightgbmTopFeaturesHtml(model)}
@@ -736,14 +738,14 @@ function xgLightgbmFixtureCardHtml(report) {
       <div>${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
     <div class="client-main-pick">
-      <span>Pronóstico xG-LightGBM</span>
+      <span>Pronóstico ${escapeHtml(XG_PIPELINE_LABEL)}</span>
       <strong>${escapeHtml(decision.label || outcomeLabel(activeOutcome) || "-")} · ${escapeHtml(pickTeam || "-")}</strong>
       <small>${escapeHtml(formatProbability(confidence))}% · ${escapeHtml(sourceLabel)}</small>
     </div>
     ${modelOutcomeProbabilitiesHtml(probabilities, activeOutcome, fixture)}
     ${modelOverUnderProbabilitiesHtml(probabilities, totals)}
     <section class="client-score-panel">
-      <header><strong>Marcador base</strong><small>${escapeHtml(model.model_name || model.model_id || "xG-LightGBM")}</small></header>
+      <header><strong>Marcador base</strong><small>${escapeHtml(xgDisplayLabel(model.model_name || model.model_id || XG_PIPELINE_LABEL))}</small></header>
       <div class="technical-meta-row">
         <span>Top ${escapeHtml(report.modal_score || "-")}</span>
         <span>xG local ${escapeHtml(formatNumber(expected.home ?? "-"))}</span>
@@ -776,7 +778,7 @@ function xgLightgbmModelMetadataHtml(model) {
   const markets = model.markets || {};
   const marketKeys = Object.keys(markets);
   return `<section class="report-panel">
-    <header><strong>${escapeHtml(model.model_label || "xG-LightGBM")}</strong><small>${escapeHtml(model.model_id || "")}</small></header>
+    <header><strong>${escapeHtml(xgDisplayLabel(model.model_label || XG_PIPELINE_LABEL))}</strong><small>${escapeHtml(model.model_id || "")}</small></header>
     <div class="technical-meta-row">
       <span>Tipo ${escapeHtml(model.model_type || "-")}</span>
       <span>Perfil ${escapeHtml(model.model_profile || "-")}</span>
@@ -791,7 +793,7 @@ function xgLightgbmModelMetadataHtml(model) {
 
 async function loadXgLightgbmStatus(manual = false) {
   clearAlert();
-  if (manual) document.getElementById("xg-lightgbm-summary").textContent = "Actualizando estado xG-LightGBM...";
+  if (manual) setText("xg-lightgbm-summary", `Actualizando estado ${XG_PIPELINE_LABEL}...`);
   try {
     const status = await api("/api/mundial/xg-lightgbm/training/status");
     renderXgLightgbmTrainingStatus(status);
@@ -802,7 +804,7 @@ async function loadXgLightgbmStatus(manual = false) {
 
 async function runXgLightgbmPrepare() {
   clearAlert();
-  document.getElementById("xg-lightgbm-summary").textContent = "Preparando ETL xG-LightGBM...";
+  setText("xg-lightgbm-summary", `Preparando ETL ${XG_PIPELINE_LABEL}...`);
   try {
     const job = await api("/api/mundial/xg-lightgbm/training/prepare", jsonOptions({
       force: true,
@@ -816,7 +818,7 @@ async function runXgLightgbmPrepare() {
 
 async function runXgLightgbmTraining() {
   clearAlert();
-  document.getElementById("xg-lightgbm-summary").textContent = "Entrenando bundle xG-LightGBM...";
+  setText("xg-lightgbm-summary", `Entrenando bundle ${XG_PIPELINE_LABEL}...`);
   try {
     const job = await api("/api/mundial/xg-lightgbm/training/train", jsonOptions(xgLightgbmTrainingPayload()));
     trackWorldcupJob(job, "xg-training");
@@ -828,7 +830,7 @@ async function runXgLightgbmTraining() {
 function xgLightgbmTrainingPayload() {
   return {
     model_id: (document.getElementById("xg-model-id") || {}).value || "mundial-xg-lightgbm-hibrido",
-    model_name: (document.getElementById("xg-model-name") || {}).value || "xG-LightGBM Mundial 2026",
+    model_name: (document.getElementById("xg-model-name") || {}).value || `${XG_PIPELINE_LABEL} Mundial 2026`,
     feature_profile: (document.getElementById("xg-feature-profile") || {}).value || "balanced",
     max_features: Number((document.getElementById("xg-max-features") || {}).value || 450),
     device: (document.getElementById("xg-device") || {}).value || "auto",
@@ -856,7 +858,7 @@ function renderXgLightgbmTrainingStatus(payload) {
   const options = status.options || {};
   applyXgLightgbmDefaults(status);
   const etlLabel = dataset.etl_ready && !dataset.etl_stale ? "Listo" : dataset.etl_stale ? "Desactualizado" : "Pendiente";
-  const modelLabel = model.trained ? (model.model_name || model.model_id || "Entrenado") : "No entrenado";
+  const modelLabel = model.trained ? xgDisplayLabel(model.model_name || model.model_id || "Entrenado") : "No entrenado";
   const budget = Number(options.default_total_trial_budget || 0);
   const teamScopeCount = split.team_scope_count || dataset.training_scope_team_count || 0;
   const rawRows = split.raw_international_source_rows || dataset.raw_international_source_rows || 0;
@@ -864,8 +866,16 @@ function renderXgLightgbmTrainingStatus(payload) {
   const teamRows = split.team_scoped_international_source_rows || dataset.team_scoped_international_source_rows || 0;
   const labelRows = dataset.all_matches_rows || teamRows || 0;
   const removedTeamRows = split.removed_outside_team_scope_rows || dataset.removed_outside_team_scope_rows || 0;
-  document.getElementById("xg-lightgbm-summary").textContent =
-    `xG-LightGBM - ETL ${etlLabel} - scope ${teamScopeCount || 48} equipos 2026 - train/val/test ${split.train_rows || 0}/${split.validation_rows || 0}/${split.test_rows || 0} - ${modelLabel}`;
+  const xgState = model.trained
+    ? { className: "pipeline-ready", label: "Modelo entrenado" }
+    : dataset.etl_ready && !dataset.etl_stale
+    ? { className: "pipeline-fallback", label: "ETL listo; falta entrenar" }
+    : { className: "pipeline-missing", label: "ETL pendiente" };
+  setText("xg-status-pill", xgState.label);
+  setPipelineStateClass("xg-status-pill", xgState.className);
+  setPipelineStateClass("upcoming-xg-panel", xgState.className);
+  setText("xg-lightgbm-summary",
+    `${XG_PIPELINE_LABEL} - ETL ${etlLabel} - scope ${teamScopeCount || 48} equipos 2026 - train/val/test ${split.train_rows || 0}/${split.validation_rows || 0}/${split.test_rows || 0} - ${modelLabel}`);
   document.getElementById("xg-status-cards").innerHTML = `
     ${reportSummaryCard("ETL", etlLabel)}
     ${reportSummaryCard("Train/Val/Test", `${split.train_rows || 0}/${split.validation_rows || 0}/${split.test_rows || 0}`)}
@@ -883,7 +893,7 @@ function renderXgLightgbmTrainingStatus(payload) {
   document.getElementById("xg-model-subtitle").textContent = model.trained ? `${model.model_id || ""} · ${formatReportDateTime(model.trained_at || "")}` : status.default_model_id || "Sin bundle entrenado";
   document.getElementById("xg-market-subtitle").textContent = `${(options.required_markets || []).length} mercados requeridos${(options.optional_markets || []).length ? " + distribución goles" : ""}`;
   document.getElementById("xg-tuning-subtitle").textContent = status.anti_leakage || "Validation temporal";
-  document.getElementById("xg-procedure-list").innerHTML = xgProcedureHtml(status.procedure || {});
+  setHtml("xg-training-steps", xgProcedureHtml(status.procedure || {}));
   document.getElementById("xg-etl-flow").innerHTML = xgEtlFlowHtml(dataset);
   document.getElementById("xg-model-state").innerHTML = xgModelStateHtml(model, status);
   document.getElementById("xg-market-metrics").innerHTML = xgMarketMetricsHtml(model);
@@ -1095,7 +1105,7 @@ function xgFeatureImportanceHtml(model) {
 
 async function loadAdvancedDataStatus(manual = false) {
   clearAlert();
-  if (manual) document.getElementById("advanced-status-summary").textContent = "Actualizando datos avanzados...";
+  if (manual) setText("advanced-status-summary", "Actualizando datos avanzados...");
   try {
     const status = await api("/api/mundial/advanced-data/status");
     renderAdvancedDataStatus(status);
@@ -1106,7 +1116,7 @@ async function loadAdvancedDataStatus(manual = false) {
 
 async function runAdvancedDataPrepare() {
   clearAlert();
-  document.getElementById("advanced-status-summary").textContent = "Preparando datos avanzados...";
+  setText("advanced-status-summary", "Preparando fuentes avanzadas...");
   try {
     const job = await api("/api/mundial/advanced-data/prepare", jsonOptions({
       force: true,
@@ -1118,13 +1128,6 @@ async function runAdvancedDataPrepare() {
   }
 }
 
-function openAdvancedPredictions() {
-  const select = document.getElementById("upcoming-pipeline-mode");
-  if (select) select.value = "advanced_models";
-  syncUpcomingPipelineControls();
-  switchWorldcupView("predicciones", true);
-}
-
 function renderAdvancedDataStatus(payload) {
   state.advancedData = payload || {};
   const status = state.advancedData;
@@ -1133,32 +1136,73 @@ function renderAdvancedDataStatus(payload) {
   const activeSources = status.active_sources || [];
   const warnings = status.warnings || [];
   const preparedRows = Number(status.prepared_rows || 0);
-  document.getElementById("advanced-status-summary").textContent =
-    `Modelos avanzados - ${preparedRows} filas preparadas - ${activeSources.length} fuente${activeSources.length === 1 ? "" : "s"} - ${models.length} modelos`;
-  document.getElementById("advanced-source-count").textContent = activeSources.length || 0;
-  document.getElementById("advanced-feature-count").textContent = formatInteger(preparedRows || 0);
-  document.getElementById("advanced-family-count").textContent = families.length || 0;
-  document.getElementById("advanced-status-cards").innerHTML = `
-    ${reportSummaryCard("Preparado", status.prepared ? "Si" : "No")}
+  const pipelineState = advancedPipelineState(status);
+  setText("advanced-status-summary", pipelineState.summary);
+  setText("advanced-status-pill", pipelineState.label);
+  setPipelineStateClass("upcoming-advanced-panel", pipelineState.className);
+  setPipelineStateClass("advanced-status-pill", pipelineState.className);
+  setText("advanced-source-count", activeSources.length || 0);
+  setText("advanced-feature-count", formatInteger(preparedRows || 0));
+  setText("advanced-family-count", families.length || 0);
+  setHtml("advanced-status-cards", `
+    ${reportSummaryCard("Estado", pipelineState.label)}
     ${reportSummaryCard("Filas", formatInteger(preparedRows || 0))}
     ${reportSummaryCard("Fuentes", activeSources.length || 0)}
     ${reportSummaryCard("StatsBomb", (status.statsbomb || {}).available ? `${(status.statsbomb || {}).json_files || 0} json` : "No")}
     ${reportSummaryCard("socceraction", status.socceraction_available ? "Instalado" : "Opcional")}
     ${reportSummaryCard("Ultimo prepare", formatReportDateTime(status.last_prepared_at || ""))}
-  `;
-  document.getElementById("advanced-family-list").innerHTML = advancedFamiliesHtml(families);
-  document.getElementById("advanced-model-catalog").innerHTML = advancedModelCatalogHtml(models);
-  document.getElementById("advanced-sources-list").innerHTML = advancedSourcesHtml(status);
+  `);
+  setHtml("advanced-family-list", advancedFamiliesHtml(families));
+  setHtml("advanced-model-catalog", advancedModelCatalogHtml(models));
+  setHtml("advanced-sources-list", advancedSourcesHtml(status));
   const dataNode = document.getElementById("topbar-data-status");
-  if (dataNode) dataNode.textContent = preparedRows ? `Datos: ${formatInteger(preparedRows)} advanced` : `Datos: ${activeSources.length} fuentes`;
+  if (dataNode) {
+    dataNode.textContent = preparedRows
+      ? `Datos: ${formatInteger(preparedRows)} advanced`
+      : activeSources.length
+      ? `Datos: ${activeSources.length} fuente${activeSources.length === 1 ? "" : "s"} sin cache`
+      : "Datos: fallback estadístico";
+  }
   const modelNode = document.getElementById("topbar-model-status");
   if (modelNode) modelNode.textContent = `Modelos: ${models.length || 5} avanzados`;
-  if (warnings.length) {
-    document.getElementById("advanced-sources-list").insertAdjacentHTML(
+  const sourcesNode = document.getElementById("advanced-sources-list");
+  if (warnings.length && sourcesNode) {
+    sourcesNode.insertAdjacentHTML(
       "beforeend",
       `<div class="warning-list compact">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`,
     );
   }
+}
+
+function advancedPipelineState(status) {
+  const preparedRows = Number((status || {}).prepared_rows || 0);
+  const activeSources = ((status || {}).active_sources || []).length;
+  if (preparedRows > 0) {
+    return {
+      className: "pipeline-ready",
+      label: "Preparado con filas",
+      summary: `Modelos avanzados - ${formatInteger(preparedRows)} filas preparadas - ${activeSources} fuente${activeSources === 1 ? "" : "s"} - ${(status.models || []).length} modelos`,
+    };
+  }
+  if (activeSources > 0) {
+    return {
+      className: "pipeline-missing",
+      label: "Fuentes sin cache preparado",
+      summary: `Fuentes avanzadas detectadas (${activeSources}); prepara cache local antes de ejecutar el pipeline avanzado.`,
+    };
+  }
+  return {
+    className: "pipeline-fallback",
+    label: "Fallback estadístico",
+    summary: "Sin cache local; este pipeline usará fallback Poisson/GLM",
+  };
+}
+
+function setPipelineStateClass(id, className) {
+  const node = document.getElementById(id);
+  if (!node) return;
+  node.classList.remove("pipeline-ready", "pipeline-fallback", "pipeline-missing");
+  node.classList.add(className);
 }
 
 function advancedFamiliesHtml(families) {
@@ -1185,19 +1229,26 @@ function advancedSourcesHtml(status) {
     key,
     label: key.replace(/_/g, " "),
     status: item.exists ? `${formatInteger(item.rows || 0)} filas` : "No",
-    detail: item.path || "",
+    detail: normalizePathDisplay(item.path || ""),
   }));
   const statsbomb = status.statsbomb || {};
   rows.push({
     key: "statsbomb",
     label: "StatsBomb cache",
     status: statsbomb.available ? `${formatInteger(statsbomb.json_files || 0)} json` : "No",
-    detail: statsbomb.path || "",
+    detail: normalizePathDisplay(statsbomb.path || ""),
   });
   return rows.map((item) => `<article class="advanced-status-row ${escapeAttr(item.status === "No" ? "missing" : "cached")}">
-    <div><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.detail)}</small></div>
+    <div>
+      <strong>${escapeHtml(item.label)}</strong>
+      ${item.detail ? `<details class="technical-path-drawer"><summary>Ruta técnica</summary><small>${escapeHtml(item.detail)}</small></details>` : `<small>Sin ruta local</small>`}
+    </div>
     <b>${escapeHtml(item.status)}</b>
   </article>`).join("");
+}
+
+function normalizePathDisplay(path) {
+  return String(path || "").replace(/\\/g, "/");
 }
 
 function renderAdvancedModelsReport(report) {
@@ -2979,14 +3030,6 @@ function renderQuickSimulationPanel(result) {
   panel.innerHTML = "";
 }
 
-function renderProcedure(payload) {
-  document.getElementById("procedure-list").innerHTML = (payload.steps || []).map((step, index) => `
-    <article class="procedure-step">
-      <span>${escapeHtml(index + 1)}</span>
-      <div><strong>${escapeHtml(step.name)}</strong><p>${escapeHtml(step.detail)}</p></div>
-    </article>`).join("");
-}
-
 function rebuildTeamAssets() {
   state.teamAssets.clear();
   state.groups.forEach((group) => {
@@ -3012,15 +3055,6 @@ function flagHtml(asset, size = "") {
   </span>`;
 }
 
-function playerPhotoHtml(player) {
-  const url = player.photo_url || "";
-  const fallbackClass = url ? "visual-fallback" : "visual-fallback visible";
-  return `<span class="player-photo">
-    <span class="${fallbackClass}">${escapeHtml(player.initials || initials(player.name || ""))}</span>
-    ${url ? `<img src="${escapeAttr(url)}" width="42" height="42" alt="${escapeAttr(player.name || "Jugador")}" onerror="handleImageError(this)">` : ""}
-  </span>`;
-}
-
 function handleImageError(image) {
   const fallback = image.previousElementSibling;
   image.remove();
@@ -3029,7 +3063,7 @@ function handleImageError(image) {
 window.handleImageError = handleImageError;
 
 function renderTable(id, table) {
-  document.getElementById(id).innerHTML = tableHtml(table);
+  setHtml(id, tableHtml(table));
 }
 
 function tableHtml(table) {

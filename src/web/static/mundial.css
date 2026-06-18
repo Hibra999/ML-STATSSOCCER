@@ -11,6 +11,11 @@
   --field: #1d7a53;
   --shadow: 0 16px 42px rgba(18, 31, 43, 0.09);
   --future-iris: #4f6fe2;
+  --forecast-ink: #12202c;
+  --forecast-soft: #eef5f2;
+  --forecast-line: #cddbe2;
+  --forecast-cyan: #0b8aa0;
+  --forecast-navy: #172b3a;
 }
 
 * { box-sizing: border-box; }
@@ -811,12 +816,15 @@ h3 { font-size: 16px; }
   content: none;
 }
 .future-focus .prediction-dock {
-  padding: 12px;
-  border: 1px solid var(--line);
+  padding: 0;
+  border: 1px solid var(--forecast-line);
   border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 10px 24px rgba(18, 31, 43, 0.06);
-  row-gap: 12px;
+  background:
+    linear-gradient(90deg, rgba(15, 122, 95, 0.08), transparent 36%),
+    #fff;
+  box-shadow: 0 18px 38px rgba(18, 31, 43, 0.08);
+  overflow: hidden;
+  row-gap: 0;
 }
 .future-focus .prediction-dock,
 .future-focus .prediction-dock > article {
@@ -851,16 +859,81 @@ h3 { font-size: 16px; }
 }
 .future-command-card,
 .future-control-card {
-  padding: 12px;
-  border: 1px solid #dce5ec;
-  border-radius: 8px;
-  background: #fbfcfd;
+  min-height: 100%;
+  padding: 16px;
+  border: 0;
+  border-right: 1px solid #e1e9ee;
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.74);
   box-shadow: none;
+}
+.future-forecast-dock > article:last-child {
+  border-right: 0;
 }
 .future-command-card {
   display: grid;
-  gap: 10px;
-  min-height: 100%;
+  gap: 12px;
+  align-content: start;
+  background:
+    linear-gradient(180deg, rgba(23, 43, 58, 0.98), rgba(16, 41, 48, 0.94)),
+    var(--forecast-navy);
+  color: #fff;
+  position: relative;
+  overflow: hidden;
+}
+.future-command-card::after {
+  content: "";
+  position: absolute;
+  inset: auto 14px 14px auto;
+  width: 3px;
+  height: 74px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #34d399, rgba(11, 138, 160, 0.35));
+}
+.forecast-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.forecast-kicker span {
+  width: 14px;
+  height: 3px;
+  border-radius: 999px;
+  background: #34d399;
+}
+.future-focus .future-command-card h3 {
+  color: #fff;
+  font-size: 21px;
+  line-height: 1.12;
+}
+.forecast-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+.forecast-status-grid span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.forecast-status-grid b {
+  color: #e9fff7;
+  font-size: 13px;
+}
+.forecast-status-grid small {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 10px;
+  overflow-wrap: anywhere;
 }
 .future-command-badges {
   margin-top: 2px;
@@ -869,17 +942,17 @@ h3 { font-size: 16px; }
   gap: 8px;
 }
 .future-command-badges span {
-  border: 1px solid rgba(79, 111, 226, 0.4);
-  color: var(--future-iris);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #d8fff0;
   font-size: 11px;
   font-weight: 800;
   border-radius: 999px;
   padding: 5px 9px;
-  background: rgba(79, 111, 226, 0.1);
+  background: rgba(255, 255, 255, 0.08);
 }
 .future-forecast-dock {
-  grid-template-columns: minmax(230px, 1.2fr) minmax(260px, 1fr) minmax(250px, 1fr) minmax(170px, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(238px, 0.95fr) minmax(330px, 1.25fr) minmax(300px, 1fr) minmax(220px, 0.72fr);
+  gap: 0;
 }
 .future-focus .future-forecast-dock > article:nth-child(1) {
   --future-reveal-delay: 0ms;
@@ -897,26 +970,306 @@ h3 { font-size: 16px; }
   --future-reveal-delay: 230ms;
 }
 .future-control-card h4 {
-  letter-spacing: 0.015em;
+  letter-spacing: 0;
+}
+.forecast-card-head {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 14px;
+  min-width: 0;
+}
+.forecast-card-head h4 {
+  color: var(--forecast-ink);
+  font-size: 14px;
+}
+.forecast-card-head small {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.forecast-control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.forecast-control-wide {
+  grid-column: 1 / -1;
+}
+.forecast-control-grid label,
+.forecast-engine-grid label,
+.forecast-advanced-tuning label {
+  min-width: 0;
+}
+.future-focus select,
+.future-focus input {
+  border-color: #cfdce4;
+  background: #fff;
+}
+.future-focus select:hover,
+.future-focus input:hover {
+  border-color: #9eb2c2;
+}
+.forecast-engine-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.forecast-engine-grid .check {
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid #cfdce4;
+  border-radius: 7px;
+  background: #fff;
+}
+.forecast-engine-card {
+  background: rgba(250, 253, 252, 0.82);
 }
 .future-run-card {
   display: grid;
-  gap: 10px;
-  justify-items: start;
+  gap: 12px;
+  align-content: start;
+  justify-items: stretch;
+  background: #fbf7ed;
 }
 .future-run-card button {
   width: 100%;
+  min-height: 44px;
+  font-weight: 900;
+  box-shadow: 0 12px 24px rgba(15, 122, 95, 0.18);
 }
 .future-run-card small,
 .future-command-card small {
   color: var(--muted);
 }
+.future-command-card small {
+  color: rgba(255, 255, 255, 0.72);
+}
+.forecast-run-summary {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid #eadfc5;
+  border-radius: 8px;
+  background: #fffaf0;
+}
+.forecast-run-summary span,
+.forecast-run-summary small {
+  color: #766649;
+  font-size: 12px;
+}
+.forecast-run-summary strong {
+  color: #1e2b2f;
+  font-size: 14px;
+}
 .future-advanced-controls {
-  border: 1px solid #dce5ec;
+  border: 1px solid var(--forecast-line);
   border-radius: 8px;
   background: #fff;
-  box-shadow: none;
+  box-shadow: 0 10px 22px rgba(18, 31, 43, 0.04);
+  padding: 13px;
+}
+.forecast-advanced-tuning {
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  position: relative;
+}
+.forecast-advanced-tuning::before {
+  content: "Parámetros base";
+  position: absolute;
+  left: 13px;
+  top: -10px;
+  padding: 2px 7px;
+  border: 1px solid var(--forecast-line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+.pipeline-panels {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.pipeline-panel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--forecast-line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 22px rgba(18, 31, 43, 0.04);
+}
+.pipeline-panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+}
+.pipeline-panel-head div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.pipeline-panel-head strong {
+  color: var(--forecast-ink);
+  font-size: 15px;
+}
+.pipeline-panel-head small,
+.pipeline-microcopy {
+  color: var(--muted);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.pipeline-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  max-width: 220px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f8fafb;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.pipeline-panel.pipeline-ready,
+.pipeline-status-pill.pipeline-ready {
+  border-color: #b8d8cd;
+  background: #f1faf6;
+}
+.pipeline-status-pill.pipeline-ready {
+  color: var(--green);
+}
+.pipeline-panel.pipeline-fallback,
+.pipeline-status-pill.pipeline-fallback {
+  border-color: #ead8bd;
+  background: #fff8f0;
+}
+.pipeline-status-pill.pipeline-fallback {
+  color: var(--gold);
+}
+.pipeline-panel.pipeline-missing,
+.pipeline-status-pill.pipeline-missing {
+  border-color: #d9e2e8;
+  background: #f8fafb;
+}
+.pipeline-status-pill.pipeline-missing {
+  color: #40505d;
+}
+.pipeline-action-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.45fr);
+  gap: 12px;
+  min-width: 0;
+}
+.advanced-lab-compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.pipeline-action-card {
+  display: grid;
+  gap: 10px;
+  align-content: center;
+  min-width: 0;
   padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+.pipeline-action-card .actions-row {
+  justify-content: flex-start;
+}
+.pipeline-summary-grid {
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+}
+.pipeline-details-grid {
+  margin-bottom: 0;
+}
+.pipeline-details-grid.two {
+  grid-template-columns: repeat(2, minmax(260px, 1fr));
+}
+.pipeline-details-grid .visual-panel {
+  min-height: auto;
+}
+.pipeline-xg-training {
+  margin-bottom: 0;
+}
+.pipeline-microcopy {
+  padding: 10px 12px;
+  border: 1px solid #d9e6ee;
+  border-radius: 8px;
+  background: #f7fafb;
+  font-size: 12px;
+}
+.technical-path-drawer {
+  min-width: 0;
+}
+.technical-path-drawer summary {
+  cursor: pointer;
+  width: fit-content;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.technical-path-drawer small {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.advanced-models-dock,
+.xg-training-dock {
+  border-color: var(--forecast-line);
+  box-shadow: 0 12px 26px rgba(18, 31, 43, 0.06);
+}
+.advanced-models-dock .future-command-card {
+  background:
+    linear-gradient(180deg, rgba(15, 55, 71, 0.96), rgba(17, 70, 57, 0.94)),
+    var(--forecast-navy);
+}
+.advanced-models-dock .future-control-card,
+.xg-training-dock label {
+  background: rgba(255, 255, 255, 0.82);
+}
+.xg-training-dock {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  background: #fff;
+}
+.xg-training-dock > div:first-child {
+  min-height: 100%;
+  padding: 16px;
+  background:
+    linear-gradient(180deg, rgba(23, 43, 58, 0.96), rgba(31, 57, 68, 0.92)),
+    var(--forecast-navy);
+  color: #fff;
+}
+.xg-training-dock > div:first-child h3 {
+  color: #fff;
+  font-size: 18px;
+}
+.xg-training-dock > div:first-child small {
+  color: rgba(255, 255, 255, 0.72);
+}
+.xg-training-dock > label {
+  min-height: 100%;
+  padding: 13px;
+  border-right: 1px solid #e1e9ee;
+  border-bottom: 1px solid #e1e9ee;
+}
+.xg-training-dock .inline-control-row {
+  padding: 13px;
+  border-top: 1px solid #e1e9ee;
+  background: #f8fbfa;
+}
+.xg-training-dock .actions-row {
+  padding: 13px;
+  border-top: 1px solid #e1e9ee;
+  background: #fffaf0;
 }
 
 .advanced-models-page {
@@ -3646,10 +3999,6 @@ h3 { font-size: 16px; }
   margin-top: 2px;
 }
 
-.procedure-list {
-  display: grid;
-  gap: 10px;
-}
 .procedure-step {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
@@ -3737,6 +4086,8 @@ th {
   .simulation-layout,
   .results-grid,
   .data-grid,
+  .pipeline-action-grid,
+  .pipeline-details-grid.two,
   .advanced-models-dock,
   .advanced-model-layout,
   .advanced-report-grid {
@@ -3762,6 +4113,9 @@ th {
   .report-summary-grid {
     grid-template-columns: repeat(2, minmax(130px, 1fr));
   }
+  .pipeline-summary-grid {
+    grid-template-columns: repeat(3, minmax(120px, 1fr));
+  }
   .metric-bar-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3771,11 +4125,30 @@ th {
   .control-grid {
     grid-template-columns: repeat(3, minmax(110px, 1fr));
   }
+  .future-command-card,
+  .future-control-card,
+  .xg-training-dock > label {
+    border-right: 0;
+    border-bottom: 1px solid #e1e9ee;
+  }
+  .future-forecast-dock > article:last-child,
+  .advanced-models-dock > article:last-child {
+    border-bottom: 0;
+  }
+  .forecast-engine-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .forecast-advanced-tuning {
+    grid-template-columns: repeat(3, minmax(110px, 1fr));
+  }
   .hardware-grid {
     grid-template-columns: repeat(2, minmax(130px, 1fr));
   }
   .advanced-lab-strip {
     grid-template-columns: repeat(2, minmax(130px, 1fr));
+  }
+  .advanced-lab-compact {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .hardware-compact,
   .training-main-grid,
@@ -3849,8 +4222,25 @@ th {
   }
   .advanced-lab-strip,
   .advanced-model-layout,
+  .pipeline-action-grid,
+  .pipeline-details-grid.two,
   .advanced-report-grid {
     grid-template-columns: 1fr;
+  }
+  .pipeline-panel-head {
+    display: grid;
+  }
+  .pipeline-status-pill {
+    justify-self: start;
+    max-width: 100%;
+  }
+  .forecast-control-grid,
+  .forecast-engine-grid,
+  .forecast-advanced-tuning {
+    grid-template-columns: 1fr;
+  }
+  .forecast-status-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .xg-training-dock .inline-control-row {
     grid-template-columns: 1fr;
@@ -3864,6 +4254,7 @@ th {
   .benchmark-metric-card header,
   .metric-bar-grid,
   .report-summary-grid,
+  .pipeline-summary-grid,
   .feature-bar,
   .recent15-columns,
   .model-total-probabilities,

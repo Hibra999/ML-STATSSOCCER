@@ -118,15 +118,33 @@ def test_mundial_static_ui_exposes_advanced_models_and_accessibility_hooks():
 
     assert 'class="skip-link"' in source
     assert 'main id="main-content"' in source
-    assert 'data-section="modelos"' in source
+    assert 'data-section="modelos"' not in source
+    assert 'data-section="xg-lightgbm"' not in source
+    assert 'data-section="datos"' not in source
+    assert '<section id="modelos"' not in source
+    assert '<section id="xg-lightgbm"' not in source
+    assert '<section id="datos"' not in source
     assert 'value="advanced_models"' in source
+    assert 'value="xg_lightgbm"' in source
+    assert "Goles esperados (xG) + LightGBM" in source
+    assert "xG = goles esperados" in source
     assert 'id="advanced-prepare-data"' in source
+    assert 'id="upcoming-advanced-panel"' in source
+    assert 'id="upcoming-xg-panel"' in source
     assert 'aria-live="polite"' in source
     assert 'name="fixture_search"' in source
+    assert "players-refresh" not in source
+    assert "procedure-list" not in source
+    assert "advanced-open-predictions" not in source
     assert "function featureResearchHtml(featureResearch)" in script
+    assert "/api/mundial/players" not in script
+    assert "/api/mundial/procedure" not in script
     feature_research_body = script[script.index("function featureResearchHtml(featureResearch)"):script.index("function benchmarkTuningHtml")]
     assert "feature-research-panel" in feature_research_body
     assert "feature-family-grid" in feature_research_body
+    assert "pipeline-ready" in styles
+    assert "pipeline-fallback" in styles
+    assert "pipeline-missing" in styles
     assert "prefers-reduced-motion" in styles
 
 
@@ -256,8 +274,11 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "worldcup-view active" in html_source
     nav_start = html_source.index("<nav")
     nav_source = html_source[nav_start:html_source.index("</nav>", nav_start)]
-    nav_order = ["Resumen", "Grupos", "Calendario", "Prediccion", "Modelos", "xG", "Datos"]
+    nav_order = ["Resumen", "Grupos", "Calendario", "Prediccion"]
     assert [nav_source.index(label) for label in nav_order] == sorted(nav_source.index(label) for label in nav_order)
+    assert "Modelos" not in nav_source
+    assert "Datos" not in nav_source
+    assert "xG" not in nav_source
     assert "Simulación" not in nav_source
     assert "11 Iniciales" not in nav_source
     assert "scrollIntoView" not in app_source
@@ -315,7 +336,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Modelo 1X2 con U/O 0.5-3.5 derivado por Poisson" not in html_source
     assert "upcoming-predict-limit" in html_source
     assert "upcoming-pipeline-mode" in html_source
-    assert "xG-LightGBM" in html_source
+    assert "Goles esperados (xG) + LightGBM" in html_source
     assert "Benchmark alternativas" in html_source
     assert "upcoming-sota-calculation-mode" in html_source
     assert "Consenso exacto" in html_source
@@ -428,7 +449,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "heroNextCardHtml" in app_source
     assert "/api/mundial/fixtures/${encodeURIComponent(fixtureId)}/autodetect" not in app_source
     assert "/api/worldcup/simulate" not in app_source
-    assert "player-photo" in app_source
+    assert "player-photo" not in app_source
 
 
 def test_mundial_training_and_model_endpoints_are_removed():

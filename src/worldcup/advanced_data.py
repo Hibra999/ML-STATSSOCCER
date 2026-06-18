@@ -99,7 +99,8 @@ def prepare_advanced_data(payload: Dict[str, Any] | None = None, progress_callba
         "warnings": warnings,
     }
     STATUS_FILE.write_text(json.dumps(status, indent=2, sort_keys=True), encoding="utf-8")
-    _emit(progress_callback, "complete", 3, 3, "Datos avanzados listos")
+    completion_message = "Preparado con filas" if rows else "Completado sin cache local"
+    _emit(progress_callback, "complete", 3, 3, completion_message)
     return advanced_data_status()
 
 
