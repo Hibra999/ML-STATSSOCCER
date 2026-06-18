@@ -543,7 +543,8 @@ def score_grids_from_lambdas_with_backend(
                 )
                 return cp.asnumpy(grids).astype(float), "cupy", []
             except Exception as exc:
-                warnings.append(f"CuPy scoring fallo ({exc.__class__.__name__}: {exc}); se usa NumPy.")
+                if requested in {"cuda", "cupy"}:
+                    warnings.append(f"CuPy scoring fallo ({exc.__class__.__name__}: {exc}); se usa NumPy.")
         elif requested in {"cuda", "cupy"} and status.get("warning"):
             warnings.append(str(status.get("warning")))
     grids = _score_grids_from_lambdas_xp(
@@ -2230,7 +2231,8 @@ def _array_module_for_backend(backend: Any) -> Tuple[Any, str, List[str]]:
             try:
                 return _import_cupy(), "cupy", warnings
             except Exception as exc:
-                warnings.append(f"CuPy no disponible para MLE ({exc.__class__.__name__}: {exc}); se usa NumPy.")
+                if requested in {"cuda", "cupy"}:
+                    warnings.append(f"CuPy no disponible para MLE ({exc.__class__.__name__}: {exc}); se usa NumPy.")
         elif requested in {"cuda", "cupy"}:
             warnings.append(f"CuPy no disponible para MLE ({status.get('warning')}); se usa NumPy.")
     return np, "numpy", warnings

@@ -160,6 +160,95 @@ def test_advanced_models_pipeline_registry_and_config():
     }
 
 
+def test_report_warning_payload_normalizes_optional_limitations():
+    from src.web import mundial_services as services
+
+    payload = services.public_warning_payload([
+        "Football-Data XLSX no disponible en cache: storage\\worldcup\\market\\WorldCup2026.xlsx.",
+        "socceraction no instalado; xT/VAEP quedan como features opcionales.",
+        "Potencia limitada: 20 partidos evaluados.",
+    ], pipeline_mode=services.ADVANCED_MODELS_PIPELINE_MODE)
+
+    assert payload["visible_warnings"][0] == "Fuentes avanzadas opcionales pendientes; el reporte usó fallback estadístico donde hizo falta."
+    assert "Backtest con muestra limitada" in payload["visible_warnings"][1]
+    assert all("\\" not in warning for warning in payload["technical_warnings"])
+    assert "storage/worldcup/market/WorldCup2026.xlsx" in payload["technical_warnings"][0]
+
+
+def test_advanced_source_preflight_prepares_data_and_uses_downloadable_sources(monkeypatch):
+    from src.web import mundial_services as services
+
+    calls = []
+
+    def fake_market(**kwargs):
+        calls.append(("market", kwargs))
+        return {"status": "ok", "market_rows": 3, "qualifier_rows": 2, "sources": ["storage\\worldcup\\market\\WorldCup2026.xlsx"], "warnings": []}
+
+    def fake_api(**kwargs):
+        calls.append(("api", kwargs))
+        return {
+            "status": "ok",
+            "fixtures": pd.DataFrame([{"FixtureId": 1}]),
+            "team_stats": pd.DataFrame([{"Team": "Mexico"}]),
+            "lineups": pd.DataFrame(),
+            "injuries": pd.DataFrame(),
+            "odds": pd.DataFrame(),
+            "market_rows": pd.DataFrame(),
+            "sources": ["storage\\worldcup\\api_football\\raw\\fixture.json"],
+            "downloaded": [],
+            "warnings": [],
+        }
+
+    def fake_prepare(payload, progress_callback=None):
+        calls.append(("prepare", payload))
+        return {"prepared": True, "prepared_rows": 4, "active_sources": ["manual_xg"], "warnings": [], "families": [], "models": []}
+
+    monkeypatch.setattr(services, "load_market_data", fake_market)
+    monkeypatch.setattr(services, "load_api_football_data", fake_api)
+    monkeypatch.setattr(services, "advanced_data_prepare", fake_prepare)
+    config = {}
+
+    preflight = services.resolve_worldcup_sources_for_pipeline(
+        {},
+        config,
+        services.ADVANCED_MODELS_PIPELINE_MODE,
+        progress_callback=None,
+    )
+
+    assert [item[0] for item in calls] == ["market", "api", "prepare"]
+    assert calls[0][1]["allow_download"] is True
+    assert calls[1][1]["allow_download"] is True
+    assert calls[2][1]["force"] is True
+    assert config["_advanced_data_status"]["prepared_rows"] == 4
+    assert preflight["sources"]["advanced_data"]["status"] == "prepared"
+    assert preflight["sources"]["football_data"]["sources"][0] == "storage/worldcup/market/WorldCup2026.xlsx"
+
+
+def test_predict_upcoming_report_runs_source_preflight_before_advanced_report(monkeypatch):
+    from src.web import mundial_services as services
+
+    calls = []
+
+    monkeypatch.setattr(services, "stat_report_hardware", lambda *args, **kwargs: {"warnings": [], "score_backend": "numpy"})
+
+    def fake_preflight(payload, config, pipeline_mode, progress_callback=None):
+        calls.append(("preflight", pipeline_mode))
+        config["_advanced_data_status"] = {"prepared_rows": 2, "active_sources": ["manual_xg"], "warnings": []}
+        return {"status": "ok", "status_label": "Fuentes revisadas", "sources": {}, "visible_warnings": [], "technical_warnings": []}
+
+    def fake_advanced_report(payload, config, start_time, hardware, progress_callback=None):
+        calls.append(("advanced", config.get("_advanced_data_status", {}).get("prepared_rows")))
+        return {"summary": {"pipeline_mode": services.ADVANCED_MODELS_PIPELINE_MODE, "source_preflight": config["_source_preflight"]}}
+
+    monkeypatch.setattr(services, "resolve_worldcup_sources_for_pipeline", fake_preflight)
+    monkeypatch.setattr(services, "advanced_models_report", fake_advanced_report)
+
+    result = services.predict_upcoming_report({"pipeline_mode": "advanced_models"})
+
+    assert calls == [("preflight", services.ADVANCED_MODELS_PIPELINE_MODE), ("advanced", 2)]
+    assert result["summary"]["source_preflight"]["status"] == "ok"
+
+
 def test_alternatives_benchmark_default_backtest_and_ranking_policy():
     from src.web import mundial_services as services
 

@@ -165,9 +165,9 @@
             <small>Genera reporte, ranking y tabla</small>
           </header>
           <div class="forecast-run-summary">
-            <span>Salida</span>
-            <strong>Reporte completo</strong>
-            <small>Incluye backtest cuando el pipeline lo soporte</small>
+            <span>Acción</span>
+            <strong id="upcoming-run-title">Reporte completo</strong>
+            <small id="upcoming-run-copy">Resuelve fuentes, prepara datos y genera el reporte del pipeline seleccionado</small>
           </div>
           <button id="upcoming-predict-btn" class="primary" type="button">Generar reporte</button>
         </article>
@@ -217,17 +217,16 @@
                 <small>xG/NB/dinamico/stacking</small>
               </article>
             </div>
-            <div class="pipeline-action-card">
+            <div class="pipeline-action-card pipeline-single-action-note">
               <label class="check advanced-bayes-toggle hidden"><input id="upcoming-advanced-include-bayesian" name="upcoming_advanced_include_bayesian" type="checkbox"> Bayes profundo</label>
-              <div class="actions-row">
-                <button id="advanced-refresh-status" type="button">Actualizar estado</button>
-                <button id="advanced-prepare-data" class="primary" type="button">Preparar fuentes avanzadas</button>
-              </div>
+              <strong>Un solo flujo</strong>
+              <small>El botón Generar reporte resuelve fuentes cacheables, prepara datos avanzados y corre el backtest.</small>
             </div>
           </div>
-          <div id="worldcup-advanced-progress" class="worldcup-progress hidden" aria-live="polite"></div>
           <div id="advanced-status-cards" class="report-summary-grid pipeline-summary-grid"></div>
-          <div class="advanced-model-layout pipeline-details-grid">
+          <details class="pipeline-technical-drawer">
+            <summary>Detalles técnicos de fuentes y modelos</summary>
+            <div class="advanced-model-layout pipeline-details-grid">
             <article class="visual-panel compact-panel">
               <header><strong>Familias de features</strong><small>Disponibilidad cache-first</small></header>
               <div id="advanced-family-list" class="training-stack"></div>
@@ -240,7 +239,8 @@
               <header><strong>Fuentes detectadas</strong><small>CSV/StatsBomb/socceraction</small></header>
               <div id="advanced-sources-list" class="training-stack"></div>
             </article>
-          </div>
+            </div>
+          </details>
         </article>
         <article id="upcoming-xg-panel" class="pipeline-panel pipeline-missing hidden">
           <header class="pipeline-panel-head">
@@ -272,14 +272,10 @@
               <label>Método<select id="xg-calibration-method" name="xg_calibration_method" autocomplete="off"><option value="sigmoid">Sigmoid</option><option value="isotonic">Isotonic</option></select></label>
               <label>Selección<select id="xg-feature-selection-mode" name="xg_feature_selection_mode" autocomplete="off"><option value="family_balanced">Familias</option><option value="supervised_model">Supervisada</option></select></label>
             </div>
-            <div class="actions-row training-actions">
-              <button id="xg-refresh-status" type="button">Actualizar estado</button>
-              <button id="xg-prepare-etl" type="button">Preparar ETL</button>
-              <button id="xg-train" class="primary" type="button">Entrenar goles esperados (xG) + LightGBM</button>
-            </div>
           </div>
-          <div id="worldcup-xg-progress" class="worldcup-progress hidden"></div>
           <div id="xg-status-cards" class="report-summary-grid pipeline-summary-grid"></div>
+          <details class="pipeline-technical-drawer">
+            <summary>Detalles técnicos de entrenamiento y métricas</summary>
           <div class="model-flow pipeline-details-grid two">
             <article class="visual-panel training-band">
               <header><strong>Procedimiento</strong><small>Anti-leakage + validation temporal</small></header>
@@ -313,6 +309,7 @@
           <details class="data-drawer">
             <summary>Tabla preview ETL</summary>
             <div id="xg-preview-table"></div>
+          </details>
           </details>
         </article>
       </div>

@@ -65,11 +65,6 @@ function bindEvents() {
   bind("fixture-search", "input", renderFixtures);
   bind("upcoming-predict-btn", "click", runUpcomingPredictions);
   bind("upcoming-pipeline-mode", "change", syncUpcomingPipelineControls);
-  bind("xg-refresh-status", "click", () => loadXgLightgbmStatus(true));
-  bind("xg-prepare-etl", "click", runXgLightgbmPrepare);
-  bind("xg-train", "click", runXgLightgbmTraining);
-  bind("advanced-refresh-status", "click", () => loadAdvancedDataStatus(true));
-  bind("advanced-prepare-data", "click", runAdvancedDataPrepare);
   poissonRecentInputIds.forEach((id) => {
     const input = document.getElementById(id);
     if (input) input.addEventListener("change", () => syncPoissonRecentInputs(input));
@@ -177,12 +172,10 @@ function setLoading() {
   if (xgSummary) xgSummary.textContent = `Cargando ${XG_PIPELINE_LABEL}`;
   const xgStatus = document.getElementById("xg-status-cards");
   if (xgStatus) xgStatus.innerHTML = loadingHtml(`Cargando entrenamiento ${XG_PIPELINE_LABEL}`);
-  renderWorldcupJobProgress("xg-training");
   const advancedSummary = document.getElementById("advanced-status-summary");
   if (advancedSummary) advancedSummary.textContent = "Cargando datos y modelos avanzados";
   const advancedCards = document.getElementById("advanced-status-cards");
   if (advancedCards) advancedCards.innerHTML = loadingHtml("Cargando datos avanzados");
-  renderWorldcupJobProgress("advanced-prepare");
   setHtml("match-simulation-grid", loadingHtml("Monte Carlo pendiente"));
   setHtml("match-simulation-table", "");
   setHtml("simulation-summary", "");
@@ -549,6 +542,7 @@ async function runUpcomingPredictions() {
   const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
   const benchmarkTuningEnabled = pipelineMode === "alternatives_benchmark" && Boolean((document.getElementById("upcoming-benchmark-tuning-enabled") || {}).checked);
   const advancedIncludeBayesian = pipelineMode === "advanced_models" && Boolean((document.getElementById("upcoming-advanced-include-bayesian") || {}).checked);
+  const xgPayload = pipelineMode === "xg_lightgbm" ? xgLightgbmTrainingPayload() : {};
   const calculationLabel = pipelineMode === "alternatives_benchmark"
     ? `Benchmark alternativas${benchmarkTuningEnabled ? " + Optuna" : ""}`
     : pipelineMode === "xg_lightgbm"
@@ -574,6 +568,7 @@ async function runUpcomingPredictions() {
       benchmark_tuning_trials: Number((document.getElementById("upcoming-benchmark-tuning-trials") || {}).value || 20),
       benchmark_tuning_sampler: (document.getElementById("upcoming-benchmark-tuning-sampler") || {}).value || "tpe",
       advanced_include_bayesian: advancedIncludeBayesian,
+      ...xgPayload,
     }));
     trackWorldcupJob(job, "upcoming-report");
   } catch (error) {
@@ -606,7 +601,44 @@ function syncUpcomingPipelineControls() {
   if (bayesToggle) bayesToggle.classList.toggle("hidden", !isAdvanced);
   const bayesProfile = document.getElementById("upcoming-bayes-profile");
   if (bayesProfile && isAdvanced && !bayesProfile.value) bayesProfile.value = "light";
+  syncUpcomingRunButton(mode);
   return mode;
+}
+
+function syncUpcomingRunButton(mode) {
+  const copy = upcomingPipelineActionCopy(mode);
+  setText("upcoming-predict-btn", copy.button);
+  setText("upcoming-run-title", copy.title);
+  setText("upcoming-run-copy", copy.detail);
+}
+
+function upcomingPipelineActionCopy(mode) {
+  if (mode === "advanced_models") {
+    return {
+      button: "Generar reporte avanzado",
+      title: "Fuentes + modelos avanzados",
+      detail: "Resuelve caches, prepara datos avanzados, corre backtest y genera el reporte.",
+    };
+  }
+  if (mode === "xg_lightgbm") {
+    return {
+      button: "Generar xG + LightGBM",
+      title: XG_PIPELINE_LABEL,
+      detail: "Prepara ETL, entrena el bundle si falta y genera predicciones xG.",
+    };
+  }
+  if (mode === "alternatives_benchmark") {
+    return {
+      button: "Generar benchmark",
+      title: "Benchmark de alternativas",
+      detail: "Ajusta N si está activo, compara modelos y genera reporte.",
+    };
+  }
+  return {
+    button: "Generar consenso",
+    title: "Consenso Poisson/SOTA",
+    detail: "Genera predicciones futuras con el motor seleccionado.",
+  };
 }
 
 function renderUpcomingReport(report) {
@@ -626,7 +658,7 @@ function renderUpcomingReport(report) {
   }
   const fixtures = report.fixture_reports || [];
   const hardware = summary.hardware || {};
-  const warnings = summary.warnings || [];
+  const warnings = reportVisibleWarnings(summary);
   const calculationLabel = summary.sota_calculation_label || (summary.pipeline_mode === "poisson_sota" ? "Consenso exacto: matriz promedio, sin simulacion" : "");
   document.getElementById("upcoming-summary").textContent =
     `${summary.pipeline_label || "Reporte"} - ${summary.returned || 0}/${summary.requested || 0} partidos - ${summary.group || "Todos"} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()}${calculationLabel ? ` - ${calculationLabel}` : ""} - ${summary.report_id || report.report_id || ""}`;
@@ -641,7 +673,7 @@ function renderUpcomingReport(report) {
       ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
     </div>
     ${reportDownloadButtonsHtml(report.downloads || {}, false)}
-    ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${warningsHtml(warnings)}
     ${sotaPipelineListHtml(summary)}
     ${clientReportHtml(fixtures)}
     <details class="technical-report-drawer">
@@ -670,7 +702,7 @@ function renderXgLightgbmReport(report) {
   const fixtures = report.fixture_reports || [];
   const model = summary.model || {};
   const modelDevice = summary.model_device || model.hardware || {};
-  const warnings = summary.warnings || [];
+  const warnings = reportVisibleWarnings(summary);
   const tuning = model.tuning || {};
   const rowLabel = `${model.train_rows || 0}/${model.validation_rows || 0}/${model.test_rows || 0}`;
   const modelName = xgDisplayLabel(model.model_name || model.model_id || summary.model_id || XG_PIPELINE_LABEL);
@@ -689,7 +721,7 @@ function renderXgLightgbmReport(report) {
       ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
     </div>
     ${reportDownloadButtonsHtml(report.downloads || {}, false)}
-    ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${warningsHtml(warnings)}
     <section class="client-report-shell">
       <header>
         <div>
@@ -706,6 +738,7 @@ function renderXgLightgbmReport(report) {
     <details class="technical-report-drawer">
       <summary>Metadata del bundle</summary>
       ${xgLightgbmModelMetadataHtml(model)}
+      ${technicalWarningsHtml(summary)}
     </details>`;
   refreshCountdowns();
   renderTable("upcoming-predictions-table", report.table);
@@ -797,31 +830,6 @@ async function loadXgLightgbmStatus(manual = false) {
   try {
     const status = await api("/api/mundial/xg-lightgbm/training/status");
     renderXgLightgbmTrainingStatus(status);
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function runXgLightgbmPrepare() {
-  clearAlert();
-  setText("xg-lightgbm-summary", `Preparando ETL ${XG_PIPELINE_LABEL}...`);
-  try {
-    const job = await api("/api/mundial/xg-lightgbm/training/prepare", jsonOptions({
-      force: true,
-      refresh_history: false,
-    }));
-    trackWorldcupJob(job, "xg-prepare");
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function runXgLightgbmTraining() {
-  clearAlert();
-  setText("xg-lightgbm-summary", `Entrenando bundle ${XG_PIPELINE_LABEL}...`);
-  try {
-    const job = await api("/api/mundial/xg-lightgbm/training/train", jsonOptions(xgLightgbmTrainingPayload()));
-    trackWorldcupJob(job, "xg-training");
   } catch (error) {
     showError(error.message);
   }
@@ -1114,20 +1122,6 @@ async function loadAdvancedDataStatus(manual = false) {
   }
 }
 
-async function runAdvancedDataPrepare() {
-  clearAlert();
-  setText("advanced-status-summary", "Preparando fuentes avanzadas...");
-  try {
-    const job = await api("/api/mundial/advanced-data/prepare", jsonOptions({
-      force: true,
-      snapshot_statsbomb: false,
-    }));
-    trackWorldcupJob(job, "advanced-prepare");
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
 function renderAdvancedDataStatus(payload) {
   state.advancedData = payload || {};
   const status = state.advancedData;
@@ -1256,9 +1250,10 @@ function renderAdvancedModelsReport(report) {
   const fixtures = report.fixture_reports || [];
   const backtests = report.model_backtests || [];
   const best = report.best_model || summary.best_model || {};
-  const warnings = summary.warnings || [];
+  const warnings = reportVisibleWarnings(summary);
   const dataStatus = summary.advanced_data_status || report.advanced_data_status || {};
   const models = summary.advanced_models_catalog || report.advanced_models_catalog || dataStatus.models || [];
+  const sourcePreflight = summary.source_preflight || {};
   const backtestAutoN = summary.backtest_auto_n ?? (summary.backtest || {}).evaluated_matches ?? 0;
   document.getElementById("upcoming-summary").textContent =
     `${summary.pipeline_label || "Modelos avanzados"} - ${fixtures.length}/${summary.requested || 0} próximos - ${models.length} familias - ${backtestAutoN} evaluados - ${summary.report_id || report.report_id || ""}`;
@@ -1269,13 +1264,14 @@ function renderAdvancedModelsReport(report) {
       ${reportSummaryCard("Modelo #1", best.available ? (best.model_label || best.model_key || "-") : "Pendiente")}
       ${reportSummaryCard("Datos advanced", `${formatInteger(dataStatus.prepared_rows || 0)} filas`)}
       ${reportSummaryCard("Fuentes", (dataStatus.active_sources || []).length || 0)}
+      ${reportSummaryCard("Preflight", sourcePreflight.status_label || "Resuelto")}
       ${reportSummaryCard("Modelos", models.length || 0)}
       ${reportSummaryCard("Bayes", summary.advanced_include_bayesian ? "Incluido" : "Ligero")}
       ${reportSummaryCard("Partidos", `${fixtures.length}/${summary.requested || 0}`)}
       ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
     </div>
     ${reportDownloadButtonsHtml(report.downloads || {}, true)}
-    ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${warningsHtml(warnings)}
     ${advancedDataReportHtml(dataStatus, models)}
     ${statisticalAuditHtml(report.statistical_audit || summary.statistical_audit || {})}
     ${featureResearchHtml(summary.feature_research || report.feature_research || {})}
@@ -1291,7 +1287,12 @@ function renderAdvancedModelsReport(report) {
       <div class="alternatives-model-list">
         ${(report.ranked_models || []).map((item) => alternativeBenchmarkCardHtml(item)).join("") || loadingHtml("Sin modelos")}
       </div>
-    </section>`;
+    </section>
+    <details class="technical-report-drawer">
+      <summary>Limitaciones y detalles técnicos</summary>
+      ${sourcePreflightHtml(sourcePreflight)}
+      ${technicalWarningsHtml(summary)}
+    </details>`;
   refreshCountdowns();
   renderTable("upcoming-predictions-table", report.table);
 }
@@ -1300,20 +1301,82 @@ function advancedDataReportHtml(dataStatus, models) {
   const status = dataStatus || {};
   const families = status.families || [];
   const sources = status.active_sources || [];
+  const readyFamilies = families.filter((item) => ["active", "cached"].includes(String(item.status || ""))).length;
   return `<section class="report-panel advanced-data-report">
-    <header><strong>Datos y modelos avanzados</strong><small>${escapeHtml(status.anti_leakage || "Cache-first, corte temporal antes del partido")}</small></header>
+    <header><strong>Datos avanzados</strong><small>${escapeHtml(status.anti_leakage || "Cache-first, corte temporal antes del partido")}</small></header>
     <div class="technical-meta-row">
       <span>Preparado ${escapeHtml(status.prepared ? "si" : "no")}</span>
       <span>Filas ${escapeHtml(formatInteger(status.prepared_rows || 0))}</span>
       <span>Fuentes ${escapeHtml(sources.length || 0)}</span>
+      <span>Familias listas ${escapeHtml(readyFamilies)}/${escapeHtml(families.length || 0)}</span>
+      <span>Modelos ${escapeHtml((models || []).length || 0)}</span>
       <span>StatsBomb ${escapeHtml((status.statsbomb || {}).available ? "cacheado" : "no")}</span>
       <span>socceraction ${escapeHtml(status.socceraction_available ? "instalado" : "opcional")}</span>
     </div>
-    <div class="advanced-report-grid">
-      <div>${advancedFamiliesHtml(families)}</div>
-      <div>${advancedModelCatalogHtml(models || [])}</div>
+    <details class="inline-technical-drawer">
+      <summary>Catálogo y disponibilidad</summary>
+      <div class="advanced-report-grid">
+        <div>${advancedFamiliesHtml(families)}</div>
+        <div>${advancedModelCatalogHtml(models || [])}</div>
+      </div>
+    </details>
+  </section>`;
+}
+
+function reportVisibleWarnings(summary) {
+  return uniqueDisplayMessages((summary || {}).visible_warnings || (summary || {}).warnings || []).slice(0, 5);
+}
+
+function technicalWarnings(summary) {
+  return uniqueDisplayMessages([
+    ...((summary || {}).technical_warnings || []),
+    ...((summary || {}).warnings || []),
+    ...(((summary || {}).source_preflight || {}).technical_warnings || []),
+  ]);
+}
+
+function warningsHtml(warnings) {
+  const rows = uniqueDisplayMessages(warnings || []);
+  return rows.length ? `<div class="warning-list">${rows.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : "";
+}
+
+function technicalWarningsHtml(summary) {
+  const rows = technicalWarnings(summary);
+  if (!rows.length) return loadingHtml("Sin limitaciones técnicas adicionales");
+  return `<div class="warning-list compact technical-warning-list">${rows.map((item) => `<span>${escapeHtml(normalizePathDisplay(item))}</span>`).join("")}</div>`;
+}
+
+function sourcePreflightHtml(preflight) {
+  const sources = (preflight || {}).sources || {};
+  const entries = Object.entries(sources);
+  if (!entries.length) return "";
+  return `<section class="report-panel compact-panel">
+    <header><strong>Fuentes resueltas</strong><small>${escapeHtml(preflight.status_label || "Preflight")}</small></header>
+    <div class="technical-meta-row">
+      ${entries.map(([key, value]) => `<span>${escapeHtml(key.replace(/_/g, " "))} ${escapeHtml(sourcePreflightStatus(value))}</span>`).join("")}
     </div>
   </section>`;
+}
+
+function sourcePreflightStatus(source) {
+  const item = source || {};
+  if (item.error) return "error";
+  if (item.status) return item.status;
+  if (item.rows !== undefined) return `${formatInteger(item.rows)} filas`;
+  if (item.available !== undefined) return item.available ? "disponible" : "pendiente";
+  return "revisado";
+}
+
+function uniqueDisplayMessages(values) {
+  const seen = new Set();
+  const output = [];
+  (values || []).forEach((value) => {
+    const text = normalizePathDisplay(String(value || "").trim());
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    output.push(text);
+  });
+  return output;
 }
 
 function statisticalAuditHtml(audit) {
@@ -1348,7 +1411,7 @@ function renderAlternativesBenchmarkReport(report) {
   const fixtures = report.fixture_reports || [];
   const backtests = report.model_backtests || [];
   const best = report.best_model || summary.best_model || {};
-  const warnings = summary.warnings || [];
+  const warnings = reportVisibleWarnings(summary);
   const tuning = summary.benchmark_tuning || {};
   const backtestAutoN = summary.backtest_auto_n ?? (summary.backtest || {}).evaluated_matches ?? 0;
   const resultSource = summary.backtest_source || summary.result_source || ((summary.results_refresh || {}).source) || "CSV local";
@@ -1371,7 +1434,7 @@ function renderAlternativesBenchmarkReport(report) {
       ${tuning.enabled ? reportSummaryCard("Optuna N", tuning.available ? `${tuning.best_poisson_recent_matches} ultimos` : "No disponible") : ""}
     </div>
     ${reportDownloadButtonsHtml(report.downloads || {}, true)}
-    ${warnings.length ? `<div class="warning-list">${warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${warningsHtml(warnings)}
     ${alternativesBenchmarkHtml(report)}`;
   refreshCountdowns();
   renderTable("upcoming-predictions-table", report.table);
@@ -2770,12 +2833,8 @@ function worldcupJobProgressSignature(job) {
 }
 
 function worldcupJobPollDelay(job) {
-  const progress = job.progress || {};
   const kind = job.kind || "";
-  const stage = progress.stage || "";
   if (kind === "upcoming-report") return 1000;
-  if (kind === "xg-prepare" || kind === "xg-training") return 1500;
-  if (kind === "advanced-prepare") return 1500;
   const base = kind === "simulation" ? 2000 : 3000;
   const idleCount = Number(job.pollIdleCount || 0);
   if (idleCount >= 4) return 10000;
@@ -2797,15 +2856,6 @@ async function handleWorldcupJobComplete(job) {
   if (job.kind === "upcoming-report") {
     renderUpcomingReport(result);
   }
-  if (job.kind === "xg-prepare") {
-    renderXgLightgbmTrainingStatus(result);
-  }
-  if (job.kind === "xg-training") {
-    renderXgLightgbmTrainingStatus((result.status || result));
-  }
-  if (job.kind === "advanced-prepare") {
-    renderAdvancedDataStatus(result);
-  }
 }
 
 function renderWorldcupJobProgress(kind) {
@@ -2813,10 +2863,6 @@ function renderWorldcupJobProgress(kind) {
       ? "worldcup-simulation-progress"
       : kind === "upcoming-report"
         ? "worldcup-upcoming-progress"
-        : kind === "xg-prepare" || kind === "xg-training"
-          ? "worldcup-xg-progress"
-          : kind === "advanced-prepare"
-            ? "worldcup-advanced-progress"
         : "";
   if (!targetId) return;
   const target = document.getElementById(targetId);
@@ -2908,12 +2954,6 @@ function setWorldcupJobBusy(kind, busy) {
     ? ["simulate-poisson-btn"]
     : kind === "upcoming-report"
         ? ["upcoming-predict-btn"]
-        : kind === "xg-prepare"
-          ? ["xg-prepare-etl", "xg-train"]
-        : kind === "xg-training"
-          ? ["xg-prepare-etl", "xg-train"]
-          : kind === "advanced-prepare"
-            ? ["advanced-prepare-data", "advanced-refresh-status"]
       : [];
   ids.forEach((id) => {
     const button = document.getElementById(id);

@@ -1095,7 +1095,7 @@ def teams(refresh: bool = False, config_payload: Dict[str, Any] | None = None) -
         "teams": records,
         "table": table_payload(df, page=1, page_size=80),
         "history_source": history_source,
-        "config": config,
+        "config": public_report_config(config),
     }
 
 
@@ -1468,6 +1468,203 @@ def resolve_prediction_fixture(tournament: Dict[str, Any], fixture_id: Any = Non
     })
 
 
+OPTIONAL_WARNING_PATTERNS = (
+    "no disponible en cache",
+    "sin cache avanzado local",
+    "sin cache local",
+    "no se encontraron filas locales",
+    "socceraction no instalado",
+    "no existe storage/worldcup/xg",
+    "api-football omitido",
+    "api-football no disponible",
+    "football-data xlsx no disponible",
+    "bundle xg-lightgbm",
+    "fallback poisson",
+    "respaldo poisson",
+)
+
+
+def normalize_report_message(value: Any) -> str:
+    return str(value or "").strip().replace("\\", "/")
+
+
+def normalize_report_messages(values: Iterable[Any]) -> List[str]:
+    return unique_strings(normalize_report_message(value) for value in values)
+
+
+def warning_is_optional_limitation(text: str) -> bool:
+    normalized = normalize_report_message(text).lower()
+    return any(pattern in normalized for pattern in OPTIONAL_WARNING_PATTERNS)
+
+
+def public_warning_payload(warnings: Iterable[Any], pipeline_mode: str = "") -> Dict[str, List[str]]:
+    technical = normalize_report_messages(warnings)
+    visible: List[str] = []
+    if any(warning_is_optional_limitation(item) for item in technical):
+        if pipeline_mode == XG_LIGHTGBM_PIPELINE_MODE:
+            visible.append("Fuentes o modelo xG pendientes; el reporte usó fallback Poisson donde hizo falta.")
+        elif pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE:
+            visible.append("Fuentes avanzadas opcionales pendientes; el reporte usó fallback estadístico donde hizo falta.")
+        else:
+            visible.append("Fuentes opcionales pendientes; el reporte usó fallback estadístico donde hizo falta.")
+    for item in technical:
+        lower = item.lower()
+        if warning_is_optional_limitation(item):
+            continue
+        if "cuda fue solicitada explicitamente" in lower or "error" in lower or "fallo" in lower:
+            visible.append(item)
+        elif "potencia limitada" in lower:
+            visible.append("Backtest con muestra limitada; interpreta p-values como exploratorios.")
+    return {
+        "visible_warnings": unique_strings(visible),
+        "technical_warnings": technical,
+    }
+
+
+def merge_warning_payloads(*payloads: Dict[str, Any]) -> Dict[str, List[str]]:
+    return {
+        "visible_warnings": unique_strings(
+            item
+            for payload in payloads
+            for item in payload.get("visible_warnings", [])
+        ),
+        "technical_warnings": normalize_report_messages(
+            item
+            for payload in payloads
+            for item in payload.get("technical_warnings", [])
+        ),
+    }
+
+
+def public_report_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(config or {}).items()
+        if not str(key).startswith("_")
+    }
+
+
+def source_rows_count(frame: Any) -> int:
+    return int(frame.shape[0]) if hasattr(frame, "shape") and len(frame.shape) >= 1 else 0
+
+
+def resolve_worldcup_sources_for_pipeline(
+        payload: Dict[str, Any],
+        config: Dict[str, Any],
+        pipeline_mode: str,
+        progress_callback=None,
+) -> Dict[str, Any]:
+    if pipeline_mode not in {ADVANCED_MODELS_PIPELINE_MODE, XG_LIGHTGBM_PIPELINE_MODE}:
+        return {"status": "skipped", "status_label": "No requerido", "sources": {}, "visible_warnings": [], "technical_warnings": []}
+    emit_job_progress(progress_callback, "source_preflight", 0, 4, "Resolviendo fuentes cacheables")
+    result: Dict[str, Any] = {
+        "status": "ok",
+        "status_label": "Fuentes revisadas",
+        "sources": {},
+        "actions": [],
+        "visible_warnings": [],
+        "technical_warnings": [],
+    }
+    warnings: List[str] = []
+    if pipeline_mode == XG_LIGHTGBM_PIPELINE_MODE:
+        model_id, model_meta, model_warnings = resolve_xg_lightgbm_model(payload)
+        warnings.extend(model_warnings)
+        model_ready = bool(model_meta.get("trained") and model_meta.get("model_profile") == XG_LIGHTGBM_PROFILE)
+        result["sources"]["xg_lightgbm_model"] = {
+            "status": "trained" if model_ready else "missing",
+            "available": model_ready,
+            "model_id": model_id,
+        }
+        if model_ready:
+            emit_job_progress(progress_callback, "source_preflight", 4, 4, "Bundle xG-LightGBM listo")
+            result.update(public_warning_payload(warnings, pipeline_mode=pipeline_mode))
+            return json_safe(result)
+    try:
+        market = load_market_data(allow_download=True, force_download=False, use_scraper=False)
+        result["sources"]["football_data"] = {
+            "status": market.get("status", "missing"),
+            "rows": int(market.get("market_rows", 0) or 0),
+            "qualifier_rows": int(market.get("qualifier_rows", 0) or 0),
+            "sources": [normalize_report_message(item) for item in market.get("sources", [])],
+        }
+        warnings.extend(market.get("warnings", []))
+    except Exception as exc:
+        message = f"Football-Data XLSX no pudo resolverse ({exc.__class__.__name__}: {exc})."
+        result["sources"]["football_data"] = {"status": "error", "error": normalize_report_message(message)}
+        warnings.append(message)
+    emit_job_progress(progress_callback, "source_preflight", 1, 4, "Fuentes de mercado revisadas")
+
+    if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE:
+        try:
+            api_bundle = load_api_football_data(allow_download=True, force_download=False)
+            api_rows = sum(source_rows_count(api_bundle.get(key)) for key in ("fixtures", "team_stats", "lineups", "injuries", "odds", "market_rows"))
+            result["sources"]["api_football"] = {
+                "status": api_bundle.get("status", "missing"),
+                "rows": api_rows,
+                "sources": [normalize_report_message(item) for item in api_bundle.get("sources", [])],
+                "downloaded": [normalize_report_message(item) for item in api_bundle.get("downloaded", [])],
+            }
+            warnings.extend(api_bundle.get("warnings", []))
+        except Exception as exc:
+            message = f"API-Football no pudo resolverse ({exc.__class__.__name__}: {exc})."
+            result["sources"]["api_football"] = {"status": "error", "error": normalize_report_message(message)}
+            warnings.append(message)
+        emit_job_progress(progress_callback, "source_preflight", 2, 4, "API-Football revisado")
+        try:
+            data_status = advanced_data_prepare({"force": True, "snapshot_statsbomb": False}, progress_callback=None)
+            config["_advanced_data_status"] = data_status
+            result["sources"]["advanced_data"] = {
+                "status": "prepared" if int(data_status.get("prepared_rows", 0) or 0) > 0 else "fallback",
+                "rows": int(data_status.get("prepared_rows", 0) or 0),
+                "active_sources": len(data_status.get("active_sources", []) or []),
+            }
+            warnings.extend(data_status.get("warnings", []))
+            result["actions"].append("advanced_data_prepare")
+        except Exception as exc:
+            message = f"Preparación avanzada falló ({exc.__class__.__name__}: {exc})."
+            result["sources"]["advanced_data"] = {"status": "error", "error": normalize_report_message(message)}
+            warnings.append(message)
+    elif pipeline_mode == XG_LIGHTGBM_PIPELINE_MODE:
+        try:
+            status = xg_lightgbm_training_status()
+            dataset = status.get("dataset", {})
+            if not dataset.get("etl_ready") or dataset.get("etl_stale"):
+                emit_job_progress(progress_callback, "source_preflight", 2, 4, "Preparando ETL xG-LightGBM")
+                status = xg_lightgbm_prepare_training({**payload, "force": True, "refresh_history": False}, progress_callback=None)
+                result["actions"].append("xg_prepare_etl")
+            if status.get("can_train"):
+                emit_job_progress(progress_callback, "source_preflight", 3, 4, "Entrenando xG-LightGBM")
+                train_result = xg_lightgbm_train_model(payload, progress_callback=None)
+                status = train_result.get("status", status)
+                result["actions"].append("xg_train_model")
+            config["_xg_lightgbm_status"] = status
+            model = status.get("model", {})
+            result["sources"]["xg_lightgbm_model"] = {
+                "status": "trained" if model.get("trained") else "fallback",
+                "available": bool(model.get("trained")),
+                "model_id": model.get("model_id", model_id),
+                "rows": int(model.get("train_rows", 0) or 0),
+            }
+            warnings.extend((model or {}).get("warnings", []))
+            dataset_warnings = (status.get("dataset", {}) or {}).get("prepared_warnings", [])
+            warnings.extend(dataset_warnings if isinstance(dataset_warnings, list) else [])
+        except Exception as exc:
+            message = f"xG-LightGBM no pudo prepararse automaticamente ({exc.__class__.__name__}: {exc})."
+            result["sources"]["xg_lightgbm_model"]["status"] = "fallback"
+            result["sources"]["xg_lightgbm_model"]["error"] = normalize_report_message(message)
+            warnings.append(message)
+    emit_job_progress(progress_callback, "source_preflight", 4, 4, "Fuentes resueltas")
+    warning_payload = public_warning_payload(warnings, pipeline_mode=pipeline_mode)
+    result.update(warning_payload)
+    if any((source or {}).get("error") for source in result["sources"].values() if isinstance(source, dict)):
+        result["status"] = "partial"
+        result["status_label"] = "Fuentes parciales"
+    elif result["visible_warnings"]:
+        result["status"] = "fallback"
+        result["status_label"] = "Fallback disponible"
+    return json_safe(result)
+
+
 def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_callback=None) -> Dict[str, Any]:
     payload = payload or {}
     pipeline_mode = normalize_report_pipeline_mode(payload.get("pipeline_mode"))
@@ -1491,6 +1688,13 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         hardware=hardware,
         message="Preparando fixtures y modelo base",
     )
+    source_preflight = resolve_worldcup_sources_for_pipeline(
+        payload=payload,
+        config=config,
+        pipeline_mode=pipeline_mode,
+        progress_callback=progress_callback,
+    )
+    config["_source_preflight"] = source_preflight
     if pipeline_mode == ALTERNATIVES_BENCHMARK_PIPELINE_MODE:
         return alternatives_benchmark_report(
             payload=payload,
@@ -1562,6 +1766,8 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
                 *[str(item) for item in (report.get("monte_carlo_consensus") or {}).get("warnings", []) if str(item)],
             ])
     table = table_payload(pd.DataFrame(upcoming_report_table_rows(fixture_reports)), page=1, page_size=max(limit * 12, 1))
+    raw_warnings = unique_strings([*hardware.get("warnings", []), *feature_source.warnings])
+    warning_payload = public_warning_payload(raw_warnings, pipeline_mode=pipeline_mode)
     summary = {
         "pipeline_mode": pipeline_mode,
         "pipeline_label": "Poisson + SOTA",
@@ -1583,8 +1789,10 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         "feature_source_warnings": unique_strings(feature_source.warnings),
         "hardware": hardware,
         "results_autorefresh": results_autorefresh,
-        "warnings": unique_strings([*hardware.get("warnings", []), *feature_source.warnings]),
-        "config": config,
+        "warnings": warning_payload["visible_warnings"],
+        "visible_warnings": warning_payload["visible_warnings"],
+        "technical_warnings": warning_payload["technical_warnings"],
+        "config": public_report_config(config),
     }
     report = persist_upcoming_report({
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1659,6 +1867,16 @@ def xg_lightgbm_report(
         for warning in report.get("warnings", [])
     ]
     model_summary = xg_lightgbm_model_summary(model_meta)
+    source_preflight = config.get("_source_preflight", {}) if isinstance(config.get("_source_preflight", {}), dict) else {}
+    raw_warnings = unique_strings([
+        *model_warnings,
+        *hardware.get("warnings", []),
+        *fixture_warnings,
+    ])
+    warning_payload = merge_warning_payloads(
+        public_warning_payload(raw_warnings, pipeline_mode=XG_LIGHTGBM_PIPELINE_MODE),
+        source_preflight,
+    )
     summary = {
         "pipeline_mode": XG_LIGHTGBM_PIPELINE_MODE,
         "pipeline_label": XG_LIGHTGBM_PIPELINE_LABEL,
@@ -1680,12 +1898,11 @@ def xg_lightgbm_report(
         "model_device": model_summary.get("hardware", {}),
         "hardware": hardware,
         "results_autorefresh": results_autorefresh,
-        "warnings": unique_strings([
-            *model_warnings,
-            *hardware.get("warnings", []),
-            *fixture_warnings,
-        ]),
-        "config": config,
+        "source_preflight": source_preflight,
+        "warnings": warning_payload["visible_warnings"],
+        "visible_warnings": warning_payload["visible_warnings"],
+        "technical_warnings": warning_payload["technical_warnings"],
+        "config": public_report_config(config),
     }
     report = persist_upcoming_report({
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1728,7 +1945,7 @@ def advanced_models_report(
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     history_df, history_source = score_history_for_tournament(tournament, config)
     feature_source = benchmark_feature_source(tournament, history_df, config)
-    data_status = advanced_data_status()
+    data_status = config.get("_advanced_data_status") if isinstance(config.get("_advanced_data_status"), dict) else advanced_data_status()
     model_sequence = active_advanced_score_model_sequence(config)
     group_map = groups_from_tournament(tournament)
     team_names = [team for group_teams in group_map.values() for team in group_teams]
@@ -1786,7 +2003,7 @@ def advanced_models_report(
     backtest_summary = backtest.get("summary", {})
     generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
     backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
-    warnings = unique_strings([
+    raw_warnings = unique_strings([
         *hardware.get("warnings", []),
         *data_status.get("warnings", []),
         *feature_source.warnings,
@@ -1797,6 +2014,11 @@ def advanced_models_report(
             for warning in report.get("warnings", [])
         ],
     ])
+    source_preflight = config.get("_source_preflight", {}) if isinstance(config.get("_source_preflight", {}), dict) else {}
+    warning_payload = merge_warning_payloads(
+        public_warning_payload(raw_warnings, pipeline_mode=ADVANCED_MODELS_PIPELINE_MODE),
+        source_preflight,
+    )
     summary = {
         "pipeline_mode": ADVANCED_MODELS_PIPELINE_MODE,
         "pipeline_label": ADVANCED_MODELS_PIPELINE_LABEL,
@@ -1834,8 +2056,11 @@ def advanced_models_report(
             "warnings": statistical_audit.get("warnings", []),
         },
         "hardware": hardware,
-        "warnings": warnings,
-        "config": config,
+        "source_preflight": source_preflight,
+        "warnings": warning_payload["visible_warnings"],
+        "visible_warnings": warning_payload["visible_warnings"],
+        "technical_warnings": warning_payload["technical_warnings"],
+        "config": public_report_config(config),
         "best_model": best_model,
         "backtest": backtest_summary,
     }
@@ -2399,7 +2624,7 @@ def alternatives_benchmark_report(
     alternatives = alternatives_with_backtests(sota_alternatives_catalog(), backtest_by_key)
     table_rows = alternatives_benchmark_table_rows(fixture_reports, backtest_by_key)
     table = table_payload(pd.DataFrame(table_rows), page=1, page_size=max(len(table_rows), 1))
-    warnings = unique_strings([
+    raw_warnings = unique_strings([
         *hardware.get("warnings", []),
         *results_refresh.get("warnings", []),
         *tuning_summary.get("warnings", []),
@@ -2415,6 +2640,7 @@ def alternatives_benchmark_report(
             for warning in report.get("warnings", [])
         ],
     ])
+    warning_payload = public_warning_payload(raw_warnings, pipeline_mode=ALTERNATIVES_BENCHMARK_PIPELINE_MODE)
     backtest_summary = backtest.get("summary", {})
     generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
     backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
@@ -2453,8 +2679,10 @@ def alternatives_benchmark_report(
             "role": "ranked_reference",
         },
         "hardware": hardware,
-        "warnings": warnings,
-        "config": config,
+        "warnings": warning_payload["visible_warnings"],
+        "visible_warnings": warning_payload["visible_warnings"],
+        "technical_warnings": warning_payload["technical_warnings"],
+        "config": public_report_config(config),
         "best_model": best_model,
         "backtest": backtest_summary,
         "statistical_audit": {
@@ -6120,7 +6348,7 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     output = {
         "summary": {
             "model": "Elo + modelos de marcador Monte Carlo",
-            "config": config,
+            "config": public_report_config(config),
             "mode": config["mode"],
             "fixture_source": fixture_source,
             "history_source": history_source,

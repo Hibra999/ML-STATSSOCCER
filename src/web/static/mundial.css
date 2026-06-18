@@ -1225,8 +1225,19 @@ h3 { font-size: 16px; }
 .pipeline-action-card .actions-row {
   justify-content: flex-start;
 }
+.pipeline-single-action-note {
+  align-content: start;
+}
+.pipeline-single-action-note strong {
+  color: var(--forecast-ink);
+  font-size: 14px;
+}
+.pipeline-single-action-note small {
+  color: var(--muted);
+  line-height: 1.35;
+}
 .pipeline-summary-grid {
-  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
 }
 .pipeline-details-grid {
   margin-bottom: 0;
@@ -1261,6 +1272,45 @@ h3 { font-size: 16px; }
   display: block;
   margin-top: 4px;
   overflow-wrap: anywhere;
+}
+.pipeline-technical-drawer,
+.inline-technical-drawer {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+.pipeline-technical-drawer {
+  padding: 0;
+}
+.pipeline-technical-drawer summary,
+.inline-technical-drawer summary {
+  cursor: pointer;
+  color: #40505d;
+  font-weight: 900;
+}
+.pipeline-technical-drawer summary {
+  padding: 11px 12px;
+}
+.pipeline-technical-drawer[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+.pipeline-technical-drawer .pipeline-details-grid,
+.pipeline-technical-drawer .model-flow,
+.pipeline-technical-drawer .model-management-grid,
+.pipeline-technical-drawer .training-inline-grid,
+.pipeline-technical-drawer .data-drawer {
+  margin: 12px;
+}
+.inline-technical-drawer {
+  margin-top: 12px;
+  padding: 10px 12px;
+}
+.inline-technical-drawer .advanced-report-grid {
+  margin-top: 10px;
+}
+.technical-warning-list {
+  margin-top: 12px;
 }
 .advanced-models-dock,
 .xg-training-dock {

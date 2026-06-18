@@ -128,7 +128,11 @@ def test_mundial_static_ui_exposes_advanced_models_and_accessibility_hooks():
     assert 'value="xg_lightgbm"' in source
     assert "Goles esperados (xG) + LightGBM" in source
     assert "xG = goles esperados" in source
-    assert 'id="advanced-prepare-data"' in source
+    assert 'id="advanced-prepare-data"' not in source
+    assert 'id="advanced-refresh-status"' not in source
+    assert 'id="xg-prepare-etl"' not in source
+    assert 'id="xg-train"' not in source
+    assert 'id="upcoming-predict-btn"' in source
     assert 'id="upcoming-advanced-panel"' in source
     assert 'id="upcoming-xg-panel"' in source
     assert 'aria-live="polite"' in source
@@ -308,14 +312,15 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "sim-use-ml-model" not in html_source
     assert "training-train" not in html_source
     assert "worldcup-training-progress" not in html_source
-    assert "worldcup-xg-progress" in html_source
+    assert "worldcup-xg-progress" not in html_source
     assert "worldcup-simulation-progress" in html_source
     assert "training-retrain-base" not in html_source
     assert "training-retrain-players" not in html_source
     assert "training-walkforward-notice" not in html_source
     assert "worldcup-model-type" not in html_source
     assert "xg-model-id" in html_source
-    assert "xg-train" in html_source
+    assert 'id="xg-train"' not in html_source
+    assert "Generar xG + LightGBM" in app_source
     assert "xg-tuning-enabled" in html_source
     assert "xg-n-trials" in html_source
     assert "xg-device" in html_source
@@ -363,8 +368,9 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "lineup-features-table" not in html_source
     assert "/api/mundial/simulate" in app_source
     assert "/api/mundial/xg-lightgbm/training/status" in app_source
-    assert "/api/mundial/xg-lightgbm/training/prepare" in app_source
-    assert "/api/mundial/xg-lightgbm/training/train" in app_source
+    assert "/api/mundial/xg-lightgbm/training/prepare" not in app_source
+    assert "/api/mundial/xg-lightgbm/training/train" not in app_source
+    assert "/api/mundial/advanced-data/prepare" not in app_source
     assert "/api/mundial/player-features" not in app_source
     assert "/api/mundial/models" not in app_source
     assert "/api/mundial/models/train" not in app_source
