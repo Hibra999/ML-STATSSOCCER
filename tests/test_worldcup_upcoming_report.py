@@ -314,6 +314,7 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
     assert config["backtest_start_date"] == "2026-06-11"
     assert config["backtest_cutoff_delay_minutes"] == 1
     assert config["backtest_scope"] == "worldcup_2026_confirmed_auto"
+    assert config["sota_device"] == "cuda"
 
     ranked = services.rank_backtest_models([
         {

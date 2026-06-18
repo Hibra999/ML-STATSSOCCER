@@ -1676,7 +1676,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
     config = report_pipeline_config(payload, pipeline_mode)
     start_time = time.monotonic()
     hardware = stat_report_hardware(
-        config.get("sota_device", "auto"),
+        config.get("sota_device", "cuda"),
         pipeline_mode,
         config.get("sota_calculation_mode", "exact"),
     )
@@ -1813,7 +1813,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         "iterations": config["iterations"],
         "seed": config["seed"],
         "bayes_profile": config.get("bayes_profile", ""),
-        "sota_device": config.get("sota_device", "auto"),
+        "sota_device": config.get("sota_device", "cuda"),
         "sota_calculation_mode": config.get("sota_calculation_mode", "exact"),
         "sota_calculation_label": sota_calculation_summary(config),
         "monte_carlo_iterations": config["iterations"] if config.get("sota_calculation_mode") == "monte_carlo" else 0,
@@ -2154,7 +2154,7 @@ def advanced_models_report(
         "seed": config["seed"],
         "bayes_profile": config.get("bayes_profile", ""),
         "advanced_include_bayesian": bool(config.get("advanced_include_bayesian")),
-        "sota_device": config.get("sota_device", "auto"),
+        "sota_device": config.get("sota_device", "cuda"),
         "sota_calculation_mode": "not_applicable",
         "sota_calculation_label": "Familias avanzadas exactas",
         "monte_carlo_iterations": 0,
@@ -2581,9 +2581,9 @@ def xg_lightgbm_training_payload(payload: Dict[str, Any] | None) -> Dict[str, An
     feature_selection_mode = str(payload.get("feature_selection_mode") or FEATURE_SELECTION_FAMILY_BALANCED).strip().lower().replace("-", "_")
     if feature_selection_mode not in {FEATURE_SELECTION_FAMILY_BALANCED, FEATURE_SELECTION_SUPERVISED_MODEL}:
         feature_selection_mode = FEATURE_SELECTION_FAMILY_BALANCED
-    device = str(payload.get("device") or "auto").strip().lower()
+    device = str(payload.get("device") or "cuda").strip().lower()
     if device not in {"auto", "cpu", "cuda"}:
-        device = "auto"
+        device = "cuda"
     default_id = default_model_id(XG_LIGHTGBM_PROFILE, "dual_markets")
     return {
         "model_profile": XG_LIGHTGBM_PROFILE,
@@ -2787,7 +2787,7 @@ def alternatives_benchmark_report(
         "iterations": 0,
         "seed": config["seed"],
         "bayes_profile": config.get("bayes_profile", ""),
-        "sota_device": config.get("sota_device", "auto"),
+        "sota_device": config.get("sota_device", "cuda"),
         "sota_calculation_mode": "not_applicable",
         "sota_calculation_label": "Modelos estadisticos individuales",
         "monte_carlo_iterations": 0,
@@ -4697,7 +4697,7 @@ def score_model_fit_progress_extra(
     key = normalize_score_model_key(model_key)
     is_bayes = key in BAYESIAN_SCORE_MODEL_KEYS
     score_backend = str((hardware or {}).get("score_backend") or config.get("score_backend") or "numpy")
-    requested_device = str((hardware or {}).get("requested_device") or config.get("sota_device") or "auto")
+    requested_device = str((hardware or {}).get("requested_device") or config.get("sota_device") or "cuda")
     actual_device = str((hardware or {}).get("actual_device") or ("cuda" if score_backend == "cupy" else "cpu"))
     if phase == "starting":
         last_state = "inicializando"
@@ -5189,7 +5189,7 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
     config["backtest_scope"] = "worldcup_2026_confirmed_auto"
     default_bayes_profile = "light" if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE else "deep"
     config["bayes_profile"] = str(payload.get("bayes_profile") or default_bayes_profile).strip().lower()
-    config["sota_device"] = str(payload.get("sota_device") or "auto").strip().lower()
+    config["sota_device"] = str(payload.get("sota_device") or "cuda").strip().lower()
     config["sota_calculation_mode"] = normalize_sota_calculation_mode(payload.get("sota_calculation_mode"))
     config["advanced_include_bayesian"] = bool(payload.get("advanced_include_bayesian", DEFAULT_CONFIG["advanced_include_bayesian"]))
     if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE and not config["advanced_include_bayesian"]:
@@ -5197,7 +5197,7 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
     if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE and config["advanced_include_bayesian"]:
         config["bayes_profile"] = "deep"
     if config["sota_device"] not in {"auto", "cpu", "cuda"}:
-        config["sota_device"] = "auto"
+        config["sota_device"] = "cuda"
     config["score_model"] = DEFAULT_SCORE_MODEL
     if pipeline_mode == XG_LIGHTGBM_PIPELINE_MODE:
         config["sota_calculation_mode"] = "not_applicable"
@@ -5356,6 +5356,22 @@ def stat_report_hardware(requested_device: Any, pipeline_mode: str, sota_calcula
             warnings.append(f"CUDA detectada, pero CuPy no esta usable ({score_backend_warning or cuda_reason}); SOTA exacto corre en CPU/NumPy.")
         elif requested == "auto" and not detected.get("cuda_available"):
             warnings.append(f"CUDA no disponible ({cuda_reason}); SOTA corre en CPU.")
+    else:
+        cuda_reason = detected.get("cuda_error") or detected.get("cuda_warning") or "sin dispositivos"
+        if requested == "cpu":
+            actual_device = "cpu"
+            backend_supports_cuda = False
+            score_backend = "numpy"
+        elif score_backend == "cupy":
+            actual_device = "cuda"
+            backend_supports_cuda = True
+        elif requested == "cuda":
+            device_error = f"CUDA fue solicitada explicitamente, pero CuPy no esta usable ({score_backend_warning or cuda_reason}); scoring batched/backtest corre en CPU/NumPy."
+            warnings.append(device_error)
+        elif requested == "auto" and detected.get("cuda_available"):
+            warnings.append(f"CUDA detectada, pero CuPy no esta usable ({score_backend_warning or cuda_reason}); scoring batched/backtest corre en CPU/NumPy.")
+        elif requested == "auto" and not detected.get("cuda_available"):
+            warnings.append(f"CUDA no disponible ({cuda_reason}); scoring batched/backtest corre en CPU.")
     return {
         **detected,
         "requested_device": requested,

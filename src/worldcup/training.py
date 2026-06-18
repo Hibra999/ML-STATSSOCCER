@@ -145,6 +145,7 @@ WORLD_CUP_MODEL_LABELS = {
     "xgboost": "XGBoost",
 }
 XG_LIGHTGBM_PROFILE = "xg_lightgbm"
+GPU_FIRST_DEVICE = "cuda"
 WORLD_CUP_MODEL_PROFILE_LABELS = {
     XG_LIGHTGBM_PROFILE: "xG-LightGBM",
 }
@@ -796,7 +797,7 @@ def default_training_payload() -> Dict[str, Any]:
         "market_mode": "dual_markets",
         "feature_profile": DEFAULT_FEATURE_PROFILE,
         "max_features": DEFAULT_MAX_FEATURES,
-        "device": "auto",
+        "device": GPU_FIRST_DEVICE,
         "n_jobs": -1,
         "tuning_enabled": False,
         "n_trials": 12,
@@ -888,7 +889,7 @@ def xg_lightgbm_defaults() -> Dict[str, Any]:
         "market_mode": "dual_markets",
         "feature_profile": DEFAULT_FEATURE_PROFILE,
         "max_features": DEFAULT_MAX_FEATURES,
-        "device": "auto",
+        "device": GPU_FIRST_DEVICE,
         "calibration_enabled": True,
         "calibration_method": "sigmoid",
         "feature_selection_mode": FEATURE_SELECTION_FAMILY_BALANCED,
@@ -5495,9 +5496,9 @@ def training_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         if key in params and payload.get(key) not in {None, ""}:
             params[key] = coerce_param(payload.get(key), params[key])
     n_jobs = normalize_n_jobs(payload.get("n_jobs", -1))
-    device = str(payload.get("device") or "auto").strip().lower()
+    device = str(payload.get("device") or GPU_FIRST_DEVICE).strip().lower()
     if device not in {"auto", "cpu", "cuda"}:
-        device = "auto"
+        device = GPU_FIRST_DEVICE
     target = normalize_training_target(payload.get("training_target", payload.get("target", "result")))
     raw_market_mode = payload.get("market_mode")
     if raw_market_mode in {None, ""}:
@@ -6276,11 +6277,11 @@ def finalize_classifier_for_inference(classifier, model_key: str, trained_device
     if trained_device != "cuda":
         return
     try:
-        classifier.set_params(device="cpu")
+        classifier.set_params(device="cuda")
     except Exception:
         pass
     try:
-        classifier.get_booster().set_param({"device": "cpu"})
+        classifier.get_booster().set_param({"device": "cuda"})
     except Exception:
         pass
 
@@ -6873,6 +6874,7 @@ def supervised_feature_selection_or_fallback(
         limit=limit,
         seed=int(config.get("seed", 2026) or 2026),
         model_key=str(config.get("model_type") or "lightgbm"),
+        requested_device=str(config.get("device") or GPU_FIRST_DEVICE),
         params=config.get("params", {}),
         n_jobs=int(config.get("n_jobs", -1) or -1),
     )
@@ -6952,6 +6954,7 @@ def supervised_model_selected_columns(
         limit: int,
         seed: int,
         model_key: str,
+        requested_device: str,
         params: Dict[str, Any],
         n_jobs: int,
 ) -> Tuple[List[str], Dict[str, Any]]:
@@ -6961,12 +6964,13 @@ def supervised_model_selected_columns(
     x_fit = align_matrix_to_feature_columns(x_train, available_columns)
     y_fit = pd.Series(y_train).reset_index(drop=True)
     try:
-        estimator = supervised_feature_selector_estimator(
+        estimator, selector_device, selector_warnings = supervised_feature_selector_estimator(
             model_key=model_key,
             params=params,
             seed=seed,
             n_jobs=n_jobs,
             num_classes=max(int(y_fit.nunique()), 2),
+            requested_device=requested_device,
         )
         weights = align_sample_weights(sample_weight, len(y_fit)) if sample_weight is not None else None
         if weights is not None and not weights.empty:
@@ -6983,7 +6987,9 @@ def supervised_model_selected_columns(
         return selected, {
             "method": "SelectFromModel",
             "estimator": estimator.__class__.__name__,
+            "device": selector_device,
             "threshold": "median",
+            "warnings": selector_warnings,
         }
     except Exception as exc:
         return [], {
@@ -6998,20 +7004,23 @@ def supervised_feature_selector_estimator(
         seed: int,
         n_jobs: int,
         num_classes: int,
+        requested_device: str,
 ):
-    if model_key == "lightgbm":
+    if model_key in {"xgboost", "lightgbm", "catboost"}:
+        selector_device, device_warnings = resolve_device(model_key, requested_device)
         try:
-            return build_worldcup_classifier(
-                model_key="lightgbm",
+            estimator = build_worldcup_classifier(
+                model_key=model_key,
                 params={**params, "n_estimators": min(int(params.get("n_estimators", 120) or 120), 180)},
                 n_jobs=n_jobs,
-                device="cpu",
+                device=selector_device,
                 seed=seed,
                 num_classes=num_classes,
             )
+            return estimator, selector_device, device_warnings
         except Exception:
             pass
-    return RandomForestClassifier(
+    fallback = RandomForestClassifier(
         n_estimators=140,
         max_depth=8,
         min_samples_leaf=2,
@@ -7019,6 +7028,10 @@ def supervised_feature_selector_estimator(
         random_state=seed,
         n_jobs=n_jobs,
     )
+    warnings = []
+    if str(requested_device or "").lower() in {"auto", "cuda"}:
+        warnings.append("Selector supervisado uso RandomForest CPU porque el estimador GPU principal no estuvo disponible para SelectFromModel.")
+    return fallback, "cpu", warnings
 
 
 def merge_required_feature_columns(selected: List[str], available_columns: List[str], limit: int) -> List[str]:

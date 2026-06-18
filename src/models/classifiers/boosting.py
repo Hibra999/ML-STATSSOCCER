@@ -48,6 +48,9 @@ def _filter_ngboost_categorical_warning():
     )
 
 
+_filter_ngboost_categorical_warning()
+
+
 def _estimator_feature_importances(estimator) -> np.ndarray:
     if hasattr(estimator, "feature_importances_"):
         return np.asarray(estimator.feature_importances_)

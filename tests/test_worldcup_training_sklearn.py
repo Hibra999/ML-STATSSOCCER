@@ -31,6 +31,65 @@ def test_worldcup_metric_score_handles_hard_and_probability_metrics():
     assert 0.0 <= training.metric_score(y_true, y_pred, "PredictiveScore", y_proba=proba, classes=[0, 1]) <= 1.0
 
 
+def test_supervised_feature_selector_honors_cuda_device(monkeypatch):
+    from sklearn.base import BaseEstimator
+    from src.worldcup import training
+
+    captured = {}
+
+    class FakeSelectorEstimator(BaseEstimator):
+        def fit(self, x, y, sample_weight=None):
+            self.classes_ = np.unique(y)
+            self.feature_importances_ = np.arange(1, x.shape[1] + 1, dtype=float)
+            return self
+
+    def fake_build(model_key, params, n_jobs, device, seed, num_classes):
+        captured["device"] = device
+        captured["model_key"] = model_key
+        return FakeSelectorEstimator()
+
+    monkeypatch.setattr(training, "resolve_device", lambda model_key, requested_device: ("cuda", []))
+    monkeypatch.setattr(training, "build_worldcup_classifier", fake_build)
+
+    selected, summary = training.supervised_model_selected_columns(
+        original_columns=["a", "b", "c", "d"],
+        x_train=pd.DataFrame({
+            "a": [0.0, 1.0, 0.0, 1.0],
+            "b": [1.0, 2.0, 1.0, 2.0],
+            "c": [2.0, 3.0, 2.0, 3.0],
+            "d": [3.0, 4.0, 3.0, 4.0],
+        }),
+        y_train=pd.Series([0, 1, 0, 1]),
+        sample_weight=None,
+        limit=2,
+        seed=2026,
+        model_key="lightgbm",
+        requested_device="cuda",
+        params={},
+        n_jobs=1,
+    )
+
+    assert captured == {"device": "cuda", "model_key": "lightgbm"}
+    assert summary["device"] == "cuda"
+    assert selected
+
+
+def test_acceleration_status_requires_runtime_cupy_cuda(monkeypatch):
+    from src.worldcup import accelerators
+
+    accelerators.cupy_runtime_status.cache_clear()
+    monkeypatch.setattr(accelerators, "accelerator_available", lambda module_name: str(module_name) == "cupy")
+    monkeypatch.setattr(accelerators, "import_optional_accelerator", lambda module_name: None)
+
+    status = accelerators.acceleration_status()
+
+    assert status["cupy"] is True
+    assert status["cupy_cuda"] is False
+    assert status["score_array_engine"] == "numpy"
+    assert status["cupy_cuda_warning"] == "CuPy no instalado"
+    accelerators.cupy_runtime_status.cache_clear()
+
+
 def test_worldcup_optuna_uses_predict_proba_for_probability_objective(monkeypatch):
     optuna = pytest.importorskip("optuna")
     from src.worldcup import training

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import inspect
 import json
 import math
 import os
 import shutil
+import warnings as warninglib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
@@ -21,6 +24,7 @@ from src.worldcup.model import (
 
 
 DEFAULT_SCORE_MODEL = "independent_poisson"
+GPU_FIRST_BACKEND = "cuda"
 STATSMODELS_POISSON_GLM_MODEL = "statsmodels_poisson_glm"
 NEGATIVE_BINOMIAL_GLM_MODEL = "negative_binomial_glm"
 XG_DIXON_COLES_MODEL = "xg_dixon_coles"
@@ -211,7 +215,7 @@ class AdvancedScoreWorldCupModel:
             lambda1_values: Sequence[float] | np.ndarray,
             lambda2_values: Sequence[float] | np.ndarray,
             max_goals: int | None = None,
-            backend: Any = "auto",
+            backend: Any = GPU_FIRST_BACKEND,
     ) -> Tuple[np.ndarray, str, List[str]]:
         return score_grids_from_lambdas_with_backend(
             self.state,
@@ -342,7 +346,7 @@ def fit_score_model_state(
             label=label,
             fingerprint=fingerprint,
             rows=rows,
-            backend=config.get("score_backend") or config.get("sota_device", "auto"),
+            backend=config.get("score_backend") or config.get("sota_device", GPU_FIRST_BACKEND),
         )
     elif key in {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}:
         state = _fit_bayesian_state(key, label, fingerprint, rows, teams, config)
@@ -383,7 +387,7 @@ def fit_score_model_state(
         rho, fit_backend, fit_warnings = _estimate_negative_binomial_dixon_coles_rho(
             mle_rows,
             alpha=alpha,
-            backend=config.get("score_backend") or config.get("sota_device", "auto"),
+            backend=config.get("score_backend") or config.get("sota_device", GPU_FIRST_BACKEND),
         )
         params = {"alpha": alpha, "rho": rho, "fit_backend": fit_backend}
         if lambda_model:
@@ -407,7 +411,7 @@ def fit_score_model_state(
         mle_rows = _rows_with_lambda_model(rows, lambda_model) if lambda_model else rows
         rho, fit_backend, fit_warnings = _estimate_dixon_coles_rho(
             mle_rows,
-            backend=config.get("score_backend") or config.get("sota_device", "auto"),
+            backend=config.get("score_backend") or config.get("sota_device", GPU_FIRST_BACKEND),
         )
         params = {"rho": rho, "fit_backend": fit_backend}
         if lambda_model:
@@ -425,7 +429,7 @@ def fit_score_model_state(
         mle_rows = _rows_with_lambda_model(rows, lambda_model) if lambda_model else rows
         corr_share, fit_backend, fit_warnings = _estimate_bivariate_corr_share(
             mle_rows,
-            backend=config.get("score_backend") or config.get("sota_device", "auto"),
+            backend=config.get("score_backend") or config.get("sota_device", GPU_FIRST_BACKEND),
         )
         params = {"corr_share": corr_share, "fit_backend": fit_backend}
         if lambda_model:
@@ -512,7 +516,7 @@ def score_grids_from_lambdas_with_backend(
         lambda1_values: Sequence[float] | np.ndarray,
         lambda2_values: Sequence[float] | np.ndarray,
         max_goals: int = 10,
-        backend: Any = "auto",
+        backend: Any = GPU_FIRST_BACKEND,
 ) -> Tuple[np.ndarray, str, List[str]]:
     if not isinstance(state, ScoreModelState):
         state = ScoreModelState.from_dict(dict(state or {}))
@@ -528,7 +532,7 @@ def score_grids_from_lambdas_with_backend(
     requested = _normalize_backend_request(backend)
     warnings: List[str] = []
     if requested in {"auto", "cuda", "cupy"}:
-        status = score_backend_status("cuda" if requested in {"cuda", "cupy"} else "auto")
+        status = score_backend_status("cuda" if requested in {"cuda", "cupy"} else GPU_FIRST_BACKEND)
         if status.get("score_backend") == "cupy":
             try:
                 cp = _import_cupy()
@@ -564,7 +568,7 @@ def score_grids_from_lambdas(
         lambda1_values: Sequence[float] | np.ndarray,
         lambda2_values: Sequence[float] | np.ndarray,
         max_goals: int = 10,
-        backend: Any = "auto",
+        backend: Any = GPU_FIRST_BACKEND,
 ) -> np.ndarray:
     grids, _, _ = score_grids_from_lambdas_with_backend(
         state,
@@ -698,7 +702,7 @@ def _negative_binomial_pmf_vector(rate: float, alpha: float, max_goals: int) -> 
     return values
 
 
-def score_backend_status(requested_device: Any = "auto") -> Dict[str, Any]:
+def score_backend_status(requested_device: Any = GPU_FIRST_BACKEND) -> Dict[str, Any]:
     requested = _normalize_backend_request(requested_device)
     if requested in {"cpu", "numpy"}:
         return {
@@ -971,9 +975,16 @@ def _fit_bayesian_state(
         "random_seed": seed,
         "target_accept": target_accept,
         "nuts": {"max_treedepth": max(6, max_treedepth)},
-        "progressbar": False,
+        "progressbar": bool(config.get("bayes_progressbar", True)),
     }
     fit_warnings: List[str] = []
+    requested_backend = _normalize_backend_request(config.get("score_backend") or config.get("sota_device") or GPU_FIRST_BACKEND)
+    bayes_gpu_backend = _bayesian_gpu_sample_backend(pm, requested_backend)
+    if bayes_gpu_backend:
+        sample_kwargs["nuts_sampler"] = bayes_gpu_backend
+        fit_warnings.append(f"Bayes usa sampler {bayes_gpu_backend} solicitado por CUDA.")
+    elif requested_backend in {"cuda", "cupy"}:
+        fit_warnings.append("Bayes/PyMC no encontro sampler GPU JAX/NumPyro; se usa NUTS PyMC CPU.")
     if key == "bayesian_dynamic_poisson":
         unique_periods = sorted(set(_row_periods(rows)))
         period_idx = np.asarray(_coalesce_model_period_indices(_row_periods(rows)), dtype=int)
@@ -1130,6 +1141,32 @@ def _fit_bayesian_state(
     if not fit_warnings:
         fit_warnings.append("Bayes jerárquico Poisson con priors de ataque/defensa y ventaja local/neutral.")
     return ScoreModelState(key=key, label=label, available=True, params=params, warnings=tuple(fit_warnings), fingerprint=fingerprint)
+
+
+def _bayesian_gpu_sample_backend(pm: Any, requested_backend: Any) -> str:
+    if _normalize_backend_request(requested_backend) not in {"cuda", "cupy"}:
+        return ""
+    try:
+        if "nuts_sampler" not in inspect.signature(pm.sample).parameters:
+            return ""
+    except Exception:
+        return ""
+    if importlib.util.find_spec("jax") is None:
+        return ""
+    try:
+        import jax  # type: ignore
+
+        devices = list(jax.devices())
+        has_gpu = any(str(getattr(device, "platform", "")).lower() in {"gpu", "cuda"} for device in devices)
+        if not has_gpu:
+            return ""
+    except Exception:
+        return ""
+    if importlib.util.find_spec("numpyro") is not None:
+        return "numpyro"
+    if importlib.util.find_spec("blackjax") is not None:
+        return "blackjax"
+    return ""
 
 
 def _ensure_pytensor_cxx_flag() -> bool:
@@ -1492,7 +1529,7 @@ def _fit_xg_dixon_coles_state(
         label: str,
         fingerprint: str,
         rows: List[Dict[str, Any]],
-        backend: Any = "auto",
+        backend: Any = GPU_FIRST_BACKEND,
 ) -> ScoreModelState:
     xg_state = _fit_xg_local_state(label=label, fingerprint=fingerprint)
     params = dict(xg_state.params or {})
@@ -1638,7 +1675,9 @@ def _fit_stacked_meta_state(
     try:
         from statsmodels.discrete.discrete_model import MNLogit  # type: ignore
 
-        result = MNLogit(y, x).fit(method="lbfgs", maxiter=200, disp=False)
+        with warninglib.catch_warnings():
+            warninglib.filterwarnings("ignore", message="Inverting hessian failed.*")
+            result = MNLogit(y, x).fit(method="lbfgs", maxiter=200, disp=False)
         params = np.asarray(result.params, dtype=float)
         if params.ndim != 2 or not np.all(np.isfinite(params)):
             raise ValueError("MNLogit devolvio parametros no finitos.")
@@ -2009,7 +2048,7 @@ def _coalesce_model_period_indices(periods: List[int]) -> List[int]:
     return [lookup[int(period)] for period in periods]
 
 
-def _estimate_dixon_coles_rho(rows: List[Dict[str, Any]], backend: Any = "auto") -> Tuple[float, str, List[str]]:
+def _estimate_dixon_coles_rho(rows: List[Dict[str, Any]], backend: Any = GPU_FIRST_BACKEND) -> Tuple[float, str, List[str]]:
     candidates = np.linspace(-0.24, 0.24, 121, dtype=float)
     try:
         value, backend_name, warnings = _estimate_dixon_coles_rho_batched(rows, candidates, backend=backend)
@@ -2034,7 +2073,7 @@ def _estimate_dixon_coles_rho(rows: List[Dict[str, Any]], backend: Any = "auto")
 def _estimate_negative_binomial_dixon_coles_rho(
         rows: List[Dict[str, Any]],
         alpha: float,
-        backend: Any = "auto",
+        backend: Any = GPU_FIRST_BACKEND,
 ) -> Tuple[float, str, List[str]]:
     candidates = np.linspace(-0.24, 0.24, 121, dtype=float)
     try:
@@ -2071,7 +2110,7 @@ def _estimate_negative_binomial_dixon_coles_rho(
     return float(np.clip(result, -0.24, 0.24)), "numpy", warnings
 
 
-def _estimate_bivariate_corr_share(rows: List[Dict[str, Any]], backend: Any = "auto") -> Tuple[float, str, List[str]]:
+def _estimate_bivariate_corr_share(rows: List[Dict[str, Any]], backend: Any = GPU_FIRST_BACKEND) -> Tuple[float, str, List[str]]:
     candidates = np.linspace(0.0, 0.55, 111, dtype=float)
     try:
         value, backend_name, warnings = _estimate_bivariate_corr_share_batched(rows, candidates, backend=backend)
@@ -2226,7 +2265,7 @@ def _array_module_for_backend(backend: Any) -> Tuple[Any, str, List[str]]:
     requested = _normalize_backend_request(backend)
     warnings: List[str] = []
     if requested in {"auto", "cuda", "cupy"}:
-        status = score_backend_status("cuda" if requested in {"cuda", "cupy"} else "auto")
+        status = score_backend_status("cuda" if requested in {"cuda", "cupy"} else GPU_FIRST_BACKEND)
         if status.get("score_backend") == "cupy":
             try:
                 return _import_cupy(), "cupy", warnings
@@ -2239,7 +2278,7 @@ def _array_module_for_backend(backend: Any) -> Tuple[Any, str, List[str]]:
 
 
 def _normalize_backend_request(value: Any) -> str:
-    requested = str(value or "auto").strip().lower()
+    requested = str(value or GPU_FIRST_BACKEND).strip().lower()
     if requested in {"gpu"}:
         return "cuda"
     if requested in {"cpu"}:

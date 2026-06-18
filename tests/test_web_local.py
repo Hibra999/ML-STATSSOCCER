@@ -324,6 +324,7 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "xg-tuning-enabled" in html_source
     assert "xg-n-trials" in html_source
     assert "xg-device" in html_source
+    assert '<option value="cuda" selected>CUDA</option>' in html_source
     assert "worldcup-tuning-enabled" not in html_source
     assert "worldcup-device" not in html_source
     assert "worldcup-n-jobs" not in html_source
@@ -732,7 +733,7 @@ def test_worldcup_xg_lightgbm_profile_defaults_and_targets():
     assert config["model_label"] == "xG-LightGBM"
     assert config["market_mode"] == "dual_markets"
     assert config["training_target"] == "result"
-    assert config["device"] == "auto"
+    assert config["device"] == "cuda"
     assert config["calibration_enabled"] is True
     assert config["calibration_method"] == "sigmoid"
     assert config["feature_selection_mode"] == "family_balanced"

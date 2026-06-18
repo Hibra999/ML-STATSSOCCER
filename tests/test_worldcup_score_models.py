@@ -13,6 +13,7 @@ from src.worldcup.score_models import (
     normalize_score_model_key,
     score_grid_from_lambdas,
     score_grids_from_lambdas,
+    score_grids_from_lambdas_with_backend,
 )
 
 
@@ -66,6 +67,31 @@ def test_batched_score_model_grids_match_scalar_numpy_backend():
     for index in range(3):
         scalar = score_grid_from_lambdas(state, lambdas_home[index], lambdas_away[index], max_goals=8)
         assert np.allclose(batched[index], scalar)
+
+
+def test_batched_score_model_default_requests_cuda(monkeypatch):
+    from src.worldcup import score_models
+
+    captured = []
+
+    def fake_score_backend_status(requested_device=score_models.GPU_FIRST_BACKEND):
+        captured.append(requested_device)
+        return {"score_backend": "numpy", "warning": "CuPy/CUDA no disponible"}
+
+    monkeypatch.setattr(score_models, "score_backend_status", fake_score_backend_status)
+    state = ScoreModelState("dixon_coles_mle", "Dixon-Coles", True, {"rho": 0.0})
+
+    grids, backend, warnings = score_grids_from_lambdas_with_backend(
+        state,
+        np.asarray([1.2, 1.4], dtype=float),
+        np.asarray([0.9, 1.1], dtype=float),
+        max_goals=6,
+    )
+
+    assert captured == ["cuda"]
+    assert backend == "numpy"
+    assert warnings == ["CuPy/CUDA no disponible"]
+    assert grids.shape == (2, 7, 7)
 
 
 def test_removed_score_model_keys_fall_back_to_independent_poisson():

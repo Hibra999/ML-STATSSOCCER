@@ -151,7 +151,7 @@
               <select id="upcoming-bayes-profile" name="upcoming_bayes_profile" autocomplete="off"><option value="light">Light</option><option value="deep">Deep</option></select>
             </label>
             <label>CUDA
-              <select id="upcoming-sota-device" name="upcoming_sota_device" autocomplete="off"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select>
+              <select id="upcoming-sota-device" name="upcoming_sota_device" autocomplete="off"><option value="cuda" selected>CUDA</option><option value="auto">Auto</option><option value="cpu">CPU</option></select>
             </label>
           </div>
           <div id="upcoming-benchmark-controls" class="inline-control-row forecast-engine-grid hidden">
@@ -265,7 +265,7 @@
             <label>Nombre<input id="xg-model-name" name="xg_model_name" autocomplete="off" value="Goles esperados (xG) + LightGBM Mundial 2026"></label>
             <label>Features<select id="xg-feature-profile" name="xg_feature_profile" autocomplete="off"><option value="balanced">Balanceado</option><option value="full">Completo</option></select></label>
             <label>Max features<input id="xg-max-features" name="xg_max_features" autocomplete="off" type="number" min="120" max="1200" step="10" value="450"></label>
-            <label>Device<select id="xg-device" name="xg_device" autocomplete="off"><option value="auto">Auto</option><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></label>
+            <label>Device<select id="xg-device" name="xg_device" autocomplete="off"><option value="cuda" selected>CUDA</option><option value="auto">Auto</option><option value="cpu">CPU</option></select></label>
             <label>N jobs<input id="xg-n-jobs" name="xg_n_jobs" autocomplete="off" type="number" min="-1" max="128" step="1" value="-1"></label>
             <div class="inline-control-row">
               <label class="check"><input id="xg-tuning-enabled" name="xg_tuning_enabled" type="checkbox" checked> Fine-tuning Optuna</label>
