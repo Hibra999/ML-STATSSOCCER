@@ -2963,11 +2963,27 @@ async function pollWorldcupJobs() {
 }
 
 function applyWorldcupJobPollState(job, previous) {
+  inheritWorldcupRuntimeProgress(job, previous);
   const nextSignature = worldcupJobProgressSignature(job);
   const previousSignature = previous.pollSignature || worldcupJobProgressSignature(previous);
   job.pollSignature = nextSignature;
   job.pollIdleCount = nextSignature === previousSignature ? Number(previous.pollIdleCount || 0) + 1 : 0;
   job.client_rate_per_second = worldcupJobClientRate(job, previous);
+}
+
+function inheritWorldcupRuntimeProgress(job, previous) {
+  if (!job || !previous) return;
+  const progress = job.progress || {};
+  const previousProgress = previous.progress || {};
+  if (!progress.hardware && previousProgress.hardware) {
+    progress.hardware = previousProgress.hardware;
+  }
+  ["requested_device", "actual_device", "score_backend", "monte_carlo_backend"].forEach((key) => {
+    if ((progress[key] === undefined || progress[key] === null || progress[key] === "") && previousProgress[key]) {
+      progress[key] = previousProgress[key];
+    }
+  });
+  job.progress = progress;
 }
 
 function worldcupJobProgressSignature(job) {
@@ -3129,7 +3145,13 @@ function worldcupProgressRuntimeHtml(job, progress) {
   const cudaUsed = Boolean(hardware.backend_supports_cuda || scoreBackend === "cupy" || actualDevice === "cuda" || monteCarloBackend === "cupy");
   const deviceNames = [...asList(hardware.cuda_device_names), ...asList(hardware.cuda_devices)]
     .map((item) => String(item || "").replace(/^GPU\s+\d+\s*:\s*/, "").trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((item, index, values) => values.indexOf(item) === index);
+  const cupyWarning = hardware.score_backend_warning
+    || hardware.fallback_reason
+    || ((hardware.accelerators || {}).cupy_cuda_warning)
+    || ((hardware.accelerators || {}).cupy_cuda_remediation)
+    || "";
   const backendDetail = [
     scoreBackend ? `score=${scoreBackend}` : "",
     monteCarloBackend && monteCarloBackend !== "numpy" ? `mc=${monteCarloBackend}` : "",
@@ -3148,7 +3170,7 @@ function worldcupProgressRuntimeHtml(job, progress) {
     {
       label: "Uso real",
       value: cudaUsed ? "CUDA activo" : "CPU/NumPy",
-      detail: backendDetail || (hardware.score_backend_warning || hardware.fallback_reason || "backend por defecto"),
+      detail: cudaUsed ? (backendDetail || "CuPy activo") : (cupyWarning || backendDetail || "backend por defecto"),
       className: cudaUsed ? "ok" : "warn",
     },
     {
