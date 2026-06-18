@@ -125,9 +125,11 @@
             <label>N partidos
               <input id="upcoming-predict-limit" name="upcoming_predict_limit" autocomplete="off" type="number" min="1" max="72" step="1" value="8">
             </label>
-            <label>Benchmark últimos N
-              <input id="upcoming-backtest-last-n" name="upcoming_backtest_last_n" autocomplete="off" type="number" min="5" max="100" step="1" value="20">
-            </label>
+            <div class="forecast-readonly-control" aria-label="Benchmark automático">
+              <span>Benchmark automático</span>
+              <strong>Desde 11/06/2026</strong>
+              <small>Hasta un minuto antes de ejecutar</small>
+            </div>
             <label>Poisson últimos
               <input id="upcoming-poisson-recent-matches" name="upcoming_poisson_recent_matches" autocomplete="off" type="number" min="3" max="50" step="1" value="15">
             </label>

@@ -449,9 +449,10 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "upcoming-benchmark-tuning-enabled" in html_source
     assert "benchmark_tuning_enabled" in app_source
     assert "Optuna N" in app_source
-    assert "Benchmark últimos N" in html_source
-    assert "upcoming-backtest-last-n" in html_source
-    assert "upcoming-backtest-last-n" in app_source
+    assert "Benchmark automático" in html_source
+    assert "Desde 11/06/2026" in html_source
+    assert "upcoming-backtest-last-n" not in html_source
+    assert "upcoming-backtest-last-n" not in app_source
     assert "pipelineBenchmarkSectionHtml" in app_source
     assert "Benchmark Poisson/SOTA" in app_source
     assert "Benchmark modelos avanzados" in app_source

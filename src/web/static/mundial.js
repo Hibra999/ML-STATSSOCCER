@@ -540,7 +540,6 @@ function hardwareChip(label, value, detail, status) {
 async function runUpcomingPredictions() {
   clearAlert();
   const limit = Number(document.getElementById("upcoming-predict-limit").value || 8);
-  const backtestLastN = Number((document.getElementById("upcoming-backtest-last-n") || {}).value || 20);
   const group = document.getElementById("upcoming-group-filter").value || "";
   const pipelineMode = syncUpcomingPipelineControls();
   const sotaCalculationMode = (document.getElementById("upcoming-sota-calculation-mode") || {}).value || "exact";
@@ -568,7 +567,6 @@ async function runUpcomingPredictions() {
       pipeline_mode: pipelineMode,
       limit,
       group,
-      backtest_last_n: backtestLastN,
       bayes_profile: bayesProfile,
       sota_device: (document.getElementById("upcoming-sota-device") || {}).value || "auto",
       sota_calculation_mode: sotaCalculationMode,
@@ -677,13 +675,13 @@ function renderUpcomingReport(report) {
       ${calculationLabel ? reportSummaryCard("Cálculo", calculationLabel) : ""}
       ${reportSummaryCard("Fuerza global", globalConsensusStrength(fixtures))}
       ${reportSummaryCard("Partidos", `${summary.returned || 0}/${summary.requested || 0}`)}
-      ${reportSummaryCard("Benchmark N", `${summary.backtest_auto_n || 0}/${summary.backtest_last_n || "-"}`)}
+      ${reportSummaryCard("Benchmark", benchmarkEvaluatedLabel(summary))}
       ${reportSummaryCard("Hardware", `${hardware.actual_device || "cpu"} · ${hardware.requested_device || "auto"}`)}
       ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
     </div>
     ${reportDownloadButtonsHtml(report.downloads || {}, false)}
     ${warningsHtml(warnings)}
-    ${pipelineBenchmarkSectionHtml(report, { title: "Benchmark Poisson/SOTA", detail: "Evaluación walk-forward de los últimos N partidos confirmados." })}
+    ${pipelineBenchmarkSectionHtml(report, { title: "Benchmark Poisson/SOTA", detail: "Evaluación walk-forward desde la inauguración del 11/06/2026 hasta un minuto antes de ejecutar." })}
     ${sotaPipelineListHtml(summary)}
     ${clientReportHtml(fixtures)}
     <details class="technical-report-drawer">
@@ -726,14 +724,14 @@ function renderXgLightgbmReport(report) {
       ${reportSummaryCard("Modelo", model.trained ? modelName : "No entrenado")}
       ${reportSummaryCard("Filas T/V/Test", rowLabel)}
       ${reportSummaryCard("Partidos", `${summary.returned || 0}/${summary.requested || 0}`)}
-      ${reportSummaryCard("Benchmark N", `${summary.backtest_auto_n || 0}/${summary.backtest_last_n || "-"}`)}
+      ${reportSummaryCard("Benchmark", benchmarkEvaluatedLabel(summary))}
       ${reportSummaryCard("Hardware ML", `${modelDevice.actual_device || "cpu"} · ${modelDevice.requested_device || "auto"}`)}
       ${reportSummaryCard("Optuna", tuning.enabled ? `${tuning.sampler || "Optuna"} · ${formatNumber(tuning.best_value ?? "")}` : "No")}
       ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
     </div>
     ${reportDownloadButtonsHtml(report.downloads || {}, false)}
     ${warningsHtml(warnings)}
-    ${pipelineBenchmarkSectionHtml(report, { title: `Benchmark ${XG_PIPELINE_LABEL}`, detail: "xG/LightGBM evaluado contra SOTA en la misma ventana de últimos N." })}
+    ${pipelineBenchmarkSectionHtml(report, { title: `Benchmark ${XG_PIPELINE_LABEL}`, detail: "xG/LightGBM evaluado contra SOTA en la ventana automática desde 11/06/2026." })}
     <section class="client-report-shell">
       <header>
         <div>
@@ -1286,7 +1284,7 @@ function renderAdvancedModelsReport(report) {
     ${reportDownloadButtonsHtml(report.downloads || {}, true)}
     ${warningsHtml(warnings)}
     ${advancedDataReportHtml(dataStatus, models)}
-    ${pipelineBenchmarkSectionHtml(report, { title: "Benchmark modelos avanzados", detail: "Ranking walk-forward sobre últimos N partidos confirmados." })}
+    ${pipelineBenchmarkSectionHtml(report, { title: "Benchmark modelos avanzados", detail: "Ranking walk-forward desde la inauguración del 11/06/2026 hasta un minuto antes de ejecutar." })}
     ${statisticalAuditHtml(report.statistical_audit || summary.statistical_audit || {})}
     ${featureResearchHtml(summary.feature_research || report.feature_research || {})}
     <section class="report-panel">
@@ -1440,7 +1438,7 @@ function renderAlternativesBenchmarkReport(report) {
   document.getElementById("upcoming-report").innerHTML = `
     <div class="report-summary-grid">
       ${reportSummaryCard("Modelo #1", best.available ? (best.model_label || best.model_key || "-") : "-")}
-      ${reportSummaryCard("Benchmark N", `${backtestAutoN}/${summary.backtest_last_n || "-"}`)}
+      ${reportSummaryCard("Benchmark", `${backtestAutoN} evaluados`)}
       ${reportSummaryCard("Partidos próximos", `${fixtures.length}/${summary.requested || 0}`)}
       ${reportSummaryCard("Criterio", "Score de resultados")}
       ${reportSummaryCard("Primer evaluado", firstMatch.match || `${firstMatch.home || "-"} vs ${firstMatch.away || "-"}`)}
@@ -1479,7 +1477,7 @@ function alternativesBenchmarkHtml(report) {
     ${bestAlternativeHtml(best)}
     ${featureResearchHtml(summary.feature_research || report.feature_research || {})}
     ${benchmarkTuningHtml(tuning)}
-    ${pipelineBenchmarkSectionHtml(report, { title: "Benchmark alternativas", detail: "Comparación principal sobre últimos N partidos confirmados." })}
+    ${pipelineBenchmarkSectionHtml(report, { title: "Benchmark alternativas", detail: "Comparación principal desde la inauguración del 11/06/2026 hasta un minuto antes de ejecutar." })}
     ${backtestPredictionReviewHtml(backtests)}
     <section class="report-panel">
       <header><strong>Predicciones futuras</strong><small>${escapeHtml(fixtures.length)} fixture${fixtures.length === 1 ? "" : "s"}</small></header>
@@ -1679,19 +1677,27 @@ function formatProbability(value) {
   return formatNumber(number);
 }
 
+function benchmarkEvaluatedCount(summary) {
+  const data = summary || {};
+  return data.backtest_auto_n ?? (data.backtest || {}).evaluated_matches ?? 0;
+}
+
+function benchmarkEvaluatedLabel(summary) {
+  return `${benchmarkEvaluatedCount(summary)} evaluados`;
+}
+
 function pipelineBenchmarkSectionHtml(report, options = {}) {
   const summary = (report || {}).summary || {};
   const backtests = (report || {}).model_backtests || [];
   const backtestSummary = summary.backtest || (report || {}).backtest || {};
-  const requestedN = summary.backtest_last_n || backtestSummary.requested_matches || "-";
-  const evaluated = summary.backtest_auto_n ?? backtestSummary.evaluated_matches ?? 0;
+  const evaluated = benchmarkEvaluatedCount(summary) || backtestSummary.evaluated_matches || 0;
   const confirmed = backtestSummary.confirmed_matches ?? evaluated;
   const best = (report || {}).best_model || summary.best_model || {};
   const range = summary.backtest_range || backtestSummary.backtest_range || {};
   const first = range.first_match || {};
   const last = range.last_match || {};
-  const title = options.title || "Benchmark últimos N";
-  const detail = options.detail || "Evaluación walk-forward sobre los últimos N partidos confirmados.";
+  const title = options.title || "Benchmark automático";
+  const detail = options.detail || "Evaluación walk-forward desde 11/06/2026 hasta un minuto antes de ejecutar.";
   const statusClass = backtests.length && Number(evaluated) > 0 ? "pipeline-ready" : "pipeline-fallback";
   const bestLabel = best.available ? (best.model_label || best.model_key || "Modelo evaluado") : "Sin ganador";
   const source = summary.backtest_source || backtestSummary.source || summary.result_source || "";
@@ -1702,7 +1708,7 @@ function pipelineBenchmarkSectionHtml(report, options = {}) {
           <strong>${escapeHtml(title)}</strong>
           <small>${escapeHtml(detail)}</small>
         </div>
-        <span>0/${escapeHtml(requestedN)}</span>
+        <span>0 evaluados</span>
       </header>
       <div class="pipeline-benchmark-empty-state">
         <strong>Benchmark no disponible</strong>
@@ -1716,7 +1722,7 @@ function pipelineBenchmarkSectionHtml(report, options = {}) {
         <strong>${escapeHtml(title)}</strong>
         <small>${escapeHtml(detail)}</small>
       </div>
-      <span>${escapeHtml(evaluated)}/${escapeHtml(requestedN)}</span>
+      <span>${escapeHtml(evaluated)} evaluados</span>
     </header>
     <div class="pipeline-benchmark-strip" aria-label="Resumen de benchmark">
       <article>
@@ -1732,7 +1738,7 @@ function pipelineBenchmarkSectionHtml(report, options = {}) {
       <article>
         <span>Ventana</span>
         <strong>${escapeHtml(first.date || "-")} → ${escapeHtml(last.date || "-")}</strong>
-        <small>${escapeHtml([first.home, last.away].filter(Boolean).join(" / ") || "últimos finalizados")}</small>
+        <small>${escapeHtml([first.home, last.away].filter(Boolean).join(" / ") || "rango automático")}</small>
       </article>
       <article>
         <span>Fuente</span>

@@ -162,6 +162,8 @@ REPORT_DOWNLOAD_KINDS = {"predictions", "backtest"}
 REPORT_DOWNLOAD_FORMATS = {"html", "csv"}
 OUTCOME_KEYS = ("home", "draw", "away")
 CALIBRATION_BIN_COUNT = 10
+WORLDCUP_2026_BACKTEST_START_DATE = "2026-06-11"
+WORLDCUP_2026_BACKTEST_DELAY_MINUTES = 1
 DEFAULT_CONFIG = {
     "iterations": 5000,
     "seed": 2026,
@@ -1785,6 +1787,7 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
     backtest_summary = backtest.get("summary", {})
     generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
     backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
+    backtest_auto_n = int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0)
     raw_warnings = unique_strings([*hardware.get("warnings", []), *feature_source.warnings, *backtest.get("warnings", [])])
     warning_payload = public_warning_payload(raw_warnings, pipeline_mode=pipeline_mode)
     summary = {
@@ -1797,8 +1800,11 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         "fixture_source": fixture_source,
         "history_source": history_source,
         "poisson_recent_matches": config["poisson_recent_matches"],
-        "backtest_last_n": int(config["backtest_last_n"]),
-        "backtest_auto_n": int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0),
+        "backtest_last_n": backtest_auto_n,
+        "backtest_auto_n": backtest_auto_n,
+        "backtest_mode": backtest_summary.get("mode", config.get("backtest_mode", "")),
+        "backtest_start_date": backtest_summary.get("start_date", config.get("backtest_start_date", "")),
+        "backtest_cutoff_delay_minutes": backtest_summary.get("cutoff_delay_minutes", config.get("backtest_cutoff_delay_minutes", 0)),
         "backtest_scope": backtest_summary.get("scope", config.get("backtest_scope", "")),
         "backtest_source": backtest_summary.get("source", ""),
         "backtest_confirmed_matches": backtest_summary.get("confirmed_matches_detail", []),
@@ -1933,6 +1939,7 @@ def xg_lightgbm_report(
     backtest_summary = xg_backtest.get("summary", {}) if xg_models else sota_backtest.get("summary", {})
     generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
     backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
+    backtest_auto_n = int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0)
     fixture_warnings = [
         warning
         for report in fixture_reports
@@ -1962,8 +1969,11 @@ def xg_lightgbm_report(
         "history_source": history_source,
         "poisson_recent_matches": config["poisson_recent_matches"],
         "generated_at": generated_at,
-        "backtest_last_n": int(config["backtest_last_n"]),
-        "backtest_auto_n": int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0),
+        "backtest_last_n": backtest_auto_n,
+        "backtest_auto_n": backtest_auto_n,
+        "backtest_mode": backtest_summary.get("mode", config.get("backtest_mode", "")),
+        "backtest_start_date": backtest_summary.get("start_date", config.get("backtest_start_date", "")),
+        "backtest_cutoff_delay_minutes": backtest_summary.get("cutoff_delay_minutes", config.get("backtest_cutoff_delay_minutes", 0)),
         "backtest_scope": backtest_summary.get("scope", config.get("backtest_scope", "")),
         "backtest_source": backtest_summary.get("source", ""),
         "backtest_confirmed_matches": backtest_summary.get("confirmed_matches_detail", []),
@@ -2104,6 +2114,7 @@ def advanced_models_report(
     backtest_summary = backtest.get("summary", {})
     generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
     backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
+    backtest_auto_n = int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0)
     raw_warnings = unique_strings([
         *hardware.get("warnings", []),
         *data_status.get("warnings", []),
@@ -2131,8 +2142,11 @@ def advanced_models_report(
         "fixture_source": fixture_source,
         "history_source": history_source,
         "poisson_recent_matches": config["poisson_recent_matches"],
-        "backtest_last_n": int(config["backtest_last_n"]),
-        "backtest_auto_n": int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0),
+        "backtest_last_n": backtest_auto_n,
+        "backtest_auto_n": backtest_auto_n,
+        "backtest_mode": backtest_summary.get("mode", config.get("backtest_mode", "")),
+        "backtest_start_date": backtest_summary.get("start_date", config.get("backtest_start_date", "")),
+        "backtest_cutoff_delay_minutes": backtest_summary.get("cutoff_delay_minutes", config.get("backtest_cutoff_delay_minutes", 0)),
         "backtest_scope": backtest_summary.get("scope", config.get("backtest_scope", "")),
         "backtest_range": backtest_range,
         "anti_leakage": backtest_summary.get("anti_leakage", data_status.get("anti_leakage", "")),
@@ -2745,6 +2759,7 @@ def alternatives_benchmark_report(
     backtest_summary = backtest.get("summary", {})
     generated_at = str(backtest_summary.get("generated_at") or _now_utc().isoformat())
     backtest_range = backtest_summary.get("backtest_range") or empty_backtest_range(generated_at)
+    backtest_auto_n = int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0)
     summary = {
         "pipeline_mode": ALTERNATIVES_BENCHMARK_PIPELINE_MODE,
         "pipeline_label": ALTERNATIVES_BENCHMARK_LABEL,
@@ -2759,8 +2774,11 @@ def alternatives_benchmark_report(
         "history_source": history_source,
         "poisson_recent_matches": config["poisson_recent_matches"],
         "benchmark_tuning": tuning_summary,
-        "backtest_last_n": int(config["backtest_last_n"]),
-        "backtest_auto_n": int(backtest_summary.get("evaluated_matches") or backtest_summary.get("confirmed_matches") or 0),
+        "backtest_last_n": backtest_auto_n,
+        "backtest_auto_n": backtest_auto_n,
+        "backtest_mode": backtest_summary.get("mode", config.get("backtest_mode", "")),
+        "backtest_start_date": backtest_summary.get("start_date", config.get("backtest_start_date", "")),
+        "backtest_cutoff_delay_minutes": backtest_summary.get("cutoff_delay_minutes", config.get("backtest_cutoff_delay_minutes", 0)),
         "backtest_scope": backtest_summary.get("scope", config.get("backtest_scope", "")),
         "backtest_source": backtest_summary.get("source", results_refresh.get("source", "")),
         "backtest_confirmed_matches": backtest_summary.get("confirmed_matches_detail", []),
@@ -3055,11 +3073,9 @@ def alternatives_backtest_report(
             "models": [],
             "warnings": ["Backtest no disponible: no hay partidos confirmados del Mundial 2026 con marcador final."],
         }
-    requested_n = int(config.get("backtest_last_n") or confirmed_total)
-    eval_count = min(max(requested_n, 1), confirmed_total)
-    prefix_count = max(confirmed_total - eval_count, 0)
-    pre_eval_confirmed_df = confirmed_all_df.iloc[:prefix_count].copy()
-    confirmed_df = confirmed_all_df.iloc[prefix_count:].reset_index(drop=True).copy()
+    eval_count = confirmed_total
+    pre_eval_confirmed_df = confirmed_all_df.iloc[:0].copy()
+    confirmed_df = confirmed_all_df.reset_index(drop=True).copy()
     baseline_metrics = evaluate_score_model_walk_forward_2026(
         model_key=DEFAULT_SCORE_MODEL,
         history_df=historical_train_df,
@@ -3100,7 +3116,10 @@ def alternatives_backtest_report(
         "scope": scope,
         "source": results_status.get("source", ""),
         "generated_at": generated_at,
-        "requested_matches": requested_n,
+        "mode": "auto_since_opening",
+        "start_date": WORLDCUP_2026_BACKTEST_START_DATE,
+        "cutoff_delay_minutes": WORLDCUP_2026_BACKTEST_DELAY_MINUTES,
+        "requested_matches": confirmed_total,
         "confirmed_matches": confirmed_total,
         "confirmed_matches_detail": confirmed_backtest_match_payloads(confirmed_df),
         "evaluated_matches": eval_count,
@@ -3184,11 +3203,8 @@ def xg_lightgbm_backtest_report(
             "models": [],
             "warnings": ["Backtest xG no disponible: no hay partidos confirmados del Mundial 2026 con marcador final."],
         }
-    requested_n = int(config.get("backtest_last_n") or confirmed_total)
-    eval_count = min(max(requested_n, 1), confirmed_total)
-    prefix_count = max(confirmed_total - eval_count, 0)
-    prefix_df = confirmed_all_df.iloc[:prefix_count].copy()
-    confirmed_df = confirmed_all_df.iloc[prefix_count:].reset_index(drop=True).copy()
+    prefix_df = confirmed_all_df.iloc[:0].copy()
+    confirmed_df = confirmed_all_df.reset_index(drop=True).copy()
     metrics = evaluate_xg_lightgbm_walk_forward_2026(
         history_df=historical_train_df,
         confirmed_df=confirmed_df,
@@ -3206,7 +3222,10 @@ def xg_lightgbm_backtest_report(
         "scope": scope,
         "source": results_status.get("source", ""),
         "generated_at": generated_at,
-        "requested_matches": requested_n,
+        "mode": "auto_since_opening",
+        "start_date": WORLDCUP_2026_BACKTEST_START_DATE,
+        "cutoff_delay_minutes": WORLDCUP_2026_BACKTEST_DELAY_MINUTES,
+        "requested_matches": confirmed_total,
         "confirmed_matches": confirmed_total,
         "confirmed_matches_detail": confirmed_backtest_match_payloads(confirmed_df),
         "evaluated_matches": int(metrics.get("evaluated_matches") or 0),
@@ -3485,16 +3504,21 @@ def confirmed_worldcup_2026_backtest_rows(tournament: Dict[str, Any]) -> pd.Data
     if working.empty:
         return pd.DataFrame(columns=["No.", "Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group", "Source"])
     working = attach_fixture_schedule(working)
-    now = pd.Timestamp(_utcify_datetime(_now_utc())).tz_convert(timezone.utc)
-    today = now.normalize()
+    cutoff = pd.Timestamp(_utcify_datetime(_now_utc()) - timedelta(minutes=WORLDCUP_2026_BACKTEST_DELAY_MINUTES)).tz_convert(timezone.utc)
+    today = cutoff.normalize()
+    opening_day = pd.Timestamp(WORLDCUP_2026_BACKTEST_START_DATE, tz=timezone.utc)
     working["_date"] = pd.to_datetime(working["_date"], utc=True, errors="coerce")
     working["_kickoff"] = pd.to_datetime(working["_kickoff"], utc=True, errors="coerce")
     has_time = working["_kickoff"].notna()
-    available_by_time = has_time & (working["_kickoff"] <= now)
+    available_by_time = has_time & (working["_kickoff"] <= cutoff)
     available_by_date = ~has_time & working["_date"].notna() & (working["_date"] <= today)
     verified_source = working.get("Fuente Resultado", pd.Series("", index=working.index)).astype(str).str.lower().str.startswith("verified:")
     available_by_verified = verified_source & working["_date"].notna() & (working["_date"] <= today)
-    working = working[working["_date"].notna() & (available_by_time | available_by_date | available_by_verified)].copy()
+    working = working[
+        working["_date"].notna()
+        & (working["_date"] >= opening_day)
+        & (available_by_time | available_by_date | available_by_verified)
+    ].copy()
     if working.empty:
         return pd.DataFrame(columns=["No.", "Date", "Year", "Team 1", "Team 2", "G1", "G2", "Round", "Group", "Source"])
     working = working[working["_date"].notna()].sort_values(["_sort_time", "No."], kind="stable").reset_index(drop=True)
@@ -5158,8 +5182,10 @@ def sota_calculation_summary(config: Dict[str, Any]) -> str:
 def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[str, Any]:
     config = simulation_config(payload)
     config["pipeline_mode"] = pipeline_mode
-    default_backtest_last_n = 20
-    config["backtest_last_n"] = int(_clamp_int(payload.get("backtest_last_n", default_backtest_last_n), 5, 100))
+    config["backtest_last_n"] = 0
+    config["backtest_mode"] = "auto_since_opening"
+    config["backtest_start_date"] = WORLDCUP_2026_BACKTEST_START_DATE
+    config["backtest_cutoff_delay_minutes"] = WORLDCUP_2026_BACKTEST_DELAY_MINUTES
     config["backtest_scope"] = "worldcup_2026_confirmed_auto"
     default_bayes_profile = "light" if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE else "deep"
     config["bayes_profile"] = str(payload.get("bayes_profile") or default_bayes_profile).strip().lower()

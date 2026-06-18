@@ -309,7 +309,10 @@ def test_alternatives_benchmark_default_backtest_and_ranking_policy():
     from src.web import mundial_services as services
 
     config = services.report_pipeline_config({}, services.ALTERNATIVES_BENCHMARK_PIPELINE_MODE)
-    assert config["backtest_last_n"] == 20
+    assert config["backtest_last_n"] == 0
+    assert config["backtest_mode"] == "auto_since_opening"
+    assert config["backtest_start_date"] == "2026-06-11"
+    assert config["backtest_cutoff_delay_minutes"] == 1
     assert config["backtest_scope"] == "worldcup_2026_confirmed_auto"
 
     ranked = services.rank_backtest_models([
@@ -659,6 +662,9 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
     assert result["summary"]["baseline_model"]["key"] == "independent_poisson"
     assert result["summary"]["backtest"]["evaluated_matches"] == 3
     assert result["summary"]["backtest_auto_n"] == 3
+    assert result["summary"]["backtest_last_n"] == 3
+    assert result["summary"]["backtest_mode"] == "auto_since_opening"
+    assert result["summary"]["backtest_start_date"] == "2026-06-11"
     assert result["summary"]["backtest_scope"] == "worldcup_2026_confirmed_auto"
     assert result["summary"]["backtest_source"] == "test-results"
     assert result["summary"]["statistical_audit"]["available"] is True
@@ -1551,6 +1557,9 @@ def test_confirmed_backtest_rows_wait_until_real_kickoff_time(tmp_path, monkeypa
         ],
     }
 
+    assert services.confirmed_worldcup_2026_backtest_rows(tournament).empty
+
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc))
     assert services.confirmed_worldcup_2026_backtest_rows(tournament).empty
 
     _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 12, 1, tzinfo=timezone.utc))
@@ -2474,9 +2483,11 @@ def test_poisson_sota_report_runs_models_sequentially_and_saves_latest(tmp_path,
     assert compact_prediction_order == services.SOTA_SCORE_MODEL_SEQUENCE
     assert fit_order == services.SOTA_SCORE_MODEL_SEQUENCE[1:]
     assert result["summary"]["sota_calculation_mode"] == "exact"
-    assert captured_backtest_config["backtest_last_n"] == 9
-    assert result["summary"]["backtest_last_n"] == 9
+    assert captured_backtest_config["backtest_last_n"] == 0
+    assert captured_backtest_config["backtest_mode"] == "auto_since_opening"
+    assert result["summary"]["backtest_last_n"] == 1
     assert result["summary"]["backtest_auto_n"] == 1
+    assert result["summary"]["backtest_mode"] == "auto_since_opening"
     assert result["model_backtests"][0]["model_key"] == "independent_poisson"
     assert "use_ml_model" not in result["summary"]
     assert result["fixture_reports"][0]["models"][0]["model_key"] == "independent_poisson"
