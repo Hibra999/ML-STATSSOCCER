@@ -90,6 +90,45 @@ def test_acceleration_status_requires_runtime_cupy_cuda(monkeypatch):
     accelerators.cupy_runtime_status.cache_clear()
 
 
+def test_acceleration_status_treats_missing_nvrtc_as_cpu_fallback(monkeypatch):
+    from src.worldcup import accelerators
+
+    class FakeRuntime:
+        @staticmethod
+        def getDeviceCount():
+            return 1
+
+    class FakeCuda:
+        runtime = FakeRuntime()
+
+    class FakeCupy:
+        cuda = FakeCuda()
+        float32 = np.float32
+
+        @staticmethod
+        def arange(*args, **kwargs):
+            raise RuntimeError(
+                "CuPy failed to load nvrtc64_120_0.dll: FileNotFoundError: Could not find module"
+            )
+
+    accelerators.cupy_runtime_status.cache_clear()
+    monkeypatch.setattr(accelerators, "accelerator_available", lambda module_name: str(module_name) == "cupy")
+    monkeypatch.setattr(accelerators, "import_optional_accelerator", lambda module_name: FakeCupy())
+
+    runtime = accelerators.cupy_runtime_status()
+    status = accelerators.acceleration_status()
+
+    assert runtime["cuda_available"] is False
+    assert runtime["reason"] == "missing_nvrtc_runtime"
+    assert runtime["fallback_backend"] == "numpy"
+    assert "fallback CPU/NumPy activo" in runtime["warning"]
+    assert "nvrtc64_120_0.dll" in runtime["error_detail"]
+    assert status["score_array_engine"] == "numpy"
+    assert status["score_array_fallback"] == "numpy"
+    assert "nvrtc64_120_0.dll" not in status["cupy_cuda_warning"]
+    accelerators.cupy_runtime_status.cache_clear()
+
+
 def test_worldcup_optuna_uses_predict_proba_for_probability_objective(monkeypatch):
     optuna = pytest.importorskip("optuna")
     from src.worldcup import training

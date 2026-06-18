@@ -567,9 +567,12 @@ function renderHeroHardware(hardware) {
   const container = document.getElementById("hero-hardware");
   if (!container) return;
   const accelerators = hardware.accelerators || {};
+  const cudaDetail = hardware.cpu_fallback
+    ? "GPU detectada; runtime en CPU"
+    : hardware.cuda_available ? "GPU disponible" : "CPU fallback";
   container.innerHTML = [
     hardwareChip("Device", hardware.actual_device || hardware.device_default || "cpu", "Motor"),
-    hardwareChip("CUDA", hardware.cuda_available ? "Si" : "No", hardware.cuda_available ? "GPU disponible" : "CPU fallback", hardware.cuda_available ? "ok" : "warn"),
+    hardwareChip("CUDA", hardware.cuda_available ? "Si" : "No", cudaDetail, hardware.cpu_fallback ? "warn" : (hardware.cuda_available ? "ok" : "warn")),
     hardwareChip("Data", accelerators.dataframe_engine || "pandas", accelerators.polars ? "Polars activo" : "Pandas fallback", accelerators.polars ? "ok" : "warn"),
     hardwareChip("Array", accelerators.score_array_engine || "numpy", accelerators.cupy_cuda ? "CuPy CUDA usable" : (accelerators.cupy_cuda_warning || "NumPy fallback"), accelerators.cupy_cuda ? "ok" : "warn"),
     hardwareChip("CPU", hardware.cpu_count || "-", "nucleos"),

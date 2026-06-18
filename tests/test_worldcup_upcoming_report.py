@@ -2767,3 +2767,51 @@ def test_sota_report_explicit_cuda_without_gpu_returns_clear_device_error(monkey
     assert hardware["actual_device"] == "cpu"
     assert "CUDA fue solicitada explicitamente" in hardware["device_error"]
     assert hardware["device_error"] in hardware["warnings"]
+
+
+def test_stat_report_hardware_nvrtc_failure_is_cpu_backsafe(monkeypatch):
+    from src.web import mundial_services as services
+
+    monkeypatch.setattr(services, "detect_hardware", lambda: {
+        "cpu_count": 16,
+        "default_n_jobs": -1,
+        "effective_n_jobs": 16,
+        "cuda_available": True,
+        "cuda_devices": ["GPU 0: NVIDIA GeForce RTX 5070"],
+        "cuda_device_names": ["NVIDIA GeForce RTX 5070"],
+        "cuda_detection_source": "nvidia-smi:C:/Windows/System32/nvidia-smi.exe",
+        "cuda_detection_sources": ["nvidia-smi:C:/Windows/System32/nvidia-smi.exe"],
+        "cuda_error": "",
+        "cuda_warning": "",
+        "device_default": "cuda",
+        "accelerators": {},
+    })
+    monkeypatch.setattr(services, "score_backend_status", lambda requested_device="auto": {
+        "score_backend": "numpy",
+        "actual_device": "cpu",
+        "backend_supports_cuda": False,
+        "cuda_available": False,
+        "cuda_device_names": [],
+        "warning": "CuPy CUDA no usable: falta NVRTC/DLL compatible; fallback CPU/NumPy activo.",
+    })
+
+    hardware = services.stat_report_hardware("cuda", services.MODEL_CHECKLIST_PIPELINE_MODE)
+    progress = services.score_model_fit_progress_extra(
+        model_key="bayesian_dynamic_poisson",
+        model_index=1,
+        model_total=1,
+        fixture_total=1,
+        config={"bayes_tune": 2000, "bayes_draws": 2000, "bayes_chains": 4},
+        hardware=hardware,
+        phase="fitting",
+        elapsed=2.0,
+        heartbeat_interval=2.0,
+        pulse_index=1,
+    )
+
+    assert hardware["actual_device"] == "cpu"
+    assert hardware["score_backend"] == "numpy"
+    assert hardware["cpu_fallback"] is True
+    assert "fallback CPU/NumPy activo" in hardware["device_error"]
+    assert "nvrtc64_120_0.dll" not in json.dumps(hardware).lower()
+    assert "CPU fallback activo para scoring por lotes" in progress["progress_detail"]

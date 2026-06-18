@@ -31,7 +31,7 @@ from src.worldcup import (
     teams_dataframe,
     tournament_fixtures_dataframe,
 )
-from src.worldcup.accelerators import acceleration_status, import_optional_accelerator
+from src.worldcup.accelerators import acceleration_status, cupy_runtime_status, import_optional_accelerator
 from src.worldcup.model import TOTAL_GOAL_LINES, poisson_score_grid, total_line_suffix
 from src.worldcup.score_models import (
     DEFAULT_SCORE_MODEL,
@@ -4825,6 +4825,8 @@ def score_model_fit_progress_extra(
     details.append(f"score_backend={score_backend}")
     if actual_device == "cuda" or score_backend == "cupy":
         details.append("CUDA/CuPy activo para scoring por lotes")
+    elif (hardware or {}).get("cpu_fallback"):
+        details.append("CPU fallback activo para scoring por lotes")
     elif (hardware or {}).get("score_backend_warning"):
         details.append(str((hardware or {}).get("score_backend_warning")))
     if error is not None:
@@ -5508,6 +5510,8 @@ def stat_report_hardware(requested_device: Any, pipeline_mode: str, sota_calcula
         "monte_carlo_backend": monte_carlo_backend,
         "score_backend": score_backend,
         "score_backend_warning": score_backend_warning,
+        "cpu_fallback": bool(actual_device == "cpu" and requested in {"auto", "cuda"}),
+        "fallback_reason": device_error or score_backend_warning,
         "device_error": device_error,
         "warnings": warnings,
     }
@@ -5518,16 +5522,11 @@ def monte_carlo_cuda_backend() -> Tuple[str, str]:
     if _MONTE_CARLO_CUDA_BACKEND is not None:
         return _MONTE_CARLO_CUDA_BACKEND
     errors: List[str] = []
-    try:
-        import cupy as cp  # type: ignore
-
-        device_count = int(cp.cuda.runtime.getDeviceCount())
-        if device_count > 0:
-            _MONTE_CARLO_CUDA_BACKEND = ("cupy", "")
-            return _MONTE_CARLO_CUDA_BACKEND
-        errors.append("CuPy sin dispositivos CUDA")
-    except Exception as exc:
-        errors.append(f"CuPy no disponible: {exc.__class__.__name__}")
+    cupy_status = cupy_runtime_status()
+    if cupy_status.get("cuda_available"):
+        _MONTE_CARLO_CUDA_BACKEND = ("cupy", "")
+        return _MONTE_CARLO_CUDA_BACKEND
+    errors.append(str(cupy_status.get("warning") or "CuPy/CUDA no disponible"))
     try:
         import torch  # type: ignore
 

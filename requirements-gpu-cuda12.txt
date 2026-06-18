@@ -1,0 +1,3 @@
+# Optional GPU runtime for local machines with CUDA 12.x.
+# Install after requirements.txt, and do not mix with cupy-cuda13x in the same env.
+cupy-cuda12x[ctk]

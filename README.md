@@ -49,6 +49,18 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+### CUDA local opcional
+
+El servidor puede correr sin CUDA. En una PC local con NVIDIA, instala solo un paquete CuPy compatible con tu CUDA. Para RTX 5070 con CUDA UMD 13.x:
+
+```powershell
+python -m pip uninstall -y cupy cupy-cuda12x cupy-cuda13x
+python -m pip install -r requirements-gpu-cuda13.txt
+python -c "import cupy as cp; print(cp.cuda.runtime.getDeviceCount()); cp.show_config()"
+```
+
+Para CUDA 12.x usa `requirements-gpu-cuda12.txt`. No mezcles `cupy-cuda12x` y `cupy-cuda13x` en el mismo entorno. Si CuPy no puede cargar NVRTC o alguna DLL CUDA, la app cae automaticamente a CPU/NumPy y lo marca como `CPU fallback` en vez de detener el reporte.
+
 ## Ejecucion
 
 Iniciar la aplicacion web:
