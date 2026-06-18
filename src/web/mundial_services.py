@@ -150,6 +150,8 @@ ADVANCED_SCORE_MODEL_SEQUENCE = [
 ADVANCED_HEAVY_SCORE_MODEL_SEQUENCE = [
     "bayesian_dynamic_poisson",
 ]
+BAYESIAN_SCORE_MODEL_KEYS = {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}
+SCORE_MODEL_FIT_HEARTBEAT_SECONDS = 2.0
 ALTERNATIVE_SCORE_MODEL_SEQUENCE = list(ALTERNATIVE_SCORE_MODEL_KEYS)
 BENCHMARK_SCORE_MODEL_SEQUENCE = list(dict.fromkeys([*SOTA_SCORE_MODEL_SEQUENCE, *ALTERNATIVE_SCORE_MODEL_KEYS]))
 REPORT_TOTAL_GOAL_LINES = (0.5, 1.5, 2.5, 3.5)
@@ -4639,6 +4641,212 @@ def format_metric(value: Any) -> str:
     return f"{number:.2f}".rstrip("0").rstrip(".")
 
 
+def score_model_fit_progress_percent(
+        model_index: int,
+        model_total: int,
+        fixture_total: int,
+        elapsed: float,
+        model_key: str,
+) -> int:
+    total = max(int(model_total or 1) * max(int(fixture_total or 1), 1), 1)
+    base = max((max(int(model_index or 1), 1) - 1) * max(int(fixture_total or 1), 1), 0)
+    scale_seconds = 420.0 if normalize_score_model_key(model_key) in BAYESIAN_SCORE_MODEL_KEYS else 45.0
+    slot_fraction = 0.08 + (1.0 - math.exp(-max(float(elapsed or 0.0), 0.0) / scale_seconds)) * 0.86
+    completed = min(float(base) + min(slot_fraction, 0.94), float(total))
+    return int(round(completed * 100 / total))
+
+
+def score_model_fit_progress_extra(
+        config: Dict[str, Any],
+        hardware: Dict[str, Any],
+        model_key: str,
+        model_index: int,
+        model_total: int,
+        fixture_total: int,
+        elapsed: float,
+        pulse_index: int,
+        phase: str,
+        heartbeat_interval: float,
+        error: Exception | None = None,
+) -> Dict[str, Any]:
+    key = normalize_score_model_key(model_key)
+    is_bayes = key in BAYESIAN_SCORE_MODEL_KEYS
+    score_backend = str((hardware or {}).get("score_backend") or config.get("score_backend") or "numpy")
+    requested_device = str((hardware or {}).get("requested_device") or config.get("sota_device") or "auto")
+    actual_device = str((hardware or {}).get("actual_device") or ("cuda" if score_backend == "cupy" else "cpu"))
+    if phase == "starting":
+        last_state = "inicializando"
+    elif phase == "finished":
+        last_state = "ajuste listo"
+    elif phase == "fallback":
+        last_state = "fallback"
+    elif is_bayes:
+        last_state = "muestreo NUTS activo"
+    else:
+        last_state = "fitting activo"
+    details = [f"heartbeat {int(max(float(heartbeat_interval or 0), 1))}s"]
+    if is_bayes:
+        details.append(
+            "PyMC/NUTS tune {tune}, draws {draws}, chains {chains}".format(
+                tune=int(config.get("bayes_tune") or 0),
+                draws=int(config.get("bayes_draws") or 0),
+                chains=int(config.get("bayes_chains") or 0),
+            )
+        )
+    details.append(f"score_backend={score_backend}")
+    if actual_device == "cuda" or score_backend == "cupy":
+        details.append("CUDA/CuPy activo para scoring por lotes")
+    elif (hardware or {}).get("score_backend_warning"):
+        details.append(str((hardware or {}).get("score_backend_warning")))
+    if error is not None:
+        details.append(normalize_report_message(f"{error.__class__.__name__}: {error}"))
+    extra = {
+        "phase": phase,
+        "last_state": last_state,
+        "fit_elapsed_seconds": round(max(float(elapsed or 0.0), 0.0), 1),
+        "pulse_index": int(pulse_index or 0),
+        "progress_mode": "fit_heartbeat",
+        "progress_detail": "; ".join(detail for detail in details if detail),
+        "requested_device": requested_device,
+        "actual_device": actual_device,
+        "score_backend": score_backend,
+        "percent": score_model_fit_progress_percent(
+            model_index=model_index,
+            model_total=model_total,
+            fixture_total=fixture_total,
+            elapsed=elapsed,
+            model_key=key,
+        ),
+    }
+    if is_bayes:
+        extra.update({
+            "bayes_backend": "pymc_nuts",
+            "bayes_draws": int(config.get("bayes_draws") or 0),
+            "bayes_tune": int(config.get("bayes_tune") or 0),
+            "bayes_chains": int(config.get("bayes_chains") or 0),
+        })
+    return extra
+
+
+def emit_score_model_fit_progress(
+        progress_callback,
+        *,
+        config: Dict[str, Any],
+        start_time: float,
+        fit_started: float,
+        model_index: int,
+        model_total: int,
+        model_key: str,
+        fixture_total: int,
+        hardware: Dict[str, Any],
+        message: str,
+        pulse_index: int,
+        phase: str,
+        heartbeat_interval: float,
+        error: Exception | None = None,
+) -> None:
+    elapsed = max(time.monotonic() - float(fit_started), 0.0)
+    emit_report_progress(
+        progress_callback,
+        stage="fitting",
+        start_time=start_time,
+        model_index=model_index,
+        model_total=model_total,
+        model_key=model_key,
+        fixture_index=0,
+        fixture_total=fixture_total,
+        hardware=hardware,
+        message=message,
+        **score_model_fit_progress_extra(
+            config=config,
+            hardware=hardware,
+            model_key=model_key,
+            model_index=model_index,
+            model_total=model_total,
+            fixture_total=fixture_total,
+            elapsed=elapsed,
+            pulse_index=pulse_index,
+            phase=phase,
+            heartbeat_interval=heartbeat_interval,
+            error=error,
+        ),
+    )
+
+
+def build_score_model_with_fit_progress(
+        base_model: Any,
+        *,
+        history_df: pd.DataFrame,
+        teams: List[str],
+        config: Dict[str, Any],
+        model_key: str,
+        model_index: int,
+        model_total: int,
+        fixture_total: int,
+        start_time: float,
+        hardware: Dict[str, Any],
+        progress_callback=None,
+        heartbeat_interval: float = SCORE_MODEL_FIT_HEARTBEAT_SECONDS,
+) -> Any:
+    key = normalize_score_model_key(model_key)
+    label = score_model_display_label(key)
+    score_config = {**config, "score_model": key}
+    fit_started = time.monotonic()
+    stop_event = threading.Event()
+    pulse = {"count": 0}
+
+    def emit(phase: str, message: str, error: Exception | None = None) -> None:
+        emit_score_model_fit_progress(
+            progress_callback,
+            config=score_config,
+            start_time=start_time,
+            fit_started=fit_started,
+            model_index=model_index,
+            model_total=model_total,
+            model_key=key,
+            fixture_total=fixture_total,
+            hardware=hardware,
+            message=message,
+            pulse_index=pulse["count"],
+            phase=phase,
+            heartbeat_interval=heartbeat_interval,
+            error=error,
+        )
+
+    emit("starting", f"Ajustando {label}")
+
+    def heartbeat() -> None:
+        while not stop_event.wait(max(float(heartbeat_interval or 1.0), 0.01)):
+            pulse["count"] += 1
+            emit("sampling" if key in BAYESIAN_SCORE_MODEL_KEYS else "fitting", f"Ajustando {label}")
+
+    thread = None
+    if progress_callback is not None:
+        thread = threading.Thread(target=heartbeat, name=f"worldcup-fit-{key}", daemon=True)
+        thread.start()
+    error: Exception | None = None
+    try:
+        score_model = build_score_model(
+            base_model,
+            history_df=history_df,
+            teams=teams,
+            config=score_config,
+        )
+    except Exception as exc:
+        error = exc
+        raise
+    finally:
+        stop_event.set()
+        if thread is not None:
+            thread.join(timeout=0.2)
+        if error is not None:
+            pulse["count"] += 1
+            emit("fallback", f"{label}: fallback Poisson independiente", error=error)
+    pulse["count"] += 1
+    emit("finished", f"Ajuste completado {label}")
+    return score_model
+
+
 def upcoming_sota_fixture_reports(
         tournament: Dict[str, Any],
         base_model: WorldCupModel,
@@ -4712,11 +4920,18 @@ def upcoming_sota_fixture_reports(
                 score_model = base_model
                 metadata = score_model_metadata(score_model)
             else:
-                score_model = build_score_model(
+                score_model = build_score_model_with_fit_progress(
                     base_model,
                     history_df=history_df,
                     teams=team_names,
-                    config={**config, "score_model": model_key},
+                    config=config,
+                    model_key=model_key,
+                    model_index=model_index,
+                    model_total=model_total,
+                    fixture_total=fixture_total,
+                    start_time=start_time,
+                    hardware=hardware,
+                    progress_callback=progress_callback,
                 )
                 metadata = score_model_metadata(score_model)
         except Exception as exc:
@@ -5166,6 +5381,7 @@ def emit_report_progress(
         hardware: Dict[str, Any],
         message: str,
         force_complete: bool = False,
+        **extra,
 ):
     elapsed = max(time.monotonic() - float(start_time), 0.0)
     model_total = max(int(model_total or 1), 1)
@@ -5191,6 +5407,7 @@ def emit_report_progress(
         elapsed_seconds=round(elapsed, 1),
         eta_seconds=eta,
         hardware=hardware,
+        **extra,
     )
 
 

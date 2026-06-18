@@ -1942,6 +1942,12 @@ h3 { font-size: 16px; }
   border-radius: 999px;
   background: #fff;
 }
+.progress-meta .progress-detail {
+  flex-basis: 100%;
+  border-radius: 8px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
 .flow-step {
   display: grid;
   gap: 12px;

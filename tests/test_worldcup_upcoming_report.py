@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -163,6 +164,56 @@ def test_advanced_models_pipeline_registry_and_config():
         "stacked_meta_mnlogit",
         "bayesian_dynamic_poisson",
     }
+
+
+def test_bayesian_fit_progress_emits_heartbeat_and_cuda_context(monkeypatch):
+    from src.web import mundial_services as services
+
+    class FakeModel:
+        pass
+
+    captured_config = {}
+
+    def fake_build_score_model(base_model, history_df, teams, config):
+        captured_config.update(config)
+        time.sleep(0.04)
+        return FakeModel()
+
+    monkeypatch.setattr(services, "build_score_model", fake_build_score_model)
+    progress = []
+
+    model = services.build_score_model_with_fit_progress(
+        FakeModel(),
+        history_df=pd.DataFrame([{"Team 1": "A", "Team 2": "B", "G1": 1, "G2": 0}]),
+        teams=["A", "B"],
+        config={
+            "score_backend": "cupy",
+            "sota_device": "cuda",
+            "bayes_draws": 2000,
+            "bayes_tune": 2000,
+            "bayes_chains": 4,
+        },
+        model_key="bayesian_dynamic_poisson",
+        model_index=5,
+        model_total=5,
+        fixture_total=4,
+        start_time=time.monotonic(),
+        hardware={"score_backend": "cupy", "actual_device": "cuda", "requested_device": "cuda"},
+        progress_callback=progress.append,
+        heartbeat_interval=0.01,
+    )
+
+    assert isinstance(model, FakeModel)
+    assert captured_config["score_model"] == "bayesian_dynamic_poisson"
+    heartbeats = [item for item in progress if item.get("progress_mode") == "fit_heartbeat"]
+    assert heartbeats
+    assert any(item.get("pulse_index", 0) > 0 for item in heartbeats)
+    assert any(item.get("last_state") == "muestreo NUTS activo" for item in heartbeats)
+    assert heartbeats[-1]["last_state"] == "ajuste listo"
+    assert heartbeats[-1]["score_backend"] == "cupy"
+    assert heartbeats[-1]["actual_device"] == "cuda"
+    assert heartbeats[-1]["bayes_draws"] == 2000
+    assert "PyMC/NUTS tune 2000" in heartbeats[-1]["progress_detail"]
 
 
 def test_report_warning_payload_normalizes_optional_limitations():

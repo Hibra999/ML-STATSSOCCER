@@ -2918,6 +2918,12 @@ function worldcupJobProgressSignature(job) {
     progress.model_key ?? "",
     progress.fixture_index ?? "",
     progress.fixture_total ?? "",
+    progress.phase ?? "",
+    progress.fit_elapsed_seconds ?? "",
+    progress.pulse_index ?? "",
+    progress.progress_detail ?? "",
+    progress.score_backend ?? "",
+    progress.actual_device ?? "",
     job.updated_at || "",
   ].join("|");
 }
@@ -2977,7 +2983,17 @@ function renderWorldcupJobProgress(kind) {
   const eta = progress.eta_seconds ? `<span>ETA ${escapeHtml(formatElapsed(progress.eta_seconds))}</span>` : "";
   const modelStep = progress.model_total ? `<span>Modelo ${escapeHtml(progress.model_index || 0)}/${escapeHtml(progress.model_total)}</span>` : "";
   const fixtureStep = progress.fixture_total ? `<span>Fixture ${escapeHtml(progress.fixture_index || 0)}/${escapeHtml(progress.fixture_total)}</span>` : "";
-  const hardware = progress.hardware ? `<span>${escapeHtml((progress.hardware || {}).actual_device || "cpu")}</span>` : "";
+  const phase = progress.phase ? `<span>${escapeHtml(progress.phase)}</span>` : "";
+  const fitElapsed = progress.fit_elapsed_seconds !== undefined && progress.fit_elapsed_seconds !== null && progress.fit_elapsed_seconds !== ""
+    ? `<span>Fit ${escapeHtml(formatElapsed(progress.fit_elapsed_seconds))}</span>`
+    : "";
+  const backend = progress.score_backend ? `<span>Backend ${escapeHtml(progress.score_backend)}</span>` : "";
+  const bayes = progress.bayes_backend
+    ? `<span>${escapeHtml(progress.bayes_backend)} ${escapeHtml(progress.bayes_draws || 0)}d/${escapeHtml(progress.bayes_tune || 0)}t x${escapeHtml(progress.bayes_chains || 0)}</span>`
+    : "";
+  const hardwareDevice = progress.actual_device || ((progress.hardware || {}).actual_device || "");
+  const hardware = hardwareDevice ? `<span>${escapeHtml(hardwareDevice)}</span>` : "";
+  const detail = progress.progress_detail ? `<span class="progress-detail">${escapeHtml(progress.progress_detail)}</span>` : "";
   const error = job.error ? `<span>${escapeHtml(cleanMessage(job.error))}</span>` : "";
   const activity = worldcupJobActivityLabel(job);
   target.className = `worldcup-progress ${escapeAttr(job.status || "queued")}`;
@@ -2998,11 +3014,16 @@ function renderWorldcupJobProgress(kind) {
       ${eta}
       ${modelStep}
       ${fixtureStep}
+      ${phase}
+      ${fitElapsed}
+      ${backend}
+      ${bayes}
       ${hardware}
       ${best}
       ${stateText}
       ${activity ? `<span>${escapeHtml(activity)}</span>` : ""}
       ${error}
+      ${detail}
     </div>`;
 }
 
@@ -3010,6 +3031,10 @@ function worldcupJobActivityLabel(job) {
   if (!job || !job.updated_at || isTerminalJob(job)) return "";
   const seconds = secondsSinceIso(job.updated_at);
   if (seconds === null) return "";
+  const progress = job.progress || {};
+  if (progress.progress_mode === "fit_heartbeat" && progress.pulse_index) {
+    return `Heartbeat ${progress.pulse_index}; actualizado hace ${formatElapsed(seconds)}`;
+  }
   if (seconds >= 20) return `Procesando lote; última actualización hace ${formatElapsed(seconds)}`;
   return `Actualizado hace ${formatElapsed(seconds)}`;
 }
