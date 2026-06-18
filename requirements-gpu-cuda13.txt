@@ -1,6 +1,6 @@
 # Optional GPU runtime for local machines with CUDA 13.x drivers.
 # Intentional: use CuPy 13 + CUDA 12.9 runtime so NumPy stays at 1.26.4.
-# cupy-cuda13x currently pulls NumPy 2.x and conflicts with TensorFlow 2.15/Numba.
+# Do not use cupy-cuda13x here until TensorFlow/Numba are migrated to NumPy 2.x.
 numpy==1.26.4
 cupy-cuda12x==13.6.0
 nvidia-cuda-runtime-cu12==12.9.79

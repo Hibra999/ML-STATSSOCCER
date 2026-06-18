@@ -51,10 +51,10 @@ pip install -r requirements.txt
 
 ### CUDA local opcional
 
-El servidor puede correr sin CUDA. En una PC local con NVIDIA, este proyecto mantiene `numpy==1.26.4` por TensorFlow 2.15 y Numba, asi que no instales `cupy-cuda13x` en el mismo entorno. Para RTX 5070 con driver/CUDA UMD 13.x usa el runtime CUDA 12.9 compatible con el driver:
+El servidor puede correr sin CUDA. En una PC local con NVIDIA, este proyecto mantiene `numpy==1.26.4` por TensorFlow 2.15 y Numba, asi que no instales `cupy-cuda13x` en el mismo entorno hasta migrar TensorFlow/Numba a NumPy 2.x. Para RTX 5070 con driver/CUDA UMD 13.x usa el runtime CUDA 12.9 compatible con el driver:
 
 ```powershell
-python -m pip uninstall -y cupy cupy-cuda12x cupy-cuda13x cuda-toolkit cuda-pathfinder nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse nvidia-nvjitlink
+python -m pip uninstall -y cupy cupy-cuda12x cupy-cuda13x cuda-toolkit cuda-pathfinder nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse nvidia-nvjitlink numpy ml-dtypes
 python -m pip install -r requirements.txt
 python -m pip install -r requirements-gpu-cuda13.txt
 python -m pip check
