@@ -118,8 +118,8 @@ def classify_cupy_runtime_failure(exc: Exception) -> Dict[str, str]:
         reason = "missing_nvrtc_runtime"
         warning = "CuPy CUDA no usable: falta NVRTC/DLL compatible; fallback CPU/NumPy activo."
         remediation = (
-            "En CUDA 13.x usa cupy-cuda13x[ctk] o instala un CUDA Toolkit/NVRTC compatible; "
-            "evita mezclar cupy-cuda12x y cupy-cuda13x en el mismo entorno."
+            "Usa requirements-gpu-cuda13.txt en este proyecto: mantiene NumPy 1.26 y agrega CuPy 13 "
+            "con runtime/NVRTC CUDA 12.9. Evita cupy-cuda13x mientras TensorFlow/Numba dependan de NumPy 1.x."
         )
     elif "could not find module" in lower or "dll" in lower or "shared object" in lower:
         reason = "missing_cuda_runtime_library"

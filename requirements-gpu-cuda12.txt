@@ -1,3 +1,6 @@
-# Optional GPU runtime for local machines with CUDA 12.x.
-# Install after requirements.txt, and do not mix with cupy-cuda13x in the same env.
-cupy-cuda12x[ctk]
+# Optional GPU runtime for local machines.
+# Keep CuPy on 13.x because the project stack pins NumPy 1.26 for TensorFlow/Numba.
+numpy==1.26.4
+cupy-cuda12x==13.6.0
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cuda-nvrtc-cu12==12.9.86

@@ -51,12 +51,14 @@ pip install -r requirements.txt
 
 ### CUDA local opcional
 
-El servidor puede correr sin CUDA. En una PC local con NVIDIA, instala solo un paquete CuPy compatible con tu CUDA. Para RTX 5070 con CUDA UMD 13.x:
+El servidor puede correr sin CUDA. En una PC local con NVIDIA, este proyecto mantiene `numpy==1.26.4` por TensorFlow 2.15 y Numba, asi que no instales `cupy-cuda13x` en el mismo entorno. Para RTX 5070 con driver/CUDA UMD 13.x usa el runtime CUDA 12.9 compatible con el driver:
 
 ```powershell
-python -m pip uninstall -y cupy cupy-cuda12x cupy-cuda13x
+python -m pip uninstall -y cupy cupy-cuda12x cupy-cuda13x cuda-toolkit cuda-pathfinder nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse nvidia-nvjitlink
+python -m pip install -r requirements.txt
 python -m pip install -r requirements-gpu-cuda13.txt
-python -c "import cupy as cp; print(cp.cuda.runtime.getDeviceCount()); cp.show_config()"
+python -m pip check
+python -c "import numpy as np, cupy as cp; print('numpy', np.__version__); print('gpus', cp.cuda.runtime.getDeviceCount()); print('runtime', cp.cuda.runtime.runtimeGetVersion()); print('probe', float(cp.sum(cp.arange(8, dtype=cp.float32)).get()))"
 ```
 
 Para CUDA 12.x usa `requirements-gpu-cuda12.txt`. No mezcles `cupy-cuda12x` y `cupy-cuda13x` en el mismo entorno. Si CuPy no puede cargar NVRTC o alguna DLL CUDA, la app cae automaticamente a CPU/NumPy y lo marca como `CPU fallback` en vez de detener el reporte.
