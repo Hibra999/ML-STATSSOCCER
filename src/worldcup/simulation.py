@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections import Counter
 from typing import Any, Dict, List, Tuple
 
@@ -74,7 +75,8 @@ def simulate_worldcup(
     uses_score_samplers = any(sampler is not None for sampler in group_score_samplers)
     pair_cache: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     report_every = max(1, iterations // 100)
-    _emit_progress(progress_callback, "simulation", 0, iterations, "Monte Carlo en ejecucion")
+    started_at = time.monotonic()
+    _emit_progress(progress_callback, "simulation", 0, iterations, "Monte Carlo en ejecucion", started_at)
 
     for iteration in range(iterations):
         points = [np.zeros(len(info["teams"]), dtype=np.int16) for info in group_infos]
@@ -189,19 +191,20 @@ def simulate_worldcup(
                 counts[winner_idx, COUNT_CHAMPION] += 1
         current = iteration + 1
         if current == iterations or current % report_every == 0:
-            _emit_progress(progress_callback, "simulation", current, iterations, "Monte Carlo en ejecucion")
+            _emit_progress(progress_callback, "simulation", current, iterations, "Monte Carlo en ejecucion", started_at)
 
     advancement = _advancement_dataframe_from_counts(groups, model, counts, team_index, iterations)
     match_probs = match_probabilities_dataframe(group_matches, model)
-    _emit_progress(progress_callback, "simulation", iterations, iterations, "Monte Carlo completado")
+    _emit_progress(progress_callback, "simulation", iterations, iterations, "Monte Carlo completado", started_at)
     return {"advancement": advancement, "matches": match_probs, "confirmed_results": pd.DataFrame(confirmed_results or [])}
 
 
-def _emit_progress(callback, stage: str, current: int, total: int, message: str) -> None:
+def _emit_progress(callback, stage: str, current: int, total: int, message: str, started_at: float) -> None:
     if callback is None:
         return
     total = max(int(total or 1), 1)
     current = min(max(int(current or 0), 0), total)
+    elapsed = max(time.monotonic() - float(started_at), 0.0)
     callback({
         "stage": stage,
         "current": current,
@@ -210,6 +213,8 @@ def _emit_progress(callback, stage: str, current: int, total: int, message: str)
         "total_trials": "",
         "percent": int(round(current * 100 / total)),
         "message": message,
+        "elapsed_seconds": round(elapsed, 1),
+        "iterations_per_second": round(current / elapsed, 2) if current > 0 and elapsed > 0 else "",
     })
 
 

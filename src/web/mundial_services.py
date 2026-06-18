@@ -5564,6 +5564,8 @@ def emit_report_progress(
     eta = 0
     if completed > 0 and completed < total:
         eta = int(round((elapsed / completed) * (total - completed)))
+    if "iterations_per_second" not in extra:
+        extra["iterations_per_second"] = round(completed / elapsed, 2) if completed > 0 and elapsed > 0 else ""
     emit_job_progress(
         callback,
         stage,
@@ -7207,6 +7209,12 @@ def emit_job_progress(callback, stage: str, current: int, total: int, message: s
         return
     total = max(int(total or 1), 1)
     current = min(max(int(current or 0), 0), total)
+    elapsed = extra.get("elapsed_seconds")
+    if "iterations_per_second" not in extra and elapsed not in {None, "", 0}:
+        try:
+            extra["iterations_per_second"] = round(current / max(float(elapsed), 1e-9), 2)
+        except (TypeError, ValueError):
+            extra["iterations_per_second"] = ""
     callback({
         "stage": stage,
         "current": current,

@@ -2967,6 +2967,7 @@ function applyWorldcupJobPollState(job, previous) {
   const previousSignature = previous.pollSignature || worldcupJobProgressSignature(previous);
   job.pollSignature = nextSignature;
   job.pollIdleCount = nextSignature === previousSignature ? Number(previous.pollIdleCount || 0) + 1 : 0;
+  job.client_rate_per_second = worldcupJobClientRate(job, previous);
 }
 
 function worldcupJobProgressSignature(job) {
@@ -2991,8 +2992,30 @@ function worldcupJobProgressSignature(job) {
     progress.progress_detail ?? "",
     progress.score_backend ?? "",
     progress.actual_device ?? "",
+    progress.iterations_per_second ?? "",
     job.updated_at || "",
   ].join("|");
+}
+
+function worldcupJobClientRate(job, previous) {
+  if (!job || !previous) return "";
+  const current = worldcupJobProgressCurrent(job);
+  const previousCurrent = worldcupJobProgressCurrent(previous);
+  if (!Number.isFinite(current) || !Number.isFinite(previousCurrent)) return previous.client_rate_per_second || "";
+  const delta = current - previousCurrent;
+  if (delta <= 0) return previous.client_rate_per_second || "";
+  const currentTime = Date.parse(job.updated_at || "") || Date.now();
+  const previousTime = Date.parse(previous.updated_at || "") || currentTime;
+  const seconds = Math.max((currentTime - previousTime) / 1000, 0);
+  if (seconds <= 0.05) return previous.client_rate_per_second || "";
+  return roundRate(delta / seconds);
+}
+
+function worldcupJobProgressCurrent(job) {
+  const progress = (job && job.progress) || {};
+  const value = progress.current_trial || progress.current || 0;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
 }
 
 function worldcupJobPollDelay(job) {
@@ -3063,6 +3086,7 @@ function renderWorldcupJobProgress(kind) {
   const detail = progress.progress_detail ? `<span class="progress-detail">${escapeHtml(progress.progress_detail)}</span>` : "";
   const error = job.error ? `<span>${escapeHtml(cleanMessage(job.error))}</span>` : "";
   const activity = worldcupJobActivityLabel(job);
+  const runtime = worldcupProgressRuntimeHtml(job, progress);
   target.className = `worldcup-progress ${escapeAttr(job.status || "queued")}`;
   target.innerHTML = `
     <div class="progress-header">
@@ -3073,6 +3097,7 @@ function renderWorldcupJobProgress(kind) {
       <strong>${escapeHtml(percent)}%</strong>
     </div>
     <div class="progress-bar"><div class="progress-fill" style="width:${escapeAttr(percent)}%"></div></div>
+    ${runtime}
     <div class="progress-meta">
       <span>${escapeHtml(progress.stage || job.status || "queued")}</span>
       <span>${escapeHtml(current)}/${escapeHtml(total)}</span>
@@ -3092,6 +3117,66 @@ function renderWorldcupJobProgress(kind) {
       ${error}
       ${detail}
     </div>`;
+}
+
+function worldcupProgressRuntimeHtml(job, progress) {
+  const hardware = progress.hardware || {};
+  const scoreBackend = progress.score_backend || hardware.score_backend || "";
+  const monteCarloBackend = progress.monte_carlo_backend || hardware.monte_carlo_backend || "";
+  const requestedDevice = String(progress.requested_device || hardware.requested_device || "");
+  const actualDevice = String(progress.actual_device || hardware.actual_device || "");
+  const cudaDetected = Boolean(hardware.cuda_available || scoreBackend === "cupy" || actualDevice === "cuda");
+  const cudaUsed = Boolean(hardware.backend_supports_cuda || scoreBackend === "cupy" || actualDevice === "cuda" || monteCarloBackend === "cupy");
+  const deviceNames = [...asList(hardware.cuda_device_names), ...asList(hardware.cuda_devices)]
+    .map((item) => String(item || "").replace(/^GPU\s+\d+\s*:\s*/, "").trim())
+    .filter(Boolean);
+  const backendDetail = [
+    scoreBackend ? `score=${scoreBackend}` : "",
+    monteCarloBackend && monteCarloBackend !== "numpy" ? `mc=${monteCarloBackend}` : "",
+  ].filter(Boolean).join(" · ");
+  const rate = firstFiniteNumber(progress.iterations_per_second, progress.items_per_second, job.client_rate_per_second);
+  const rowRate = firstFiniteNumber(progress.rows_per_second);
+  const elapsed = progress.fit_elapsed_seconds ?? progress.elapsed_seconds;
+  const eta = progress.eta_seconds;
+  const items = [
+    {
+      label: "CUDA detectada",
+      value: cudaDetected ? "Si" : "No",
+      detail: deviceNames.length ? deviceNames.slice(0, 2).join(" · ") : (hardware.cuda_error || hardware.cuda_warning || "sin GPU confirmada"),
+      className: cudaDetected ? "ok" : "warn",
+    },
+    {
+      label: "Uso real",
+      value: cudaUsed ? "CUDA activo" : "CPU/NumPy",
+      detail: backendDetail || (hardware.score_backend_warning || hardware.fallback_reason || "backend por defecto"),
+      className: cudaUsed ? "ok" : "warn",
+    },
+    {
+      label: "Solicitado",
+      value: requestedDevice ? requestedDevice.toUpperCase() : "-",
+      detail: actualDevice ? `actual ${actualDevice}` : "esperando hardware",
+      className: actualDevice === "cuda" ? "ok" : "",
+    },
+    {
+      label: "Velocidad",
+      value: rate ? `${formatRate(rate)} it/s` : rowRate ? `${formatRate(rowRate)} filas/s` : "-",
+      detail: rowRate && rate ? `${formatRate(rowRate)} filas/s` : "se actualiza con cada avance",
+      className: rate || rowRate ? "ok" : "",
+    },
+    {
+      label: "Tiempo",
+      value: elapsed !== undefined && elapsed !== null && elapsed !== "" ? formatElapsed(elapsed) : "-",
+      detail: eta ? `ETA ${formatElapsed(eta)}` : worldcupJobActivityLabel(job) || "sin ETA",
+      className: "",
+    },
+  ];
+  return `<div class="progress-runtime" aria-label="Telemetría de ejecución">
+    ${items.map((item) => `<article class="${escapeAttr(item.className || "")}">
+      <span>${escapeHtml(item.label)}</span>
+      <strong>${escapeHtml(item.value)}</strong>
+      <small>${escapeHtml(item.detail || "")}</small>
+    </article>`).join("")}
+  </div>`;
 }
 
 function worldcupJobActivityLabel(job) {
@@ -3121,6 +3206,33 @@ function formatElapsed(seconds) {
   const hours = Math.floor(minutes / 60);
   const minuteRemainder = minutes % 60;
   return minuteRemainder ? `${hours}h ${minuteRemainder}m` : `${hours}h`;
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+}
+
+function asList(value) {
+  if (Array.isArray(value)) return value;
+  if (value === undefined || value === null || value === "") return [];
+  return [value];
+}
+
+function roundRate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  if (number >= 100) return Math.round(number);
+  if (number >= 10) return Math.round(number * 10) / 10;
+  return Math.round(number * 100) / 100;
+}
+
+function formatRate(value) {
+  const rate = roundRate(value);
+  return rate === "" ? "-" : String(rate);
 }
 
 function latestWorldcupJob(kind) {

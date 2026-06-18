@@ -2010,6 +2010,41 @@ h3 { font-size: 16px; }
 .worldcup-progress.failed .progress-fill {
   background: var(--red);
 }
+.progress-runtime {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+.progress-runtime article {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.progress-runtime article.ok {
+  border-color: #a8d7c6;
+  background: #f7fffb;
+}
+.progress-runtime article.warn {
+  border-color: #f3d4a4;
+  background: #fffaf0;
+}
+.progress-runtime span,
+.progress-runtime small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.progress-runtime strong {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
 .progress-meta {
   display: flex;
   gap: 8px;

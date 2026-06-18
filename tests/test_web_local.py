@@ -276,6 +276,7 @@ def test_predict_ui_uses_automatic_fixtures_only():
 def test_mundial_ui_is_standalone_and_personalizable():
     html_source = open("src/web/static/mundial.html", "r", encoding="utf-8").read()
     app_source = open("src/web/static/mundial.js", "r", encoding="utf-8").read()
+    styles_source = open("src/web/static/mundial.css", "r", encoding="utf-8").read()
 
     assert "Mundial 2026" in html_source
     assert "worldcup-view active" in html_source
@@ -354,6 +355,11 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Monte Carlo consenso" in html_source
     assert "upcoming-report" in html_source
     assert "worldcup-upcoming-progress" in html_source
+    assert "worldcupProgressRuntimeHtml" in app_source
+    assert "CUDA detectada" in app_source
+    assert "Uso real" in app_source
+    assert "it/s" in app_source
+    assert ".progress-runtime" in styles_source
     assert "upcoming-predictions" in html_source
     assert "hero-countdown" in html_source
     assert "hero-countdown-vs" in html_source

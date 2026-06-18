@@ -259,6 +259,40 @@ def test_report_warning_payload_normalizes_optional_limitations():
     assert "storage/worldcup/market/WorldCup2026.xlsx" in payload["technical_warnings"][0]
 
 
+def test_report_progress_includes_runtime_speed_and_hardware():
+    from src.web import mundial_services as services
+
+    progress = []
+
+    services.emit_report_progress(
+        progress.append,
+        stage="predicting",
+        start_time=time.monotonic() - 2.0,
+        model_index=1,
+        model_total=2,
+        model_key="negative_binomial_glm",
+        fixture_index=3,
+        fixture_total=4,
+        hardware={
+            "requested_device": "cuda",
+            "actual_device": "cuda",
+            "score_backend": "cupy",
+            "backend_supports_cuda": True,
+            "cuda_available": True,
+            "cuda_device_names": ["NVIDIA RTX 5070"],
+        },
+        message="Probando telemetria",
+    )
+
+    assert progress
+    payload = progress[-1]
+    assert payload["current"] == 3
+    assert payload["total"] == 8
+    assert payload["iterations_per_second"] > 0
+    assert payload["hardware"]["score_backend"] == "cupy"
+    assert payload["hardware"]["actual_device"] == "cuda"
+
+
 def test_advanced_source_preflight_prepares_data_and_uses_downloadable_sources(monkeypatch):
     from src.web import mundial_services as services
 
