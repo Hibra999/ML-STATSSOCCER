@@ -157,6 +157,9 @@ ADVANCED_HEAVY_SCORE_MODEL_SEQUENCE = [
 ]
 BAYESIAN_SCORE_MODEL_KEYS = {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}
 SCORE_MODEL_FIT_HEARTBEAT_SECONDS = 2.0
+REPORT_BAYES_MAX_DRAWS = 100
+REPORT_BAYES_MAX_TUNE = 100
+REPORT_BAYES_MAX_CHAINS = 1
 ALTERNATIVE_SCORE_MODEL_SEQUENCE = list(ALTERNATIVE_SCORE_MODEL_KEYS)
 BENCHMARK_SCORE_MODEL_SEQUENCE = list(dict.fromkeys([*SOTA_SCORE_MODEL_SEQUENCE, *ALTERNATIVE_SCORE_MODEL_KEYS]))
 STATISTICAL_MODEL_CHECKLIST_SEQUENCE = list(dict.fromkeys([
@@ -188,9 +191,9 @@ DEFAULT_CONFIG = {
     "stat_glm_min_matches": 12,
     "stat_glm_validation_fraction": 0.2,
     "score_mle_recency_weight": None,
-    "bayes_draws": 500,
-    "bayes_tune": 500,
-    "bayes_chains": 2,
+    "bayes_draws": REPORT_BAYES_MAX_DRAWS,
+    "bayes_tune": REPORT_BAYES_MAX_TUNE,
+    "bayes_chains": REPORT_BAYES_MAX_CHAINS,
     "bayes_target_accept": 0.92,
     "bayes_max_treedepth": 12,
     "advanced_include_bayesian": False,
@@ -3840,7 +3843,7 @@ def evaluate_score_model_walk_forward_2026(
                     baseline_model,
                     history_df=train_df,
                     teams=teams,
-                    config={**config, "score_model": model_key},
+                    config=report_bayes_sampling_config({**config, "score_model": model_key}),
                 )
                 metadata = score_model_metadata(model)
             except Exception as exc:
@@ -4800,6 +4803,7 @@ def score_model_fit_progress_extra(
 ) -> Dict[str, Any]:
     key = normalize_score_model_key(model_key)
     is_bayes = key in BAYESIAN_SCORE_MODEL_KEYS
+    bayes_config = report_bayes_sampling_config(config)
     score_backend = str((hardware or {}).get("score_backend") or config.get("score_backend") or "numpy")
     requested_device = str((hardware or {}).get("requested_device") or config.get("sota_device") or "cuda")
     actual_device = str((hardware or {}).get("actual_device") or ("cuda" if score_backend == "cupy" else "cpu"))
@@ -4817,9 +4821,9 @@ def score_model_fit_progress_extra(
     if is_bayes:
         details.append(
             "PyMC/NUTS tune {tune}, draws {draws}, chains {chains}".format(
-                tune=int(config.get("bayes_tune") or 0),
-                draws=int(config.get("bayes_draws") or 0),
-                chains=int(config.get("bayes_chains") or 0),
+                tune=int(bayes_config.get("bayes_tune") or 0),
+                draws=int(bayes_config.get("bayes_draws") or 0),
+                chains=int(bayes_config.get("bayes_chains") or 0),
             )
         )
     details.append(f"score_backend={score_backend}")
@@ -4852,9 +4856,9 @@ def score_model_fit_progress_extra(
     if is_bayes:
         extra.update({
             "bayes_backend": "pymc_nuts",
-            "bayes_draws": int(config.get("bayes_draws") or 0),
-            "bayes_tune": int(config.get("bayes_tune") or 0),
-            "bayes_chains": int(config.get("bayes_chains") or 0),
+            "bayes_draws": int(bayes_config.get("bayes_draws") or 0),
+            "bayes_tune": int(bayes_config.get("bayes_tune") or 0),
+            "bayes_chains": int(bayes_config.get("bayes_chains") or 0),
         })
     return extra
 
@@ -4921,7 +4925,7 @@ def build_score_model_with_fit_progress(
 ) -> Any:
     key = normalize_score_model_key(model_key)
     label = score_model_display_label(key)
-    score_config = {**config, "score_model": key}
+    score_config = report_bayes_sampling_config({**config, "score_model": key})
     fit_started = time.monotonic()
     stop_event = threading.Event()
     pulse = {"count": 0}
@@ -5304,6 +5308,20 @@ def sota_calculation_summary(config: Dict[str, Any]) -> str:
     return "Consenso exacto: matriz promedio, sin simulacion"
 
 
+def report_bayes_sampling_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    capped = dict(config or {})
+    capped["bayes_draws"] = int(
+        _clamp_int(capped.get("bayes_draws", DEFAULT_CONFIG["bayes_draws"]), 100, REPORT_BAYES_MAX_DRAWS)
+    )
+    capped["bayes_tune"] = int(
+        _clamp_int(capped.get("bayes_tune", DEFAULT_CONFIG["bayes_tune"]), 100, REPORT_BAYES_MAX_TUNE)
+    )
+    capped["bayes_chains"] = int(
+        _clamp_int(capped.get("bayes_chains", DEFAULT_CONFIG["bayes_chains"]), 1, REPORT_BAYES_MAX_CHAINS)
+    )
+    return capped
+
+
 def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[str, Any]:
     config = simulation_config(payload)
     config["pipeline_mode"] = pipeline_mode
@@ -5335,17 +5353,18 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
         config["stat_model_cache"] = True
         config["stat_model_refit"] = False
     if pipeline_mode == ADVANCED_MODELS_PIPELINE_MODE and config["bayes_profile"] != "deep":
-        config["bayes_draws"] = 100
-        config["bayes_tune"] = 100
-        config["bayes_chains"] = 1
+        config["bayes_draws"] = REPORT_BAYES_MAX_DRAWS
+        config["bayes_tune"] = REPORT_BAYES_MAX_TUNE
+        config["bayes_chains"] = REPORT_BAYES_MAX_CHAINS
         config["stat_model_cache"] = True
         config["stat_model_refit"] = False
     if config["bayes_profile"] == "deep":
-        config["bayes_draws"] = 2000
-        config["bayes_tune"] = 2000
-        config["bayes_chains"] = 4
+        config["bayes_draws"] = REPORT_BAYES_MAX_DRAWS
+        config["bayes_tune"] = REPORT_BAYES_MAX_TUNE
+        config["bayes_chains"] = REPORT_BAYES_MAX_CHAINS
         config["stat_model_cache"] = True
         config["stat_model_refit"] = False
+    config = report_bayes_sampling_config(config)
     if pipeline_mode in {ALTERNATIVES_BENCHMARK_PIPELINE_MODE, MODEL_CHECKLIST_PIPELINE_MODE}:
         config["sota_calculation_mode"] = "exact"
         config["benchmark_tuning_enabled"] = bool(payload.get("benchmark_tuning_enabled", payload.get("tuning_enabled", False)))
@@ -7304,7 +7323,12 @@ def apply_configured_score_model(model: Any, tournament: Dict[str, Any], config:
     group_map = groups_from_tournament(tournament)
     team_names = [team for group_teams in group_map.values() for team in group_teams]
     history_df, _ = score_history_for_tournament(tournament, config)
-    return build_score_model(model, history_df=history_df, teams=team_names, config=config)
+    return build_score_model(
+        model,
+        history_df=history_df,
+        teams=team_names,
+        config=report_bayes_sampling_config(config),
+    )
 
 
 def score_model_metadata(model: Any) -> Dict[str, Any]:
@@ -7363,9 +7387,15 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
             0.0,
             1.0,
         ),
-        "bayes_draws": int(_clamp_int(payload.get("bayes_draws", DEFAULT_CONFIG["bayes_draws"]), 100, 10000)),
-        "bayes_tune": int(_clamp_int(payload.get("bayes_tune", DEFAULT_CONFIG["bayes_tune"]), 100, 10000)),
-        "bayes_chains": int(_clamp_int(payload.get("bayes_chains", DEFAULT_CONFIG["bayes_chains"]), 1, 8)),
+        "bayes_draws": int(
+            _clamp_int(payload.get("bayes_draws", DEFAULT_CONFIG["bayes_draws"]), 100, REPORT_BAYES_MAX_DRAWS)
+        ),
+        "bayes_tune": int(
+            _clamp_int(payload.get("bayes_tune", DEFAULT_CONFIG["bayes_tune"]), 100, REPORT_BAYES_MAX_TUNE)
+        ),
+        "bayes_chains": int(
+            _clamp_int(payload.get("bayes_chains", DEFAULT_CONFIG["bayes_chains"]), 1, REPORT_BAYES_MAX_CHAINS)
+        ),
         "bayes_target_accept": float(np.clip(float(payload.get("bayes_target_accept", DEFAULT_CONFIG["bayes_target_accept"])), 0.8, 0.995)),
         "bayes_max_treedepth": int(_clamp_int(payload.get("bayes_max_treedepth", DEFAULT_CONFIG["bayes_max_treedepth"]), 6, 15)),
         "advanced_include_bayesian": bool(payload.get("advanced_include_bayesian", DEFAULT_CONFIG["advanced_include_bayesian"])),

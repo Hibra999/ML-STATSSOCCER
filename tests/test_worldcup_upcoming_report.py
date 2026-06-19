@@ -184,6 +184,9 @@ def test_advanced_models_pipeline_registry_and_config():
     )
     assert "bayesian_dynamic_poisson" not in services.active_advanced_score_model_sequence(ignored_deep_config)
     assert "bayesian_dynamic_poisson" in services.active_advanced_score_model_sequence(deep_config)
+    assert deep_config["bayes_draws"] == 100
+    assert deep_config["bayes_tune"] == 100
+    assert deep_config["bayes_chains"] == 1
     catalog = services.advanced_models_catalog({"families": [{"key": "xg_shot_quality", "status": "active"}]})
     assert {item["key"] for item in catalog} >= {
         "xg_dixon_coles",
@@ -240,8 +243,13 @@ def test_bayesian_fit_progress_emits_heartbeat_and_cuda_context(monkeypatch):
     assert heartbeats[-1]["last_state"] == "ajuste listo"
     assert heartbeats[-1]["score_backend"] == "cupy"
     assert heartbeats[-1]["actual_device"] == "cuda"
-    assert heartbeats[-1]["bayes_draws"] == 2000
-    assert "PyMC/NUTS tune 2000" in heartbeats[-1]["progress_detail"]
+    assert captured_config["bayes_draws"] == 100
+    assert captured_config["bayes_tune"] == 100
+    assert captured_config["bayes_chains"] == 1
+    assert heartbeats[-1]["bayes_draws"] == 100
+    assert heartbeats[-1]["bayes_tune"] == 100
+    assert heartbeats[-1]["bayes_chains"] == 1
+    assert "PyMC/NUTS tune 100" in heartbeats[-1]["progress_detail"]
 
 
 def test_report_warning_payload_normalizes_optional_limitations():

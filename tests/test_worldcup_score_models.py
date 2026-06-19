@@ -303,11 +303,15 @@ def test_simulation_config_accepts_score_model_key():
 
     config = mundial_services.simulation_config({
         "score_model": "dixon-coles-mle",
-        "bayes_draws": 50,
+        "bayes_draws": 2000,
+        "bayes_tune": 2000,
+        "bayes_chains": 4,
     })
 
     assert config["score_model"] == "dixon_coles_mle"
     assert config["bayes_draws"] == 100
+    assert config["bayes_tune"] == 100
+    assert config["bayes_chains"] == 1
 
 
 def test_pytensor_cxx_guard_appends_empty_cxx_only_without_compiler(monkeypatch):
