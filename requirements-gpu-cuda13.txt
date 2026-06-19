@@ -1,5 +1,7 @@
 # Optional GPU runtime for local machines with CUDA 13.x drivers/toolkit.
-# Pin CuPy 13.6.0 exactly: unpinned cupy-cuda13x can resolve to CuPy 14 + NumPy 2.x.
+# CuPy 13.6.0 is tested with CUDA Toolkit/runtime 13.0; a newer driver can still report CUDA UMD 13.3.
+# Pin CuPy exactly: unpinned cupy-cuda13x can resolve to CuPy 14 + NumPy 2.x.
 numpy==1.26.4
 cupy-cuda13x==13.6.0
-cuda-toolkit[cudart,nvrtc]==13.3.0
+cuda-pathfinder
+cuda-toolkit[all]==13.0.2

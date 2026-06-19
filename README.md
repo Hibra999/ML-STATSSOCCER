@@ -51,17 +51,31 @@ pip install -r requirements.txt
 
 ### CUDA local opcional
 
-El servidor puede correr sin CUDA. En una PC local con NVIDIA, este proyecto mantiene `numpy==1.26.4` por TensorFlow 2.15 y Numba, asi que no instales `cupy-cuda13x` sin version: puede resolver a CuPy 14 + NumPy 2.x. Para RTX 5070 con driver/CUDA UMD 13.3 usa CuPy CUDA 13 fijado a 13.6.0 y el runtime/NVRTC CUDA 13.3 de PyPI:
+El servidor puede correr sin CUDA. En una PC local con NVIDIA, este proyecto mantiene `numpy==1.26.4` por TensorFlow 2.15 y Numba, asi que no instales `cupy-cuda13x` sin version: puede resolver a CuPy 14 + NumPy 2.x. Para CUDA 13 usa CuPy CUDA 13 fijado a 13.6.0 y CUDA Toolkit/runtime 13.0.2, que es el runtime probado para CuPy 13.6 aunque el driver local reporte CUDA UMD 13.3.
+
+Antes de reinstalar, confirma que estas en el entorno donde ejecutas `python mundial.py` y revisa si hay paquetes CuPy/CUDA mezclados:
 
 ```powershell
-python -m pip uninstall -y cupy cupy-cuda12x cupy-cuda13x cuda-toolkit cuda-pathfinder nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse nvidia-nvjitlink numpy ml-dtypes
-python -m pip install -r requirements.txt --force-reinstall
-python -m pip install -r requirements-gpu-cuda13.txt --force-reinstall
-python -m pip check
-python -c "import numpy as np, cupy as cp; print('numpy', np.__version__); print('gpus', cp.cuda.runtime.getDeviceCount()); print('runtime', cp.cuda.runtime.runtimeGetVersion()); print('probe', float(cp.sum(cp.arange(8, dtype=cp.float32)).get()))"
+python -c "import sys; print(sys.executable)"
+python -m pip freeze | findstr /I "cupy cuda nvidia numpy ml-dtypes"
+python -c "import cupy; cupy.show_config()"
+python -c "from src.worldcup.accelerators import cupy_runtime_status; import json; print(json.dumps(cupy_runtime_status(), indent=2))"
 ```
 
-Para CUDA 12.x usa `requirements-gpu-cuda12.txt`. No mezcles `cupy-cuda12x` y `cupy-cuda13x` en el mismo entorno. Si CuPy no puede cargar NVRTC o alguna DLL CUDA, la app cae automaticamente a CPU/NumPy y lo marca como `CPU fallback` en vez de detener el reporte.
+Si aparece mas de un paquete CuPy, `cupy-cuda12x` junto con `cupy-cuda13x`, o `cupy` compilado desde fuente, limpia el entorno y reinstala:
+
+```powershell
+python -m pip uninstall -y cupy cupy-cuda12x cupy-cuda13x cuda-toolkit cuda-pathfinder nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-cuda-nvcc nvidia-cuda-crt nvidia-cuda-cccl nvidia-nvvm nvidia-nvptxcompiler nvidia-nvjitlink nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse nvidia-nvfatbin numpy ml-dtypes
+python -m pip install -r requirements.txt --force-reinstall
+python -m pip install -r requirements-gpu-cuda13.txt --force-reinstall --no-cache-dir
+python -m pip check
+python -c "import numpy as np; print('numpy', np.__version__)"
+python -c "import cupy as cp; print('cupy', cp.__version__); cp.show_config(); print('gpus', cp.cuda.runtime.getDeviceCount()); print('probe', float(cp.sum(cp.arange(8, dtype=cp.float32)).get()))"
+```
+
+El probe correcto imprime `numpy 1.26.4`, `cupy 13.6.0`, al menos una GPU y `probe 28.0`. Despues arranca `python mundial.py` desde la misma terminal. La UI debe mostrar `Uso real: CUDA activo`, `score=cupy`, `Solicitado: CUDA` y `actual cuda`.
+
+Para CUDA 12.x usa `requirements-gpu-cuda12.txt`. No mezcles `cupy-cuda12x` y `cupy-cuda13x` en el mismo entorno. Si CuPy no puede cargar NVRTC o alguna DLL CUDA, la app cae automaticamente a CPU/NumPy y lo marca como `CPU fallback` en vez de detener el reporte. Si NVRTC sigue fallando con PyPI, instala NVIDIA CUDA Toolkit 13.0 en Windows y agrega `CUDA_PATH`/`PATH`, o usa `conda install -c conda-forge cupy cuda-version=13.0 -y` dentro del mismo entorno.
 
 ## Ejecucion
 

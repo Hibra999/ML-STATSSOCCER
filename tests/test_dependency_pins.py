@@ -54,10 +54,11 @@ def test_base_requirements_pin_numpy_126():
     assert "numpy==1.26.4" in _requirement_lines("requirements.txt")
 
 
-def test_cuda13_gpu_requirements_pin_native_cuda13_cupy_and_numpy_126():
+def test_cuda13_gpu_requirements_pin_cupy_cuda13_and_cuda_130_runtime():
     lines = _requirement_lines("requirements-gpu-cuda13.txt")
 
     assert "numpy==1.26.4" in lines
     assert "cupy-cuda13x==13.6.0" in lines
-    assert "cuda-toolkit[cudart,nvrtc]==13.3.0" in lines
+    assert "cuda-pathfinder" in lines
+    assert "cuda-toolkit[all]==13.0.2" in lines
     assert not any(line.lower() == "cupy-cuda13x" for line in lines)
