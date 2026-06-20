@@ -104,7 +104,7 @@ def test_sota_and_alternative_sequences_are_statistical_score_models():
     assert services.XG_LIGHTGBM_PIPELINE_MODE not in services.SOTA_SCORE_MODEL_SEQUENCE
     assert services.XG_LIGHTGBM_PIPELINE_MODE not in services.BENCHMARK_SCORE_MODEL_SEQUENCE
     assert services.XG_LIGHTGBM_PIPELINE_MODE not in services.STATISTICAL_MODEL_CHECKLIST_SEQUENCE
-    assert disabled <= set(services.STATISTICAL_MODEL_CHECKLIST_SEQUENCE)
+    assert disabled.isdisjoint(services.STATISTICAL_MODEL_CHECKLIST_SEQUENCE)
 
 
 def test_alternatives_benchmark_aliases_and_statistical_registry():
@@ -155,7 +155,6 @@ def test_model_checklist_config_filters_lightgbm_and_uses_selected_models():
     assert config["selected_score_models"] == [
         "independent_poisson",
         "negative_binomial_dixon_coles",
-        "bayesian_dynamic_poisson",
     ]
     assert config["sota_calculation_mode"] == "exact"
     assert services.selected_models_require_advanced_sources(config["selected_score_models"]) is True
@@ -183,18 +182,21 @@ def test_advanced_models_pipeline_registry_and_config():
         services.ADVANCED_MODELS_PIPELINE_MODE,
     )
     assert "bayesian_dynamic_poisson" not in services.active_advanced_score_model_sequence(ignored_deep_config)
-    assert "bayesian_dynamic_poisson" in services.active_advanced_score_model_sequence(deep_config)
+    assert "bayesian_dynamic_poisson" not in services.active_advanced_score_model_sequence(deep_config)
+    assert deep_config["advanced_include_bayesian"] is False
+    assert deep_config["bayes_profile"] == "light"
     assert deep_config["bayes_draws"] == 100
     assert deep_config["bayes_tune"] == 100
     assert deep_config["bayes_chains"] == 1
     catalog = services.advanced_models_catalog({"families": [{"key": "xg_shot_quality", "status": "active"}]})
-    assert {item["key"] for item in catalog} >= {
+    catalog_keys = {item["key"] for item in catalog}
+    assert catalog_keys >= {
         "xg_dixon_coles",
         "negative_binomial_dixon_coles",
         "dynamic_strength_kalman",
         "stacked_meta_mnlogit",
-        "bayesian_dynamic_poisson",
     }
+    assert "bayesian_dynamic_poisson" not in catalog_keys
 
 
 def test_bayesian_fit_progress_emits_heartbeat_and_cuda_context(monkeypatch):

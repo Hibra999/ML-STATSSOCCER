@@ -29,8 +29,6 @@ const DEFAULT_STAT_MODEL_KEYS = [
   "negative_binomial_dixon_coles",
   "dynamic_strength_kalman",
   "stacked_meta_mnlogit",
-  "bayesian_hierarchical_poisson",
-  "bayesian_dynamic_poisson",
 ];
 
 const jobLabels = {
@@ -655,7 +653,7 @@ function syncUpcomingPipelineControls() {
   const xgPanel = document.getElementById("upcoming-xg-panel");
   if (xgPanel) xgPanel.classList.toggle("hidden", !isXgLightgbm);
   const bayesToggle = document.querySelector(".advanced-bayes-toggle");
-  if (bayesToggle) bayesToggle.classList.toggle("hidden", !isAdvanced);
+  if (bayesToggle) bayesToggle.classList.add("hidden");
   const bayesProfile = document.getElementById("upcoming-bayes-profile");
   if (bayesProfile && isAdvanced && !bayesProfile.value) bayesProfile.value = "light";
   syncUpcomingRunButton(mode);
@@ -1335,7 +1333,6 @@ function renderAdvancedModelsReport(report) {
       ${reportSummaryCard("Fuentes", (dataStatus.active_sources || []).length || 0)}
       ${reportSummaryCard("Preflight", sourcePreflight.status_label || "Resuelto")}
       ${reportSummaryCard("Modelos", models.length || 0)}
-      ${reportSummaryCard("Bayes", summary.advanced_include_bayesian ? "Incluido" : "Ligero")}
       ${reportSummaryCard("Partidos", `${fixtures.length}/${summary.requested || 0}`)}
       ${reportSummaryCard("Guardado", report.report_path || "latest.json")}
     </div>

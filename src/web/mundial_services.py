@@ -151,11 +151,9 @@ ADVANCED_SCORE_MODEL_SEQUENCE = [
     DYNAMIC_STRENGTH_KALMAN_MODEL,
     STACKED_META_MNLOGIT_MODEL,
 ]
-ADVANCED_HEAVY_SCORE_MODEL_SEQUENCE = [
-    "bayesian_hierarchical_poisson",
-    "bayesian_dynamic_poisson",
-]
 BAYESIAN_SCORE_MODEL_KEYS = {"bayesian_hierarchical_poisson", "bayesian_dynamic_poisson"}
+DISABLED_REPORT_SCORE_MODEL_KEYS = set(BAYESIAN_SCORE_MODEL_KEYS)
+ADVANCED_HEAVY_SCORE_MODEL_SEQUENCE: List[str] = []
 SCORE_MODEL_FIT_HEARTBEAT_SECONDS = 2.0
 REPORT_BAYES_MAX_DRAWS = 100
 REPORT_BAYES_MAX_TUNE = 100
@@ -2064,7 +2062,11 @@ def xg_lightgbm_report(
 def active_advanced_score_model_sequence(config: Dict[str, Any]) -> List[str]:
     selected = config.get("selected_score_models")
     if isinstance(selected, list) and selected:
-        return [str(item) for item in selected if str(item)]
+        return [
+            str(item)
+            for item in selected
+            if str(item) and str(item) not in DISABLED_REPORT_SCORE_MODEL_KEYS
+        ]
     sequence = list(ADVANCED_SCORE_MODEL_SEQUENCE)
     include_bayes = bool(config.get("advanced_include_bayesian"))
     if include_bayes:
@@ -2088,13 +2090,15 @@ def selected_score_model_sequence(payload: Dict[str, Any] | None, include_heavy_
         normalized = re.sub(r"[^a-z0-9]+", "_", item.strip().lower()).strip("_")
         if normalized in {XG_LIGHTGBM_PIPELINE_MODE, "xg_light_gbm", "xg_lgbm", "lightgbm_xg", "lightgbm"}:
             continue
+        if normalized in DISABLED_REPORT_SCORE_MODEL_KEYS:
+            continue
         if normalized in SCORE_MODEL_KEYS:
             selected.append(normalized)
     if selected:
         return list(dict.fromkeys(selected))
     sequence = list(STATISTICAL_MODEL_CHECKLIST_SEQUENCE)
-    if include_heavy_default and "bayesian_hierarchical_poisson" not in sequence:
-        sequence.append("bayesian_hierarchical_poisson")
+    if include_heavy_default:
+        sequence.extend(ADVANCED_HEAVY_SCORE_MODEL_SEQUENCE)
     return list(dict.fromkeys(sequence))
 
 
@@ -2563,13 +2567,6 @@ def advanced_models_catalog(status: Dict[str, Any] | None = None) -> List[Dict[s
             "family": "stacking",
             "status": "active",
             "detail": "Meta-modelo MNLogit sobre probabilidades base y lambdas.",
-        },
-        {
-            "key": "bayesian_dynamic_poisson",
-            "label": score_model_display_label("bayesian_dynamic_poisson"),
-            "family": "bayesian_dynamic",
-            "status": "optional_heavy",
-            "detail": "PyMC dinamico disponible solo con perfil profundo o bandera explicita.",
         },
     ]
 
@@ -5334,7 +5331,9 @@ def report_pipeline_config(payload: Dict[str, Any], pipeline_mode: str) -> Dict[
     config["bayes_profile"] = str(payload.get("bayes_profile") or default_bayes_profile).strip().lower()
     config["sota_device"] = str(payload.get("sota_device") or "cuda").strip().lower()
     config["sota_calculation_mode"] = normalize_sota_calculation_mode(payload.get("sota_calculation_mode"))
-    config["advanced_include_bayesian"] = bool(payload.get("advanced_include_bayesian", DEFAULT_CONFIG["advanced_include_bayesian"]))
+    config["advanced_include_bayesian"] = False
+    if config["bayes_profile"] == "deep":
+        config["bayes_profile"] = "light"
     config["selected_score_models"] = (
         selected_score_model_sequence(payload, include_heavy_default=bool(payload.get("include_heavy_models", False)))
         if pipeline_mode == MODEL_CHECKLIST_PIPELINE_MODE
