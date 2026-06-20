@@ -1,105 +1,62 @@
 # ML-STATSSOCCER
 
-ML-STATSSOCCER es una aplicacion local para analisis y prediccion de partidos de futbol con modelos de Machine Learning. La interfaz principal es una aplicacion web que se ejecuta solo en `localhost`.
+ML-STATSSOCCER es un proyecto de analisis y prediccion de futbol con Python. Incluye una aplicacion web local, una app dedicada al Mundial 2026 y una CLI para automatizar tareas de datos, modelos y predicciones.
 
-## Mundial 2026 | ML-STATSSOCCER
+## Que Incluye
 
-**ML-STATSSOCCER Mundial 2026** es el modulo especializado para preparar, evaluar y publicar predicciones locales del Mundial 2026. Combina modelos estadisticos de goles, boosting moderno y reportes web reproducibles para analizar fixtures internacionales con cortes temporales estrictos y sin exponer la aplicacion fuera de `localhost`.
+- Gestion de ligas y datasets historicos.
+- Preparacion de datos, seleccion de variables y transformaciones estadisticas.
+- Entrenamiento y evaluacion de modelos de Machine Learning.
+- Prediccion de fixtures y resultados 1/X/2.
+- Analisis exploratorio, graficos e interpretabilidad.
+- Aplicacion independiente para simulacion y reportes del Mundial 2026.
+- CLI para flujos repetibles desde terminal.
+
+## Mundial 2026
 
 ![ML-STATSSOCCER Mundial 2026](src/web/static/img/worldcup-dashboard-bg.webp)
 
-### Tecnologias principales
+El modulo Mundial 2026 concentra el flujo internacional del proyecto: datos historicos, generacion de features, modelos estadisticos de goles, boosting moderno, backtesting temporal y reportes locales para fixtures del torneo.
+
+Capacidades principales:
+
+- Prediccion de partidos del Mundial 2026.
+- Modelos Poisson para goles y probabilidades de resultado.
+- Modelos avanzados con LightGBM, XGBoost, CatBoost y NGBoost.
+- Flujo xG + LightGBM para evaluacion de rendimiento.
+- Backtesting con separacion temporal de train, validacion y test.
+- Reportes web con metricas, tablas y simulaciones.
+
+## Stack Tecnico
 
 - Python 3.11.
-- FastAPI para la aplicacion web local.
-- pandas y NumPy para ETL, features y evaluacion.
-- scikit-learn para pipelines, metricas y validacion.
-- LightGBM como motor principal del flujo xG + boosting.
-- XGBoost, CatBoost y NGBoost para comparacion de modelos avanzados.
-- statsmodels para baselines estadisticos y variantes Poisson.
-- Optuna para busqueda controlada de hiperparametros.
-- CuPy/CUDA opcional para acelerar scoring cuando hay GPU compatible.
-- HTML, CSS y JavaScript para el dashboard local.
+- FastAPI y Uvicorn para la capa web.
+- pandas, NumPy, Polars y SciPy para procesamiento numerico.
+- scikit-learn, imbalanced-learn y Boruta para pipelines de ML.
+- LightGBM, XGBoost, CatBoost y NGBoost para modelos de boosting.
+- statsmodels, PyMC y CmdStanPy para modelos estadisticos.
+- TensorFlow/Keras para modelos neuronales.
+- Matplotlib, Seaborn y SHAP para analisis e interpretabilidad.
+- HTML, CSS y JavaScript para la interfaz.
+- pytest para pruebas.
 
-### Capacidades principales
-
-- Prediccion de fixtures del Mundial 2026 desde la aplicacion local.
-- Benchmark SOTA Poisson para resultados y distribuciones de goles.
-- Modelos avanzados de boosting para resultado 1/X/2 y mercados derivados.
-- Flujo xG + LightGBM con features balanceadas y evaluacion temporal.
-- Backtest automatico con train, validacion y test por ventana temporal.
-- Scoring acelerado con CUDA/CuPy cuando el entorno local lo soporta.
-- Reportes locales del Mundial con metricas, tablas y telemetria de runtime.
-
-### Flujo recomendado
-
-Iniciar la aplicacion independiente del Mundial 2026:
-
-```bash
-python mundial.py
-```
-
-Abrir en:
+## Estructura Del Proyecto
 
 ```text
-http://127.0.0.1:5052
+app.py                 Aplicacion web principal
+mundial.py             Aplicacion Mundial 2026
+cli.py                 Entrada de la CLI
+src/web/               Servidores, servicios y archivos estaticos
+src/worldcup/          Datos, features, modelos y simulacion Mundial
+src/models/            Modelos y entrenamiento
+src/preprocessing/     Preparacion y seleccion de datos
+src/network/           Descarga y scraping de datos
+src/analysis/          Analisis estadistico y graficos
+src/interpretability/  Explicabilidad de modelos
+tests/                 Suite de pruebas
+storage/               Cache y datos locales del proyecto
+screenshots/           Imagenes de referencia de la interfaz
 ```
-
-Features opcionales para Mundial desde API-Football:
-
-```bash
-export API_FOOTBALL_KEY="tu_api_key"
-python mundial.py
-```
-
-La app usa la cache local en `storage/worldcup/api_football/` y solo intenta descargar datos oficiales cuando se refresca el historial/ETL. Las features se construyen con corte temporal por fecha de partido para evitar leakage.
-
-### Costo computacional y CUDA
-
-El Bayes profundo fue desactivado del reporte web por costo computacional. CUDA sigue disponible para acelerar scoring con CuPy cuando el equipo local tiene una GPU compatible; si CuPy no puede iniciar correctamente, la aplicacion cae automaticamente a CPU/NumPy y lo muestra como `CPU fallback`.
-
-En una PC local con NVIDIA, este proyecto mantiene `numpy==1.26.4` por TensorFlow 2.15 y Numba, asi que no instales `cupy-cuda13x` sin version: puede resolver a CuPy 14 + NumPy 2.x. Para CUDA 13 usa CuPy CUDA 13 fijado a 13.6.0 y CUDA Toolkit/runtime 13.0.2, que es el runtime probado para CuPy 13.6 aunque el driver local reporte CUDA UMD 13.3.
-
-Antes de reinstalar, confirma que estas en el entorno donde ejecutas `python mundial.py` y revisa si hay paquetes CuPy/CUDA mezclados:
-
-```powershell
-python -c "import sys; print(sys.executable)"
-python -m pip freeze | findstr /I "cupy cuda nvidia numpy ml-dtypes"
-python -c "import cupy; cupy.show_config()"
-python -c "from src.worldcup.accelerators import cupy_runtime_status; import json; print(json.dumps(cupy_runtime_status(), indent=2))"
-```
-
-Si aparece mas de un paquete CuPy, `cupy-cuda12x` junto con `cupy-cuda13x`, o `cupy` compilado desde fuente, limpia el entorno y reinstala:
-
-```powershell
-python -m pip uninstall -y cupy cupy-cuda12x cupy-cuda13x cuda-toolkit cuda-pathfinder nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-cuda-nvcc nvidia-cuda-crt nvidia-cuda-cccl nvidia-nvvm nvidia-nvptxcompiler nvidia-nvjitlink nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse nvidia-nvfatbin numpy ml-dtypes
-python -m pip install -r requirements.txt --force-reinstall
-python -m pip install -r requirements-gpu-cuda13.txt --force-reinstall --no-cache-dir
-python -m pip check
-python -c "import numpy as np; print('numpy', np.__version__)"
-python -c "import cupy as cp; print('cupy', cp.__version__); cp.show_config(); print('gpus', cp.cuda.runtime.getDeviceCount()); print('probe', float(cp.sum(cp.arange(8, dtype=cp.float32)).get()))"
-```
-
-El probe correcto imprime `numpy 1.26.4`, `cupy 13.6.0`, al menos una GPU y `probe 28.0`. Despues arranca `python mundial.py` desde la misma terminal. La UI debe mostrar `Uso real: CUDA activo`, `score=cupy`, `Solicitado: CUDA` y `actual cuda`.
-
-Para CUDA 12.x usa `requirements-gpu-cuda12.txt`. No mezcles `cupy-cuda12x` y `cupy-cuda13x` en el mismo entorno. Si CuPy no puede cargar NVRTC o alguna DLL CUDA, la app cae automaticamente a CPU/NumPy y lo marca como `CPU fallback` en vez de detener el reporte. Si NVRTC sigue fallando con PyPI, instala NVIDIA CUDA Toolkit 13.0 en Windows y agrega `CUDA_PATH`/`PATH`, o usa `conda install -c conda-forge cupy cuda-version=13.0 -y` dentro del mismo entorno.
-
-## Caracteristicas
-
-- Gestion de ligas historicas.
-- Exploracion y exportacion de datasets.
-- Entrenamiento y evaluacion de modelos.
-- Prediccion automatica de futuros partidos desde scraping.
-- Analisis estadistico e interpretabilidad.
-- Configuracion local del navegador para scraping.
-
-## Requisitos
-
-- Python 3.11.
-- Navegador compatible para scraping, si se usa esa funcion: Chrome, Firefox, Edge o Brave.
-- Driver compatible con Selenium, si el navegador lo requiere.
-
-TensorFlow y sus dependencias son sensibles a la version de Python. Se recomienda usar un entorno virtual dedicado.
 
 ## Instalacion
 
@@ -109,106 +66,61 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-En Windows:
-
-```bat
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
 ## Ejecucion
 
-Iniciar la aplicacion web:
+Aplicacion principal:
 
 ```bash
 python app.py
 ```
 
-Abrir en el navegador:
+Abrir:
 
 ```text
 http://127.0.0.1:5050
 ```
 
-Para usar otro puerto:
+Aplicacion Mundial 2026:
 
 ```bash
-python app.py --port 5051
+python mundial.py
 ```
 
-Para la aplicacion independiente del Mundial 2026, usa el flujo de la seccion `Mundial 2026 | ML-STATSSOCCER`.
+Abrir:
 
-La aplicacion se enlaza a `127.0.0.1`. No esta pensada para exponerse publicamente.
+```text
+http://127.0.0.1:5052
+```
 
-## Uso Basico
-
-1. Crear o cargar una liga desde la seccion **Ligas**.
-2. Revisar el dataset desde **Datos**.
-3. Entrenar un modelo desde **Modelos**.
-4. Evaluar el rendimiento desde **Evaluar**.
-5. Generar predicciones desde **Predecir**.
-6. Crear graficos desde **Analisis**.
-
-Los procesos largos, como descargas, entrenamientos y graficos pesados, se ejecutan como procesos locales.
-
-## CLI Secundaria
-
-La CLI sigue disponible para automatizacion y tareas puntuales:
+CLI:
 
 ```bash
 python cli.py --help
-python cli.py league list --catalog
-python cli.py model list epl-2018
 ```
 
-Ejemplo de prediccion de fixtures:
+## Uso Basico
 
-```bash
-python cli.py predict fixtures epl-2018 \
-  --model xgb-result \
-  --date 2026-06-05 \
-  --filters all \
-  --output exports/fixtures.csv
-```
+1. Crear o cargar una liga.
+2. Revisar el dataset disponible.
+3. Entrenar un modelo.
+4. Evaluar metricas y rendimiento.
+5. Generar predicciones para fixtures.
+6. Revisar analisis, graficos e interpretabilidad.
 
 ## Modelos Soportados
 
-- NGBoost.
-- CatBoost.
 - LightGBM.
 - XGBoost.
+- CatBoost.
+- NGBoost.
+- Modelos clasicos de scikit-learn.
+- Modelos neuronales con TensorFlow/Keras.
+- Modelos estadisticos para goles y resultados.
 
-Objetivos disponibles:
+Objetivos principales:
 
 - `result`: resultado 1/X/2.
-- `over-under`: U/O 2.5.
-
-## Configuracion De Scraping
-
-La configuracion del navegador se encuentra en:
-
-```text
-storage/network/browser.json
-```
-
-Ejemplo:
-
-```json
-{
-  "application": "chrome",
-  "headless": true,
-  "brave_binary": ""
-}
-```
-
-`application` acepta `chrome`, `firefox`, `edge` o `brave`. Si se usa Brave y el sistema no detecta el ejecutable, indique la ruta en `brave_binary` o desde la seccion **Configuracion** de la interfaz web.
-
-Las banderas del catalogo se leen desde:
-
-```text
-storage/graphics/countries
-```
+- `over-under`: mercado U/O 2.5.
 
 ## Verificacion
 
@@ -217,9 +129,6 @@ python -m compileall app.py mundial.py cli.py install.py src
 python -m pytest tests -q
 ```
 
-## Notas De Seguridad
+## Licencia
 
-- No commitear entornos virtuales.
-- No commitear modelos privados, datasets sensibles, cookies ni perfiles de navegador.
-- La aplicacion es local y monousuario.
-- Los jobs en memoria se pierden al reiniciar el servidor; los archivos ya guardados permanecen en disco.
+Este proyecto usa licencia MIT. Ver [LICENSE.txt](LICENSE.txt).
