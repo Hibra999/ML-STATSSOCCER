@@ -3794,6 +3794,7 @@ def evaluate_score_model_walk_forward_2026(
     international_status = international_results_status() if feature_source is not None else None
     prefix_df = pre_eval_confirmed_df if pre_eval_confirmed_df is not None else pd.DataFrame()
     for fixture_index, (_, eval_row) in enumerate(confirmed_df.iterrows(), start=1):
+        progress_message = f"Backtest {score_model_display_label(model_key)}: {eval_row.get('Team 1', '')} vs {eval_row.get('Team 2', '')}"
         emit_report_progress(
             progress_callback,
             stage="backtesting",
@@ -3804,7 +3805,7 @@ def evaluate_score_model_walk_forward_2026(
             fixture_index=fixture_index,
             fixture_total=max(int(confirmed_df.shape[0]), 1),
             hardware=hardware,
-            message=f"Backtest {score_model_display_label(model_key)}: {eval_row.get('Team 1', '')} vs {eval_row.get('Team 2', '')}",
+            message=progress_message,
         )
         previous_frames = []
         if not prefix_df.empty:
@@ -3836,11 +3837,23 @@ def evaluate_score_model_walk_forward_2026(
         }
         if model_key != DEFAULT_SCORE_MODEL:
             try:
-                model = build_score_model(
-                    baseline_model,
-                    history_df=train_df,
-                    teams=teams,
-                    config=report_bayes_sampling_config({**config, "score_model": model_key}),
+                model = run_report_step_with_heartbeat(
+                    lambda: build_score_model(
+                        baseline_model,
+                        history_df=train_df,
+                        teams=teams,
+                        config=report_bayes_sampling_config({**config, "score_model": model_key}),
+                    ),
+                    progress_callback=progress_callback,
+                    stage="backtesting",
+                    start_time=start_time,
+                    model_index=model_index,
+                    model_total=max(model_total, 1),
+                    model_key=model_key,
+                    fixture_index=fixture_index,
+                    fixture_total=max(int(confirmed_df.shape[0]), 1),
+                    hardware=hardware,
+                    message=progress_message,
                 )
                 metadata = score_model_metadata(model)
             except Exception as exc:
@@ -3856,7 +3869,19 @@ def evaluate_score_model_walk_forward_2026(
                 }
         prediction_model = apply_recent_context_model(model, config)
         prediction_model = apply_benchmark_feature_model(prediction_model, model_key, feature_source, history_df=train_df)
-        row_metrics = score_model_backtest_prediction(prediction_model, eval_row, config)
+        row_metrics = run_report_step_with_heartbeat(
+            lambda: score_model_backtest_prediction(prediction_model, eval_row, config),
+            progress_callback=progress_callback,
+            stage="backtesting",
+            start_time=start_time,
+            model_index=model_index,
+            model_total=max(model_total, 1),
+            model_key=model_key,
+            fixture_index=fixture_index,
+            fixture_total=max(int(confirmed_df.shape[0]), 1),
+            hardware=hardware,
+            message=progress_message,
+        )
         if not row_metrics:
             continue
         row_metrics["sample"]["recent_matches_15"] = recent_matches_for_fixture(
@@ -5600,6 +5625,80 @@ def emit_report_progress(
         hardware=hardware,
         **extra,
     )
+
+
+def run_report_step_with_heartbeat(
+        fn,
+        *,
+        progress_callback,
+        stage: str,
+        start_time: float,
+        model_index: int,
+        model_total: int,
+        model_key: str,
+        fixture_index: int,
+        fixture_total: int,
+        hardware: Dict[str, Any],
+        message: str,
+        heartbeat_interval: float = SCORE_MODEL_FIT_HEARTBEAT_SECONDS,
+):
+    if progress_callback is None:
+        return fn()
+    stop_event = threading.Event()
+    started_at = time.monotonic()
+    pulse = {"count": 0}
+    interval = max(float(heartbeat_interval or 1.0), 0.01)
+    score_backend = str((hardware or {}).get("score_backend") or "")
+    requested_device = str((hardware or {}).get("requested_device") or "")
+    actual_device = str((hardware or {}).get("actual_device") or "")
+
+    def emit(phase: str, error: Exception | None = None) -> None:
+        elapsed = max(time.monotonic() - started_at, 0.0)
+        details = [f"heartbeat {int(max(interval, 1.0))}s"]
+        if score_backend:
+            details.append(f"score_backend={score_backend}")
+        if actual_device:
+            details.append(f"device={actual_device}")
+        if error is not None:
+            details.append(normalize_report_message(f"{error.__class__.__name__}: {error}"))
+        emit_report_progress(
+            progress_callback,
+            stage=stage,
+            start_time=start_time,
+            model_index=model_index,
+            model_total=model_total,
+            model_key=model_key,
+            fixture_index=fixture_index,
+            fixture_total=fixture_total,
+            hardware=hardware,
+            message=message,
+            progress_mode="backtest_heartbeat",
+            phase=phase,
+            last_state="backtesting activo" if error is None else "backtesting con error",
+            fit_elapsed_seconds=round(elapsed, 1),
+            pulse_index=int(pulse["count"]),
+            progress_detail="; ".join(detail for detail in details if detail),
+            requested_device=requested_device,
+            actual_device=actual_device,
+            score_backend=score_backend,
+        )
+
+    def heartbeat() -> None:
+        while not stop_event.wait(interval):
+            pulse["count"] += 1
+            emit("running")
+
+    thread = threading.Thread(target=heartbeat, name=f"worldcup-{stage}-{model_key}", daemon=True)
+    thread.start()
+    try:
+        return fn()
+    except Exception as exc:
+        pulse["count"] += 1
+        emit("error", error=exc)
+        raise
+    finally:
+        stop_event.set()
+        thread.join(timeout=0.2)
 
 
 def report_fixture_payload(fixture: Dict[str, Any]) -> Dict[str, Any]:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import traceback
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
@@ -27,6 +27,7 @@ class Job:
     progress: Any = field(default_factory=dict)
     error: str = ""
     traceback: str = ""
+    future: Future | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -62,7 +63,10 @@ class JobManager:
                 if active:
                     raise RuntimeError("Ya hay un entrenamiento Mundial en ejecucion. Espera a que termine antes de iniciar otro.")
             self._jobs[job_id] = job
-        self._executor.submit(self._run, job_id, fn, args, kwargs, with_progress)
+        future = self._executor.submit(self._run, job_id, fn, args, kwargs, with_progress)
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id].future = future
         return job.to_dict()
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
@@ -124,6 +128,15 @@ class JobManager:
             if updated_dt is None or now_dt is None:
                 continue
             if (now_dt - updated_dt).total_seconds() < JOB_STALE_TIMEOUT_SECONDS:
+                continue
+            future = job.future
+            if future is None:
+                continue
+            if future.running():
+                continue
+            if not future.done() and not future.cancel():
+                continue
+            if future.done() and not future.cancelled():
                 continue
             job.status = "failed"
             job.error = STALE_JOB_ERROR

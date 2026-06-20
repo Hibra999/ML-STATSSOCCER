@@ -634,11 +634,11 @@ def test_job_manager_rejects_duplicate_active_lock_key():
         manager._executor.shutdown(wait=True)
 
 
-def test_job_manager_expires_stale_active_lock_key():
+def test_job_manager_keeps_stale_running_lock_key_active():
     from datetime import datetime, timedelta, timezone
     from threading import Event
 
-    from src.web.jobs import JOB_STALE_TIMEOUT_SECONDS, STALE_JOB_ERROR, JobManager
+    from src.web.jobs import JOB_STALE_TIMEOUT_SECONDS, JobManager
 
     manager = JobManager(max_workers=1)
     started = Event()
@@ -655,16 +655,51 @@ def test_job_manager_expires_stale_active_lock_key():
         stale_time = datetime.now(timezone.utc) - timedelta(seconds=JOB_STALE_TIMEOUT_SECONDS + 5)
         with manager._lock:
             manager._jobs[first["job_id"]].updated_at = stale_time.isoformat()
-        expired = manager.get(first["job_id"])
-        assert expired["status"] == "failed"
-        assert expired["error"] == STALE_JOB_ERROR
+        still_running = manager.get(first["job_id"])
+        assert still_running["status"] == "running"
+        with pytest.raises(RuntimeError, match="Ya hay un entrenamiento Mundial"):
+            manager.submit("train again", lambda progress_callback=None: {"ok": True}, with_progress=True, lock_key="mundial-report")
         release.set()
+        first_job = wait_for_manager_job(manager, first["job_id"])
+        assert first_job["status"] == "succeeded"
         second = manager.submit("train again", lambda progress_callback=None: {"ok": True}, with_progress=True, lock_key="mundial-report")
         second_job = wait_for_manager_job(manager, second["job_id"])
         assert second_job["status"] == "succeeded"
     finally:
         release.set()
         manager._executor.shutdown(wait=True)
+
+
+def test_worldcup_backtest_step_heartbeat_emits_progress():
+    from src.web import mundial_services as services
+
+    progress = []
+
+    def slow_step():
+        time.sleep(0.03)
+        return {"ok": True}
+
+    result = services.run_report_step_with_heartbeat(
+        slow_step,
+        progress_callback=progress.append,
+        stage="backtesting",
+        start_time=time.monotonic(),
+        model_index=5,
+        model_total=9,
+        model_key="bivariate_poisson_mle",
+        fixture_index=30,
+        fixture_total=32,
+        hardware={"score_backend": "cupy", "requested_device": "cuda", "actual_device": "cuda"},
+        message="Backtest Poisson bivariado MLE: Scotland vs Morocco",
+        heartbeat_interval=0.01,
+    )
+
+    assert result == {"ok": True}
+    assert any(item.get("progress_mode") == "backtest_heartbeat" for item in progress)
+    assert progress[-1]["stage"] == "backtesting"
+    assert progress[-1]["model_key"] == "bivariate_poisson_mle"
+    assert progress[-1]["fixture_index"] == 30
+    assert progress[-1]["score_backend"] == "cupy"
 
 
 def test_worldcup_training_progress_prints_optuna_details(capsys):
