@@ -828,7 +828,7 @@ function xgLightgbmFixtureCardHtml(report) {
   return `<article class="client-fixture-card confidence-${escapeAttr(confidenceClass)}">
     <header>
       <span>${escapeHtml([fixture.date || "", fixture.time || ""].filter(Boolean).join(" · "))}</span>
-      <strong>${escapeHtml(fixture.group || "")}</strong>
+      <strong>${escapeHtml(fixture.group || fixture.round || "")}</strong>
     </header>
     ${fixtureCountdownHtml(fixture)}
     <div class="client-match-row">
@@ -1634,7 +1634,7 @@ function alternativeFixtureCardHtml(report) {
   return `<article class="client-fixture-card alternative-fixture-card">
     <header>
       <span>${escapeHtml([fixture.date || "", fixture.time || ""].filter(Boolean).join(" · "))}</span>
-      <strong>${escapeHtml(fixture.group || "")}</strong>
+      <strong>${escapeHtml(fixture.group || fixture.round || "")}</strong>
     </header>
     ${fixtureCountdownHtml(fixture)}
     <div class="client-match-row">
@@ -2088,7 +2088,7 @@ function clientFixtureCardHtml(report) {
   return `<article class="client-fixture-card confidence-${escapeAttr(confidenceClass)}">
     <header>
       <span>${escapeHtml([fixture.date || "", fixture.time || ""].filter(Boolean).join(" · "))}</span>
-      <strong>${escapeHtml(fixture.group || "")}</strong>
+      <strong>${escapeHtml(fixture.group || fixture.round || "")}</strong>
     </header>
     ${fixtureCountdownHtml(fixture)}
     <div class="client-match-row">
@@ -2332,7 +2332,7 @@ function reportFixtureCardHtml(report) {
   const consensusClass = ["Baja", ""].includes(consensus.strength || "") ? "low" : "";
   const warnings = report.warnings || [];
   return `<article class="upcoming-card report-fixture-card">
-    <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
+    <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || fixture.round || "")}</strong></header>
     ${fixtureCountdownHtml(fixture)}
     <div class="upcoming-match">
       <div class="upcoming-team">${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
@@ -2597,7 +2597,7 @@ function renderUpcomingPredictions(result) {
     ];
     const favorite = [...outcomes].sort((a, b) => Number(b.value || 0) - Number(a.value || 0))[0] || outcomes[0];
     return `<article class="upcoming-card">
-      <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
+      <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || fixture.round || "")}</strong></header>
       <div class="upcoming-match">
         <div class="upcoming-team">${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
         <span>vs</span>
@@ -2842,7 +2842,7 @@ function monteCarloMatchCardHtml(prediction) {
   ];
   const favorite = [...outcomes].sort((a, b) => Number(b.value || 0) - Number(a.value || 0))[0] || outcomes[0];
   return `<article class="upcoming-card monte-carlo-card">
-    <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || "")}</strong></header>
+    <header><span>${escapeHtml(fixture.date || "")}</span><strong>${escapeHtml(fixture.group || fixture.round || "")}</strong></header>
     <div class="upcoming-match">
       <div class="upcoming-team">${flagHtml(homeAsset)}<strong>${escapeHtml(fixture.home || "")}</strong></div>
       <span>vs</span>

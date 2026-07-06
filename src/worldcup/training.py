@@ -30,7 +30,7 @@ from src.cli.model_specs import MODEL_SPECS, normalize_model_key, tunable_param_
 from src.models.classifiers.boosting import catboost_device_params, lightgbm_device_params, xgboost_cuda_params
 from src.worldcup.accelerators import acceleration_status, import_optional_accelerator
 from src.worldcup.api_football_provider import api_football_feature_table, load_api_football_data
-from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, group_letter, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
+from src.worldcup.data import CACHE_ROOT, clean_team_name, fallback_tournament_2026, group_letter, is_unresolved_fixture_team, load_historical_matches, load_tournament_2026, tournament_fixtures_dataframe
 from src.worldcup.international_provider import (
     INTERNATIONAL_DATASET_SLUG,
     INTERNATIONAL_MATCHES_FILE,
@@ -2010,6 +2010,7 @@ def predict_match_payload(
             "id": str(fixture.get("No.", "")),
             "date": fixture.get("Fecha", ""),
             "time": fixture.get("Hora", ""),
+            "round": fixture.get("Ronda", ""),
             "group": fixture.get("Grupo", ""),
             "home": home_team,
             "away": away_team,
@@ -5740,8 +5741,8 @@ def completed_worldcup_training_rows(tournament: Dict[str, Any]) -> pd.DataFrame
         working["AG"].notna() &
         working["Equipo 1"].astype(str).str.len().gt(1) &
         working["Equipo 2"].astype(str).str.len().gt(1) &
-        ~working["Equipo 1"].astype(str).str.match(r"^[123W][A-Z0-9/]+$") &
-        ~working["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
+        ~working["Equipo 1"].map(is_unresolved_fixture_team) &
+        ~working["Equipo 2"].map(is_unresolved_fixture_team)
     ].copy()
     if working.empty:
         return pd.DataFrame(columns=["FixtureId", "Home", "Away", "HG", "AG", "Label", "OverUnder05", "OverUnder15", "OverUnder25", "OverUnder35", "Source"])
@@ -8879,7 +8880,12 @@ def resolved_model_meta_path(model_id: Optional[str]) -> Optional[Path]:
 
 def select_prediction_fixture(tournament: Dict[str, Any], fixture_id: Optional[Any] = None, home: Optional[str] = None, away: Optional[str] = None) -> pd.Series:
     fixtures = tournament_fixtures_dataframe(tournament)
-    fixtures = fixtures[fixtures["Grupo"].astype(str) != ""].copy()
+    fixtures = fixtures[
+        fixtures["Equipo 1"].astype(str).str.len().gt(1) &
+        fixtures["Equipo 2"].astype(str).str.len().gt(1) &
+        ~fixtures["Equipo 1"].map(is_unresolved_fixture_team) &
+        ~fixtures["Equipo 2"].map(is_unresolved_fixture_team)
+    ].copy()
     if fixture_id not in {"", None}:
         match = fixtures[fixtures["No."].astype(str) == str(fixture_id)]
         if not match.empty:
@@ -8899,6 +8905,17 @@ def select_prediction_fixture(tournament: Dict[str, Any], fixture_id: Optional[A
     if upcoming.empty:
         upcoming = fixtures[fixtures["_date"].notna()]
     if upcoming.empty:
+        if fixtures.empty:
+            return pd.Series({
+                "No.": fixture_id or "",
+                "Fecha": "",
+                "Hora": "",
+                "Ronda": "",
+                "Grupo": "",
+                "Equipo 1": str(home or ""),
+                "Equipo 2": str(away or ""),
+                "Sede": "",
+            })
         return fixtures.iloc[0]
     return upcoming.sort_values(["_date", "No."], kind="stable").iloc[0]
 
@@ -8906,7 +8923,7 @@ def select_prediction_fixture(tournament: Dict[str, Any], fixture_id: Optional[A
 def teams_from_tournament(tournament: Dict[str, Any]) -> List[str]:
     fixtures = tournament_fixtures_dataframe(tournament)
     teams = sorted(set(fixtures["Equipo 1"].dropna().astype(str)) | set(fixtures["Equipo 2"].dropna().astype(str)))
-    return [team for team in teams if team and not re.match(r"^[123W][A-Z0-9/]+$", team)]
+    return [team for team in teams if team and not is_unresolved_fixture_team(team)]
 
 
 def discover_dataset_files(root: Path) -> Iterable[Path]:

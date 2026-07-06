@@ -26,7 +26,7 @@ from src.worldcup import (
     lineups_table,
     load_historical_matches,
     load_players,
-    load_tournament_2026,
+    load_tournament_2026 as _load_tournament_2026,
     simulate_worldcup,
     teams_dataframe,
     tournament_fixtures_dataframe,
@@ -69,6 +69,7 @@ from src.worldcup.data import (
     fixture_results_status,
     group_letter,
     groups_from_tournament,
+    is_unresolved_fixture_team,
     refresh_worldcup_2026_results,
     team_name_key,
 )
@@ -913,10 +914,12 @@ LOCAL_FLAG_ALIASES = {
     "Curacao": "Curaçao",
 }
 _WORLD_CUP_RESULTS_AUTO_REFRESH_LOCK = threading.Lock()
+_WORLD_CUP_FIXTURES_AUTO_REFRESH_LOCK = threading.Lock()
 _WORLD_CUP_RESULTS_AUTO_REFRESHED = False
 _WORLD_CUP_RESULTS_AUTO_REFRESH_SUMMARY: Dict[str, Any] = {}
 _WORLD_CUP_RESULTS_AUTO_REFRESH_EXPIRES_AT: datetime | None = None
 _WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT: datetime | None = None
+_WORLD_CUP_FIXTURES_AUTO_REFRESH_RESULT: Tuple[Dict[str, Any], str] | None = None
 
 
 def _utcify_datetime(value: Any | None = None) -> datetime:
@@ -940,6 +943,33 @@ def _world_cup_fixture_autorefresh_stale(now: Any | None = None) -> bool:
         return True
     last = _utcify_datetime(_WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT)
     return current.date() != last.date()
+
+
+def load_tournament_2026(refresh: bool = False) -> Tuple[Dict[str, Any], str]:
+    global _WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT, _WORLD_CUP_FIXTURES_AUTO_REFRESH_RESULT
+    if refresh:
+        tournament, source = _load_tournament_2026(refresh=True)
+        _WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT = _utcify_datetime(_now_utc())
+        _WORLD_CUP_FIXTURES_AUTO_REFRESH_RESULT = (tournament, source)
+        return tournament, source
+
+    now = _now_utc()
+    if not _world_cup_fixture_autorefresh_stale(now):
+        if _WORLD_CUP_FIXTURES_AUTO_REFRESH_RESULT is not None:
+            return _WORLD_CUP_FIXTURES_AUTO_REFRESH_RESULT
+        return _load_tournament_2026(refresh=False)
+
+    with _WORLD_CUP_FIXTURES_AUTO_REFRESH_LOCK:
+        now = _now_utc()
+        if _world_cup_fixture_autorefresh_stale(now):
+            tournament, source = _load_tournament_2026(refresh=True)
+            _WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT = _utcify_datetime(now)
+            _WORLD_CUP_FIXTURES_AUTO_REFRESH_RESULT = (tournament, source)
+            return tournament, source
+        if _WORLD_CUP_FIXTURES_AUTO_REFRESH_RESULT is not None:
+            return _WORLD_CUP_FIXTURES_AUTO_REFRESH_RESULT
+
+    return _load_tournament_2026(refresh=False)
 
 
 def ensure_worldcup_results_autorefreshed_once(tournament: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -1431,6 +1461,7 @@ def poisson_match_payload(
             "id": str(fixture.get("No.", "")),
             "date": fixture.get("Fecha", ""),
             "time": fixture.get("Hora", ""),
+            "round": fixture.get("Ronda", ""),
             "group": fixture.get("Grupo", ""),
             "home": home_team,
             "away": away_team,
@@ -1476,6 +1507,7 @@ def resolve_prediction_fixture(tournament: Dict[str, Any], fixture_id: Any = Non
         "No.": fixture_id or "",
         "Fecha": "",
         "Hora": "",
+        "Ronda": "",
         "Grupo": "",
         "Equipo 1": str(home or ""),
         "Equipo 2": str(away or ""),
@@ -2422,7 +2454,8 @@ def xg_lightgbm_report_table_rows(fixture_reports: List[Dict[str, Any]]) -> List
         rows.append({
             "No.": fixture.get("id", ""),
             "Fecha": fixture.get("date", ""),
-            "Grupo": fixture.get("group", ""),
+            "Ronda": fixture.get("round", ""),
+            "Grupo": fixture.get("group", "") or fixture.get("round", ""),
             "Partido": fixture.get("label", ""),
             "Pipeline": XG_LIGHTGBM_PIPELINE_LABEL,
             "Modelo": model_probs.get("model_name", "") or model_probs.get("model_id", ""),
@@ -3563,11 +3596,10 @@ def confirmed_worldcup_2026_backtest_rows(tournament: Dict[str, Any]) -> pd.Data
     working["AG"] = pd.to_numeric(working["Goles 2"], errors="coerce")
     working = working[
         working["Fecha"].astype(str).str.len().gt(0)
-        & working["Grupo"].astype(str).str.len().gt(0)
         & working["Equipo 1"].astype(str).str.len().gt(1)
         & working["Equipo 2"].astype(str).str.len().gt(1)
-        & ~working["Equipo 1"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
-        & ~working["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
+        & ~working["Equipo 1"].map(is_unresolved_fixture_team)
+        & ~working["Equipo 2"].map(is_unresolved_fixture_team)
         & working["HG"].notna()
         & working["AG"].notna()
     ].copy()
@@ -3603,7 +3635,7 @@ def confirmed_worldcup_2026_backtest_rows(tournament: Dict[str, Any]) -> pd.Data
             "G1": int(fixture.get("HG")),
             "G2": int(fixture.get("AG")),
             "Round": fixture.get("Ronda", ""),
-            "Group": fixture.get("Grupo", ""),
+            "Group": fixture.get("Grupo", "") or fixture.get("Ronda", ""),
             "Source": fixture.get("Fuente Resultado", ""),
         })
     return pd.DataFrame(rows)
@@ -4741,7 +4773,8 @@ def alternatives_benchmark_table_rows(
         rows.append({
             "No.": fixture.get("id", ""),
             "Fecha": fixture.get("date", ""),
-            "Grupo": fixture.get("group", ""),
+            "Ronda": fixture.get("round", ""),
+            "Grupo": fixture.get("group", "") or fixture.get("round", ""),
             "Partido": fixture.get("label", ""),
             "Marcador #1": model.get("top_score", ""),
             "Marcador #1 %": model.get("top_score_probability", ""),
@@ -5022,6 +5055,7 @@ def upcoming_sota_fixture_reports(
                 "id": str(fixture.get("No.", "")),
                 "date": fixture.get("Fecha", ""),
                 "time": fixture.get("Hora", ""),
+                "round": fixture.get("Ronda", ""),
                 "group": fixture.get("Grupo", ""),
                 "home": str(fixture.get("Equipo 1", "")),
                 "away": str(fixture.get("Equipo 2", "")),
@@ -5709,6 +5743,7 @@ def report_fixture_payload(fixture: Dict[str, Any]) -> Dict[str, Any]:
         "id": str(fixture.get("id", "")),
         "date": fixture.get("date", ""),
         "time": fixture.get("time", ""),
+        "round": fixture.get("round", ""),
         "group": fixture.get("group", ""),
         "home": home,
         "away": away,
@@ -6425,7 +6460,8 @@ def upcoming_report_table_rows(fixture_reports: List[Dict[str, Any]]) -> List[Di
             rows.append({
                 "No.": fixture.get("id", ""),
                 "Fecha": fixture.get("date", ""),
-                "Grupo": fixture.get("group", ""),
+                "Ronda": fixture.get("round", ""),
+                "Grupo": fixture.get("group", "") or fixture.get("round", ""),
                 "Partido": fixture.get("label", ""),
                 "Consenso": consensus.get("outcome_label", ""),
                 "Fuerza": consensus.get("strength", ""),
@@ -6657,7 +6693,7 @@ def prediction_fixture_report_card_html(report: Dict[str, Any]) -> str:
     top_scores = primary.get("top_scores") or []
     return f"""
       <article class="fixture-card">
-        <header><span>{escape_report_html(fixture.get("date", ""))}</span><strong>{escape_report_html(fixture.get("group", ""))}</strong></header>
+        <header><span>{escape_report_html(fixture.get("date", ""))}</span><strong>{escape_report_html(fixture.get("group") or fixture.get("round") or "")}</strong></header>
         <h2>{escape_report_html(fixture.get("label", ""))}</h2>
         <div class="pick"><span>{escape_report_html(primary.get("model_label", ""))}</span><strong>{escape_report_html(decision.get("label", ""))} · {escape_report_html(decision.get("team", ""))}</strong></div>
         {outcome_bars_html(probabilities)}
@@ -6678,7 +6714,7 @@ def xg_lightgbm_prediction_fixture_report_card_html(report: Dict[str, Any]) -> s
     warning_html = "".join(f"<p>{escape_report_html(item)}</p>" for item in warnings)
     return f"""
       <article class="fixture-card">
-        <header><span>{escape_report_html(fixture.get("date", ""))}</span><strong>{escape_report_html(fixture.get("group", ""))}</strong></header>
+        <header><span>{escape_report_html(fixture.get("date", ""))}</span><strong>{escape_report_html(fixture.get("group") or fixture.get("round") or "")}</strong></header>
         <h2>{escape_report_html(fixture.get("label", ""))}</h2>
         <div class="pick"><span>{escape_report_html(model_probs.get("model_name") or "xG-LightGBM")}</span><strong>{escape_report_html(decision.get("label", ""))} · {escape_report_html(decision.get("team", ""))}</strong></div>
         {outcome_bars_html(probabilities)}
@@ -7097,6 +7133,7 @@ def monte_carlo_match_prediction(
             "id": str(fixture.get("No.", "")),
             "date": fixture.get("Fecha", ""),
             "time": fixture.get("Hora", ""),
+            "round": fixture.get("Ronda", ""),
             "group": fixture.get("Grupo", ""),
             "home": home_team,
             "away": away_team,
@@ -7164,7 +7201,8 @@ def monte_carlo_match_row(result: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "No.": fixture.get("id", ""),
         "Fecha": fixture.get("date", ""),
-        "Grupo": fixture.get("group", ""),
+        "Ronda": fixture.get("round", ""),
+        "Grupo": fixture.get("group", "") or fixture.get("round", ""),
         "Partido": f"{fixture.get('home', '')} vs {fixture.get('away', '')}",
         "MC 1 %": probs.get("home", ""),
         "MC X %": probs.get("draw", ""),
@@ -7193,21 +7231,16 @@ def _pct_count(count: int, total: int) -> float:
 
 def upcoming_fixture_rows(tournament: Dict[str, Any], group_filter: str = "") -> pd.DataFrame:
     df = tournament_fixtures_dataframe(tournament)
-    df = df[df["Grupo"].astype(str) != ""].copy()
     if group_filter:
         df = df[df["Grupo"].astype(str) == group_filter]
     df = df[
         df["Equipo 1"].astype(str).str.len().gt(1) &
         df["Equipo 2"].astype(str).str.len().gt(1) &
-        ~df["Equipo 1"].astype(str).str.match(r"^[123W][A-Z0-9/]+$") &
-        ~df["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
+        ~df["Equipo 1"].map(is_unresolved_fixture_team) &
+        ~df["Equipo 2"].map(is_unresolved_fixture_team)
     ].copy()
     df = attach_fixture_schedule(df)
     upcoming = future_fixture_rows(df)
-    if upcoming.empty:
-        upcoming = df[df["_date"].notna()]
-    if upcoming.empty:
-        upcoming = df
     return drop_internal_fixture_columns(upcoming.sort_values(["_sort_time", "No."], kind="stable"))
 
 
@@ -7222,7 +7255,8 @@ def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "No.": fixture.get("id", ""),
         "Fecha": fixture.get("date", ""),
-        "Grupo": fixture.get("group", ""),
+        "Ronda": fixture.get("round", ""),
+        "Grupo": fixture.get("group", "") or fixture.get("round", ""),
         "Partido": f"{fixture.get('home', '')} vs {fixture.get('away', '')}",
         "1 %": probs.get("home", ""),
         "X %": probs.get("draw", ""),
@@ -7611,9 +7645,10 @@ def local_flag_url(team: str) -> str:
 
 def fixture_overview_payload(fixture_df: pd.DataFrame) -> Dict[str, Any]:
     playable = fixture_df[
-        fixture_df["Grupo"].astype(str).str.len().gt(0) &
         fixture_df["Equipo 1"].astype(str).str.len().gt(1) &
-        fixture_df["Equipo 2"].astype(str).str.len().gt(1)
+        fixture_df["Equipo 2"].astype(str).str.len().gt(1) &
+        ~fixture_df["Equipo 1"].map(is_unresolved_fixture_team) &
+        ~fixture_df["Equipo 2"].map(is_unresolved_fixture_team)
     ].copy()
     if playable.empty:
         fallback = _opener_payload(fixture_df)

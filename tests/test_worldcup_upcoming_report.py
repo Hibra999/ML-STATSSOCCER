@@ -616,6 +616,9 @@ def test_xg_lightgbm_report_is_separate_prediction_pipeline(tmp_path, monkeypatc
 
 def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_consensus(tmp_path, monkeypatch):
     from src.web import mundial_services as services
+    import src.worldcup.data as worldcup_data
+
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc))
 
     class FakeModel:
         max_goals = 10
@@ -1731,6 +1734,89 @@ def test_autorefresh_de_resultados_no_queda_atrapado(tmp_path, monkeypatch):
     assert first == second_same_day
     assert first["provider"] == "test-provider"
     assert second_day["provider"] == "test-provider"
+
+
+def test_fixture_autorefresh_first_fixtures_load_even_when_refresh_false(monkeypatch):
+    from src.web import mundial_services as services
+    import src.worldcup.data as worldcup_data
+
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc))
+    calls: list[bool] = []
+    tournament = {
+        "matches": [
+            {"num": 93, "date": "2026-07-06", "time": "12:00 UTC+0", "round": "Round of 16", "team1": "Argentina", "team2": "France"},
+        ],
+    }
+
+    def fake_load_tournament(refresh=False):
+        calls.append(bool(refresh))
+        return tournament, f"test:refresh={bool(refresh)}"
+
+    monkeypatch.setattr(services, "_load_tournament_2026", fake_load_tournament)
+    monkeypatch.setattr(services, "ensure_worldcup_results_autorefreshed_once", lambda tournament: {})
+    monkeypatch.setattr(services, "_WORLD_CUP_FIXTURES_AUTO_REFRESH_EXPIRES_AT", None)
+    monkeypatch.setattr(services, "_WORLD_CUP_FIXTURES_AUTO_REFRESH_RESULT", None)
+
+    first = services.fixtures(refresh=False)
+    second = services.fixtures(refresh=False)
+
+    assert calls == [True]
+    assert first["source"] == "test:refresh=True"
+    assert second["source"] == "test:refresh=True"
+
+
+def test_upcoming_fixture_rows_includes_real_knockouts_and_skips_finished_or_placeholders(monkeypatch):
+    from src.web import mundial_services as services
+    import src.worldcup.data as worldcup_data
+
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc))
+    tournament = {
+        "matches": [
+            {"num": 72, "date": "2026-07-03", "round": "Round of 32", "team1": "Mexico", "team2": "USA", "score": {"ft": [1, 0]}},
+            {"num": 93, "date": "2026-07-06", "round": "Round of 16", "team1": "Argentina", "team2": "France"},
+            {"num": 98, "date": "2026-07-09", "round": "Quarter-final", "team1": "Brazil", "team2": "England"},
+            {"num": 99, "date": "2026-07-10", "round": "Quarter-final", "team1": "W93", "team2": "W94"},
+            {"num": 100, "date": "2026-07-10", "round": "Quarter-final", "team1": "L101", "team2": "Spain"},
+            {"num": 101, "date": "2026-07-10", "round": "Quarter-final", "team1": "1A", "team2": "3A/B/C/D/F"},
+        ],
+    }
+
+    upcoming = services.upcoming_fixture_rows(tournament)
+
+    assert upcoming[["Ronda", "Equipo 1", "Equipo 2"]].to_dict(orient="records") == [
+        {"Ronda": "Round of 16", "Equipo 1": "Argentina", "Equipo 2": "France"},
+        {"Ronda": "Quarter-final", "Equipo 1": "Brazil", "Equipo 2": "England"},
+    ]
+
+
+def test_confirmed_backtest_rows_include_scored_knockout_without_group(monkeypatch):
+    from src.web import mundial_services as services
+    import src.worldcup.data as worldcup_data
+
+    now = datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, now)
+    tournament = {
+        "matches": [
+            {
+                "num": 93,
+                "date": "2026-07-06",
+                "time": "12:00 UTC+0",
+                "round": "Round of 16",
+                "team1": "Argentina",
+                "team2": "France",
+                "score": {"ft": [2, 1]},
+            },
+        ],
+    }
+
+    fixture_df = worldcup_data.tournament_fixtures_dataframe(tournament)
+    finalizable = worldcup_data.finalizable_worldcup_2026_fixtures(fixture_df, now=now)
+    confirmed = services.confirmed_worldcup_2026_backtest_rows(tournament)
+
+    assert finalizable.shape[0] == 1
+    assert confirmed.shape[0] == 1
+    assert confirmed.iloc[0]["Round"] == "Round of 16"
+    assert confirmed.iloc[0]["Group"] == "Round of 16"
 
 
 def test_worldcup_results_refresh_falls_back_to_csv_when_fotmob_fails(tmp_path, monkeypatch):

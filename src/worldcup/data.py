@@ -27,6 +27,7 @@ PLAYERS_CACHE_FILE = CACHE_ROOT / "players_2026.csv"
 WIKIPEDIA_SQUADS_URL = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup_squads"
 RESULT_OVERRIDE_COLUMNS = ["date", "home", "away", "home_goals", "away_goals", "status", "source", "updated_at"]
 RESULT_REFRESH_PARTIAL_WARNING = "backtest parcial por fuente no disponible"
+UNRESOLVED_FIXTURE_TEAM_RE = re.compile(r"^(?:[123][A-Z](?:/[A-Z])*|[WL]\d+)$")
 TEAM_NAME_ALIASES = {
     "usa": "USA",
     "united states": "USA",
@@ -423,11 +424,10 @@ def finalizable_worldcup_2026_fixtures(fixture_df: pd.DataFrame, now: Any | None
     return working[
         working["_date"].notna()
         & (available_by_time | available_by_date | available_by_verified)
-        & working["Grupo"].astype(str).str.len().gt(0)
         & working["Equipo 1"].astype(str).str.len().gt(1)
         & working["Equipo 2"].astype(str).str.len().gt(1)
-        & ~working["Equipo 1"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
-        & ~working["Equipo 2"].astype(str).str.match(r"^[123W][A-Z0-9/]+$")
+        & ~working["Equipo 1"].map(is_unresolved_fixture_team)
+        & ~working["Equipo 2"].map(is_unresolved_fixture_team)
     ].copy()
 
 
@@ -1090,6 +1090,10 @@ def team_name_key(value: Any) -> str:
     key = _raw_team_name_key(text)
     canonical = TEAM_NAME_ALIASES.get(key)
     return _raw_team_name_key(canonical) if canonical else key
+
+
+def is_unresolved_fixture_team(value: Any) -> bool:
+    return bool(UNRESOLVED_FIXTURE_TEAM_RE.fullmatch(str(value or "").strip()))
 
 
 def team_name_similarity(expected: Any, candidate: Any) -> float:
