@@ -434,6 +434,12 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "Numba" not in app_source
     assert "trackWorldcupJob" in app_source
     assert "/api/jobs/${jobId}" in app_source
+    assert "maybeRenderUpcomingReportPreview" in app_source
+    assert "preview_report" in app_source
+    assert "preview_signature" in app_source
+    inherit_body = app_source[app_source.index("function inheritWorldcupRuntimeProgress"):app_source.index("function maybeRenderUpcomingReportPreview")]
+    assert "preview_report" in inherit_body
+    assert "preview_signature" in inherit_body
     assert "worldcup-training-progress" not in html_source
     assert "worldcup-training-progress" not in app_source
     assert 'if (kind !== "simulation") return' not in app_source
@@ -456,6 +462,8 @@ def test_mundial_ui_is_standalone_and_personalizable():
     assert "future-total-cards" in app_source
     assert "future-score-strip" in app_source
     assert "alternatives-model-list" in app_source
+    assert "selectedFixtureModelsHtml" in app_source
+    assert "Modelos seleccionados" in app_source
     assert "U/O 2.5" in app_source
     assert "finalizados detectados" in app_source
     assert "upcoming-benchmark-tuning-enabled" in html_source
@@ -535,7 +543,23 @@ def test_mundial_upcoming_report_endpoint_returns_job_and_progress(monkeypatch):
     def fake_predict_upcoming_report(payload, progress_callback=None):
         if progress_callback:
             progress_callback({
-                "stage": "predicting",
+                "stage": "predictions_ready",
+                "current": 2,
+                "total": 2,
+                "percent": 100,
+                "message": "Predicciones listas",
+                "preview_stage": "predictions_ready",
+                "preview_signature": "preview-1",
+                "preview_report": {
+                    "summary": {"preview": True, "backtest_status": "running", "pipeline_mode": "poisson_sota"},
+                    "fixture_reports": [{"models": [{"model_key": "independent_poisson"}]}],
+                    "table": {"columns": [], "rows": [], "total": 0},
+                    "model_backtests": [],
+                    "downloads": {},
+                },
+            })
+            progress_callback({
+                "stage": "backtesting",
                 "current": 1,
                 "total": 2,
                 "percent": 50,
@@ -564,6 +588,9 @@ def test_mundial_upcoming_report_endpoint_returns_job_and_progress(monkeypatch):
     assert job["status"] == "succeeded"
     assert job["progress"]["model_key"] == "dixon_coles_mle"
     assert job["progress"]["eta_seconds"] == 2
+    assert job["progress"]["preview_stage"] == "predictions_ready"
+    assert job["progress"]["preview_signature"] == "preview-1"
+    assert job["progress"]["preview_report"]["summary"]["backtest_status"] == "running"
     assert job["result"]["report_id"] == "fake-report"
 
 

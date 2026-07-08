@@ -1724,6 +1724,124 @@ def resolve_worldcup_sources_for_pipeline(
     return json_safe(result)
 
 
+def pending_backtest_model(model_sequence: Iterable[str]) -> Dict[str, Any]:
+    first_key = next((str(key) for key in model_sequence if str(key)), "")
+    return {
+        "available": False,
+        "model_key": first_key,
+        "model_label": score_model_display_label(first_key) if first_key else "",
+        "reason": "Benchmark en progreso.",
+        "selection_policy": "El ranking final se publica al terminar el backtesting.",
+    }
+
+
+def provisional_fixture_reports_for_backtest(
+        fixture_reports: List[Dict[str, Any]],
+        model_sequence: Iterable[str],
+        base_model: WorldCupModel | None = None,
+        fixtures: List[pd.Series] | None = None,
+        config: Dict[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    ordered_reports = rank_fixture_report_models(fixture_reports, list(model_sequence))
+    fixture_rows = fixtures or []
+    for index, fixture_report in enumerate(ordered_reports):
+        if base_model is not None and index < len(fixture_rows):
+            fixture_report["baseline_poisson"] = poisson_baseline_report_for_fixture(
+                base_model,
+                fixture_rows[index],
+                config or {},
+            )
+        models = [model for model in fixture_report.get("models", []) if isinstance(model, dict)]
+        primary = next((dict(model) for model in models if model.get("available", True)), dict(models[0]) if models else {})
+        if primary:
+            primary["primary"] = True
+            primary["selection_policy"] = "Benchmark en progreso: pick visual provisional del primer modelo seleccionado disponible."
+            fixture_report["primary_model"] = primary
+        else:
+            fixture_report["primary_model"] = {
+                "available": False,
+                "reason": "Sin modelos disponibles antes del backtesting.",
+                "selection_policy": "Benchmark en progreso.",
+            }
+        strip_consensus_fields_from_alternative_report(fixture_report)
+        fixture_report["warnings"] = fixture_report_warnings(fixture_report)
+    return ordered_reports
+
+
+def upcoming_preview_report(
+        summary: Dict[str, Any],
+        fixture_reports: List[Dict[str, Any]],
+        table: Dict[str, Any],
+        **extra,
+) -> Dict[str, Any]:
+    preview_summary = dict(summary or {})
+    generated_at = str(preview_summary.get("generated_at") or _now_utc().isoformat())
+    preview_summary.update({
+        "preview": True,
+        "backtest_status": "running",
+        "generated_at": generated_at,
+        "backtest_last_n": 0,
+        "backtest_auto_n": 0,
+        "backtest_range": empty_backtest_range(generated_at),
+        "backtest": {
+            "available": False,
+            "status": "running",
+            "evaluated_matches": 0,
+            "anti_leakage": "Benchmark en progreso.",
+        },
+    })
+    report = {
+        "created_at": generated_at,
+        "summary": preview_summary,
+        "fixture_reports": fixture_reports,
+        "table": table,
+        "model_backtests": [],
+        "downloads": {},
+        **extra,
+    }
+    return jsonable(report)
+
+
+def preview_report_signature(report: Dict[str, Any]) -> str:
+    payload = {
+        "summary": (report.get("summary") or {}),
+        "fixture_reports": report.get("fixture_reports") or [],
+        "table": report.get("table") or {},
+    }
+    return hashlib.sha256(json.dumps(jsonable(payload), sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+
+
+def emit_upcoming_report_preview(
+        progress_callback,
+        *,
+        report: Dict[str, Any],
+        start_time: float,
+        model_index: int,
+        model_total: int,
+        fixture_total: int,
+        hardware: Dict[str, Any],
+        message: str = "Predicciones listas; backtesting en progreso",
+) -> None:
+    if progress_callback is None:
+        return
+    preview = jsonable(report)
+    emit_report_progress(
+        progress_callback,
+        stage="predictions_ready",
+        start_time=start_time,
+        model_index=model_index,
+        model_total=max(model_total, 1),
+        model_key="",
+        fixture_index=max(fixture_total, 1),
+        fixture_total=max(fixture_total, 1),
+        hardware=hardware,
+        message=message,
+        preview_report=preview,
+        preview_signature=preview_report_signature(preview),
+        preview_stage="predictions_ready",
+    )
+
+
 def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_callback=None) -> Dict[str, Any]:
     payload = payload or {}
     pipeline_mode = normalize_report_pipeline_mode(payload.get("pipeline_mode"))
@@ -1825,6 +1943,50 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
                 *[str(item) for item in (report.get("monte_carlo_consensus") or {}).get("warnings", []) if str(item)],
             ])
     table = table_payload_from_records(upcoming_report_table_rows(fixture_reports), page=1, page_size=max(limit * 12, 1))
+    preview = upcoming_preview_report(
+        {
+            "pipeline_mode": pipeline_mode,
+            "pipeline_label": "Poisson + SOTA",
+            "requested": limit,
+            "returned": len(fixture_reports),
+            "group": group_filter or "Todos",
+            "fixture_source": fixture_source,
+            "history_source": history_source,
+            "poisson_recent_matches": config["poisson_recent_matches"],
+            "iterations": config["iterations"],
+            "seed": config["seed"],
+            "bayes_profile": config.get("bayes_profile", ""),
+            "sota_device": config.get("sota_device", "cuda"),
+            "sota_calculation_mode": config.get("sota_calculation_mode", "exact"),
+            "sota_calculation_label": sota_calculation_summary(config),
+            "monte_carlo_iterations": config["iterations"] if config.get("sota_calculation_mode") == "monte_carlo" else 0,
+            "score_models": model_sequence,
+            "pipeline_steps": sota_pipeline_steps(config),
+            "feature_source_warnings": unique_strings(feature_source.warnings),
+            "hardware": hardware,
+            "results_autorefresh": results_autorefresh,
+            "best_model": pending_backtest_model(model_sequence),
+            "statistical_audit": {"available": False, "evaluated_models": 0, "evaluated_matches": 0, "recommendations": [], "warnings": []},
+            "warnings": [],
+            "visible_warnings": [],
+            "technical_warnings": [],
+            "config": public_report_config(config),
+        },
+        fixture_reports,
+        table,
+        best_model=pending_backtest_model(model_sequence),
+        ranked_models=[],
+        statistical_audit={"available": False, "evaluated_models": 0, "evaluated_matches": 0, "recommendations": [], "warnings": []},
+    )
+    emit_upcoming_report_preview(
+        progress_callback,
+        report=preview,
+        start_time=start_time,
+        model_index=len(model_sequence),
+        model_total=len(model_sequence),
+        fixture_total=len(fixture_reports),
+        hardware=hardware,
+    )
     backtest = alternatives_backtest_report(
         history_df=feature_history_df,
         tournament=tournament,
@@ -1965,6 +2127,54 @@ def xg_lightgbm_report(
         fixture_reports.append(xg_lightgbm_fixture_report(prediction))
     table_rows = xg_lightgbm_report_table_rows(fixture_reports)
     table = table_payload_from_records(table_rows, page=1, page_size=max(len(table_rows), 1))
+    model_summary = xg_lightgbm_model_summary(model_meta)
+    source_preflight = config.get("_source_preflight", {}) if isinstance(config.get("_source_preflight", {}), dict) else {}
+    preview = upcoming_preview_report(
+        {
+            "pipeline_mode": XG_LIGHTGBM_PIPELINE_MODE,
+            "pipeline_label": XG_LIGHTGBM_PIPELINE_LABEL,
+            "requested": limit,
+            "returned": len(fixture_reports),
+            "group": group_filter or "Todos",
+            "fixture_source": fixture_source,
+            "history_source": history_source,
+            "poisson_recent_matches": config["poisson_recent_matches"],
+            "iterations": 0,
+            "seed": config["seed"],
+            "sota_device": "not_applicable",
+            "sota_calculation_mode": "not_applicable",
+            "sota_calculation_label": "Bundle ML xG-LightGBM",
+            "monte_carlo_iterations": 0,
+            "score_models": [XG_LIGHTGBM_PIPELINE_MODE],
+            "model_id": model_id,
+            "model": model_summary,
+            "model_device": model_summary.get("hardware", {}),
+            "hardware": hardware,
+            "results_autorefresh": results_autorefresh,
+            "source_preflight": source_preflight,
+            "best_model": pending_backtest_model([XG_LIGHTGBM_PIPELINE_MODE]),
+            "xg_backtest": {"status": "running", "evaluated_matches": 0},
+            "sota_backtest": {"status": "running", "evaluated_matches": 0},
+            "statistical_audit": {"available": False, "evaluated_models": 0, "evaluated_matches": 0, "recommendations": [], "warnings": []},
+            "warnings": [],
+            "visible_warnings": [],
+            "technical_warnings": [],
+            "config": public_report_config(config),
+        },
+        fixture_reports,
+        table,
+        best_model=pending_backtest_model([XG_LIGHTGBM_PIPELINE_MODE]),
+        statistical_audit={"available": False, "evaluated_models": 0, "evaluated_matches": 0, "recommendations": [], "warnings": []},
+    )
+    emit_upcoming_report_preview(
+        progress_callback,
+        report=preview,
+        start_time=start_time,
+        model_index=1,
+        model_total=1,
+        fixture_total=len(fixture_reports),
+        hardware=hardware,
+    )
     xg_backtest = xg_lightgbm_backtest_report(
         history_df=history_df,
         tournament=tournament,
@@ -1999,8 +2209,6 @@ def xg_lightgbm_report(
         for report in fixture_reports
         for warning in report.get("warnings", [])
     ]
-    model_summary = xg_lightgbm_model_summary(model_meta)
-    source_preflight = config.get("_source_preflight", {}) if isinstance(config.get("_source_preflight", {}), dict) else {}
     raw_warnings = unique_strings([
         *model_warnings,
         *hardware.get("warnings", []),
@@ -2185,6 +2393,68 @@ def advanced_models_report(
         feature_source=feature_source,
         progress_callback=progress_callback,
     )
+    fixture_reports = provisional_fixture_reports_for_backtest(
+        fixture_reports,
+        model_sequence,
+        base_model=base_model,
+        fixtures=fixture_records,
+        config=config,
+    )
+    preview_table_rows = alternatives_benchmark_table_rows(fixture_reports, {})
+    preview_table = table_payload_from_records(preview_table_rows, page=1, page_size=max(len(preview_table_rows), 1))
+    source_preflight = config.get("_source_preflight", {}) if isinstance(config.get("_source_preflight", {}), dict) else {}
+    feature_research = worldcup_feature_research_summary(feature_source)
+    preview = upcoming_preview_report(
+        {
+            "pipeline_mode": ADVANCED_MODELS_PIPELINE_MODE,
+            "pipeline_label": ADVANCED_MODELS_PIPELINE_LABEL,
+            "evidence_policy": "advanced_models_local_backtest_vs_poisson",
+            "requested": limit,
+            "returned": len(fixture_reports),
+            "group": group_filter or "Todos",
+            "fixture_source": fixture_source,
+            "history_source": history_source,
+            "poisson_recent_matches": config["poisson_recent_matches"],
+            "iterations": 0,
+            "seed": config["seed"],
+            "bayes_profile": config.get("bayes_profile", ""),
+            "advanced_include_bayesian": bool(config.get("advanced_include_bayesian")),
+            "sota_device": config.get("sota_device", "cuda"),
+            "sota_calculation_mode": "not_applicable",
+            "sota_calculation_label": "Familias avanzadas exactas",
+            "monte_carlo_iterations": 0,
+            "score_models": model_sequence,
+            "selected_score_models": model_sequence,
+            "advanced_data_status": data_status,
+            "advanced_models_catalog": advanced_models_catalog(data_status),
+            "feature_research": feature_research,
+            "statistical_audit": {"available": False, "evaluated_models": 0, "evaluated_matches": 0, "recommendations": [], "warnings": []},
+            "hardware": hardware,
+            "source_preflight": source_preflight,
+            "warnings": [],
+            "visible_warnings": [],
+            "technical_warnings": [],
+            "config": public_report_config(config),
+            "best_model": pending_backtest_model(model_sequence),
+        },
+        fixture_reports,
+        preview_table,
+        advanced_data_status=data_status,
+        advanced_models_catalog=advanced_models_catalog(data_status),
+        feature_research=feature_research,
+        ranked_models=advanced_models_catalog(data_status),
+        best_model=pending_backtest_model(model_sequence),
+        statistical_audit={"available": False, "evaluated_models": 0, "evaluated_matches": 0, "recommendations": [], "warnings": []},
+    )
+    emit_upcoming_report_preview(
+        progress_callback,
+        report=preview,
+        start_time=start_time,
+        model_index=len(model_sequence),
+        model_total=len(model_sequence),
+        fixture_total=len(fixture_reports),
+        hardware=hardware,
+    )
     backtest = alternatives_backtest_report(
         history_df=history_df,
         tournament=tournament,
@@ -2227,7 +2497,6 @@ def advanced_models_report(
             for warning in report.get("warnings", [])
         ],
     ])
-    source_preflight = config.get("_source_preflight", {}) if isinstance(config.get("_source_preflight", {}), dict) else {}
     warning_payload = merge_warning_payloads(
         public_warning_payload(raw_warnings, pipeline_mode=ADVANCED_MODELS_PIPELINE_MODE),
         source_preflight,
@@ -2262,7 +2531,7 @@ def advanced_models_report(
         "score_models": model_sequence,
         "advanced_data_status": data_status,
         "advanced_models_catalog": advanced_models_catalog(data_status),
-        "feature_research": worldcup_feature_research_summary(feature_source),
+        "feature_research": feature_research,
         "statistical_audit": {
             "available": statistical_audit.get("available", False),
             "evaluated_models": statistical_audit.get("evaluated_models", 0),
@@ -2810,7 +3079,79 @@ def alternatives_benchmark_report(
         feature_source=feature_source,
         progress_callback=progress_callback,
     )
-
+    fixture_reports = provisional_fixture_reports_for_backtest(
+        fixture_reports,
+        model_sequence,
+        base_model=base_model,
+        fixtures=fixture_records,
+        config=config,
+    )
+    preview_table_rows = alternatives_benchmark_table_rows(fixture_reports, {})
+    preview_table = table_payload_from_records(preview_table_rows, page=1, page_size=max(len(preview_table_rows), 1))
+    source_preflight = config.get("_source_preflight", {}) if isinstance(config.get("_source_preflight", {}), dict) else {}
+    feature_research = worldcup_feature_research_summary(feature_source)
+    preview_models = score_models_catalog_for_sequence(model_sequence)
+    preview = upcoming_preview_report(
+        {
+            "pipeline_mode": config.get("pipeline_mode") or ALTERNATIVES_BENCHMARK_PIPELINE_MODE,
+            "pipeline_label": pipeline_label,
+            "evidence_policy": evidence_policy,
+            "requested": limit,
+            "returned": len(fixture_reports),
+            "group": group_filter or "Todos",
+            "fixture_source": fixture_source,
+            "result_source": results_refresh.get("source", ""),
+            "results_refresh": results_refresh,
+            "history_source": history_source,
+            "poisson_recent_matches": config["poisson_recent_matches"],
+            "benchmark_tuning": tuning_summary,
+            "iterations": 0,
+            "seed": config["seed"],
+            "bayes_profile": config.get("bayes_profile", ""),
+            "sota_device": config.get("sota_device", "cuda"),
+            "sota_calculation_mode": "not_applicable",
+            "sota_calculation_label": "Modelos estadisticos individuales",
+            "monte_carlo_iterations": 0,
+            "score_models": model_sequence,
+            "selected_score_models": model_sequence,
+            "baseline_model": {
+                "key": DEFAULT_SCORE_MODEL,
+                "label": score_model_display_label(DEFAULT_SCORE_MODEL),
+                "role": "ranked_reference",
+            },
+            "hardware": hardware,
+            "source_preflight": source_preflight,
+            "warnings": [],
+            "visible_warnings": [],
+            "technical_warnings": [],
+            "config": public_report_config(config),
+            "best_model": pending_backtest_model(model_sequence),
+            "statistical_audit": {"available": False, "evaluated_models": 0, "evaluated_matches": 0, "recommendations": [], "warnings": []},
+            "feature_research": feature_research,
+        },
+        fixture_reports,
+        preview_table,
+        alternatives=preview_models,
+        ranked_models=preview_models,
+        baseline_context=sota_baseline_context(),
+        feature_research=feature_research,
+        baseline={
+            "key": DEFAULT_SCORE_MODEL,
+            "label": score_model_display_label(DEFAULT_SCORE_MODEL),
+            "role": "ranked_reference",
+        },
+        best_model=pending_backtest_model(model_sequence),
+        statistical_audit={"available": False, "evaluated_models": 0, "evaluated_matches": 0, "recommendations": [], "warnings": []},
+    )
+    emit_upcoming_report_preview(
+        progress_callback,
+        report=preview,
+        start_time=start_time,
+        model_index=len(model_sequence),
+        model_total=len(model_sequence),
+        fixture_total=len(fixture_reports),
+        hardware=hardware,
+    )
     backtest = alternatives_backtest_report(
         history_df=history_df,
         tournament=tournament,
@@ -2852,7 +3193,6 @@ def alternatives_benchmark_report(
             for warning in report.get("warnings", [])
         ],
     ])
-    source_preflight = config.get("_source_preflight", {}) if isinstance(config.get("_source_preflight", {}), dict) else {}
     warning_payload = merge_warning_payloads(
         public_warning_payload(raw_warnings, pipeline_mode=str(config.get("pipeline_mode") or ALTERNATIVES_BENCHMARK_PIPELINE_MODE)),
         source_preflight,
@@ -2915,7 +3255,7 @@ def alternatives_benchmark_report(
             "recommendations": statistical_audit.get("recommendations", []),
             "warnings": statistical_audit.get("warnings", []),
         },
-        "feature_research": worldcup_feature_research_summary(feature_source),
+        "feature_research": feature_research,
     }
     report = persist_upcoming_report({
         "created_at": generated_at,

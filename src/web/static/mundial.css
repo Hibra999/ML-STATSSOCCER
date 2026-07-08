@@ -3705,6 +3705,48 @@ h3 { font-size: 16px; }
   gap: 10px;
   min-width: 0;
 }
+.selected-fixture-models {
+  display: grid;
+  gap: 8px;
+}
+.fixture-model-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.fixture-model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px 58px 54px;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.fixture-model-row.active {
+  border-color: #9ed1ba;
+  background: #eef7f2;
+}
+.fixture-model-row strong {
+  min-width: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.fixture-model-row b {
+  color: var(--green);
+  text-align: right;
+}
+.fixture-model-row small {
+  min-width: 0;
+  color: var(--muted);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 .alternative-model-card {
   display: grid;
   gap: 10px;

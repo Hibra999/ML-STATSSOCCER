@@ -1487,13 +1487,14 @@ function renderAlternativesBenchmarkReport(report) {
   const range = summary.backtest_range || (summary.backtest || {}).backtest_range || {};
   const firstMatch = range.first_match || {};
   const lastMatch = range.last_match || {};
+  const benchmarkLabel = summary.preview || summary.backtest_status === "running" ? "Benchmark en progreso" : `${backtestAutoN} finalizados detectados`;
   document.getElementById("upcoming-summary").textContent =
-    `${summary.pipeline_label || "Benchmark alternativas"} - ${fixtures.length}/${summary.requested || 0} próximos - ${backtests.length} modelos - ${backtestAutoN} finalizados detectados - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()} - ${summary.report_id || report.report_id || ""}`;
+    `${summary.pipeline_label || "Benchmark alternativas"} - ${fixtures.length}/${summary.requested || 0} próximos - ${(summary.selected_score_models || summary.score_models || backtests).length} modelos - ${benchmarkLabel} - Poisson ultimos ${summary.poisson_recent_matches || currentPoissonRecentMatches()} - ${summary.report_id || report.report_id || ""}`;
   document.getElementById("upcoming-predictions").innerHTML = "";
   document.getElementById("upcoming-report").innerHTML = `
     <div class="report-summary-grid">
       ${reportSummaryCard("Modelo #1", best.available ? (best.model_label || best.model_key || "-") : "-")}
-      ${reportSummaryCard("Benchmark", `${backtestAutoN} evaluados`)}
+      ${reportSummaryCard("Benchmark", benchmarkLabel)}
       ${reportSummaryCard("Partidos próximos", `${fixtures.length}/${summary.requested || 0}`)}
       ${reportSummaryCard("Criterio", "Score de resultados")}
       ${reportSummaryCard("Primer evaluado", firstMatch.match || `${firstMatch.home || "-"} vs ${firstMatch.away || "-"}`)}
@@ -1521,13 +1522,18 @@ function alternativesBenchmarkHtml(report) {
   const lastMatch = range.last_match || {};
   const tuning = summary.benchmark_tuning || {};
   const tuningLabel = tuning.enabled && tuning.available ? ` · Optuna N=${tuning.best_poisson_recent_matches}` : "";
+  const selectedModels = summary.selected_score_models || summary.score_models || [];
+  const modelCount = rankedModels.length || backtests.length || selectedModels.length;
+  const benchmarkDetail = summary.preview || summary.backtest_status === "running"
+    ? "Benchmark en progreso"
+    : `${escapeHtml(backtestAutoN)} evaluados · ${escapeHtml(firstMatch.home || "-")} vs ${escapeHtml(firstMatch.away || "-")} a ${escapeHtml(lastMatch.home || "-")} vs ${escapeHtml(lastMatch.away || "-")} · generado ${escapeHtml(formatReportDateTime(range.generated_at || summary.generated_at))}${escapeHtml(tuningLabel)}`;
   return `<section class="client-report-shell">
     <header>
       <div>
         <h3>Score de resultados 2026</h3>
-        <small>${escapeHtml(backtestAutoN)} evaluados · ${escapeHtml(firstMatch.home || "-")} vs ${escapeHtml(firstMatch.away || "-")} a ${escapeHtml(lastMatch.home || "-")} vs ${escapeHtml(lastMatch.away || "-")} · generado ${escapeHtml(formatReportDateTime(range.generated_at || summary.generated_at))}${escapeHtml(tuningLabel)}</small>
+        <small>${benchmarkDetail}</small>
       </div>
-      <span>${escapeHtml(rankedModels.length || backtests.length)} modelo${(rankedModels.length || backtests.length) === 1 ? "" : "s"}</span>
+      <span>${escapeHtml(modelCount)} modelo${modelCount === 1 ? "" : "s"}</span>
     </header>
     ${bestAlternativeHtml(best)}
     ${featureResearchHtml(summary.feature_research || report.feature_research || {})}
@@ -1552,8 +1558,9 @@ function alternativesBenchmarkHtml(report) {
 function bestAlternativeHtml(best) {
   const item = best || {};
   if (!item.available) {
+    const pending = String(item.reason || "").toLowerCase().includes("benchmark en progreso");
     return `<section class="report-panel">
-      <header><strong>Modelo #1</strong><small>No disponible</small></header>
+      <header><strong>Modelo #1</strong><small>${escapeHtml(pending ? "Benchmark en progreso" : "No disponible")}</small></header>
       <p>${escapeHtml(item.reason || "El backtest no devolvio un modelo evaluable.")}</p>
     </section>`;
   }
@@ -1643,6 +1650,7 @@ function alternativeFixtureCardHtml(report) {
       <div>${flagHtml(awayAsset)}<strong>${escapeHtml(fixture.away || "")}</strong></div>
     </div>
     ${topRankedFixturePickHtml(leader, fixture)}
+    ${selectedFixtureModelsHtml(report)}
     ${recentMatches15DrawerHtml(report.recent_matches_15, fixture)}
   </article>`;
 }
@@ -1664,7 +1672,7 @@ function topRankedFixturePickHtml(model, fixture) {
     </section>`;
   }
   return `<section class="future-prediction-panel top-ranked-pick">
-    <header><strong>Pronóstico visual</strong><small>${escapeHtml(item.model_label || item.model_key || "Modelo #1")}</small></header>
+    <header><strong>Pronóstico visual</strong><small>${escapeHtml(item.selection_policy || item.model_label || item.model_key || "Modelo #1")}</small></header>
     <div class="future-pick-ribbon">
       <span>Pick 1X2</span>
       <strong>${escapeHtml(pickLabel)} · ${escapeHtml(pickTeam || "-")}</strong>
@@ -1674,6 +1682,34 @@ function topRankedFixturePickHtml(model, fixture) {
     ${modelOverUnderProbabilitiesHtml(probs, item.totals || {})}
     ${futureTopScoresHtml(topScores)}
   </section>`;
+}
+
+function selectedFixtureModelsHtml(report) {
+  const models = (report && report.models) || [];
+  if (!models.length) return "";
+  const primaryKey = ((report.primary_model || {}).model_key || "");
+  return `<section class="report-panel selected-fixture-models">
+    <header><strong>Modelos seleccionados</strong><small>Pick provisional hasta cerrar benchmark</small></header>
+    <div class="fixture-model-list">
+      ${models.map((model) => selectedFixtureModelRowHtml(model, primaryKey)).join("")}
+    </div>
+  </section>`;
+}
+
+function selectedFixtureModelRowHtml(model, primaryKey) {
+  const item = model || {};
+  const decision = item.decision || {};
+  const probs = item.probabilities || {};
+  const outcome = decision.outcome || strongestOutcomeFromProbabilities(probs);
+  const confidence = probs[outcome] ?? Math.max(Number(probs.home || 0), Number(probs.draw || 0), Number(probs.away || 0));
+  const topScore = item.top_score || (((item.top_scores || [])[0] || {}).score) || "-";
+  const active = primaryKey && item.model_key === primaryKey;
+  return `<div class="fixture-model-row ${escapeAttr(active ? "active" : "")}">
+    <strong>${escapeHtml(item.model_label || item.model_key || "")}</strong>
+    <span>${escapeHtml(decision.label || outcomeLabel(outcome) || "-")}</span>
+    <b>${escapeHtml(formatProbability(confidence))}%</b>
+    <small>${escapeHtml(topScore)}</small>
+  </div>`;
 }
 
 function modelOutcomeProbabilitiesHtml(probabilities, activeOutcome, fixture) {
@@ -1734,10 +1770,12 @@ function formatProbability(value) {
 
 function benchmarkEvaluatedCount(summary) {
   const data = summary || {};
+  if (data.preview || data.backtest_status === "running") return 0;
   return data.backtest_auto_n ?? (data.backtest || {}).evaluated_matches ?? 0;
 }
 
 function benchmarkEvaluatedLabel(summary) {
+  if ((summary || {}).preview || (summary || {}).backtest_status === "running") return "Benchmark en progreso";
   return `${benchmarkEvaluatedCount(summary)} evaluados`;
 }
 
@@ -1753,9 +1791,25 @@ function pipelineBenchmarkSectionHtml(report, options = {}) {
   const last = range.last_match || {};
   const title = options.title || "Benchmark automático";
   const detail = options.detail || "Evaluación walk-forward desde 11/06/2026 hasta un minuto antes de ejecutar.";
+  const benchmarkRunning = summary.preview || summary.backtest_status === "running";
   const statusClass = backtests.length && Number(evaluated) > 0 ? "pipeline-ready" : "pipeline-fallback";
   const bestLabel = best.available ? (best.model_label || best.model_key || "Modelo evaluado") : "Sin ganador";
   const source = summary.backtest_source || backtestSummary.source || summary.result_source || "";
+  if (benchmarkRunning && (!backtests.length || Number(evaluated) <= 0)) {
+    return `<section class="pipeline-benchmark-section ${escapeAttr(statusClass)}">
+      <header class="pipeline-benchmark-head">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <small>${escapeHtml(detail)}</small>
+        </div>
+        <span>En progreso</span>
+      </header>
+      <div class="pipeline-benchmark-empty-state">
+        <strong>Benchmark en progreso</strong>
+        <small>Las predicciones ya estan listas; el ranking y las descargas aparecen cuando termine el backtesting.</small>
+      </div>
+    </section>`;
+  }
   if (!backtests.length || Number(evaluated) <= 0) {
     return `<section class="pipeline-benchmark-section ${escapeAttr(statusClass)}">
       <header class="pipeline-benchmark-head">
@@ -2924,6 +2978,7 @@ async function pollWorldcupJobs() {
         job.kind = previous.kind;
         job.handled = previous.handled;
         applyWorldcupJobPollState(job, previous);
+        maybeRenderUpcomingReportPreview(job, previous);
         if (isTerminalJob(job) && !job.handled) {
           job.handled = true;
           state.jobs.set(jobId, job);
@@ -2980,7 +3035,29 @@ function inheritWorldcupRuntimeProgress(job, previous) {
       progress[key] = previousProgress[key];
     }
   });
+  ["preview_report", "preview_signature", "preview_stage"].forEach((key) => {
+    if ((progress[key] === undefined || progress[key] === null || progress[key] === "") && previousProgress[key]) {
+      progress[key] = previousProgress[key];
+    }
+  });
   job.progress = progress;
+}
+
+function maybeRenderUpcomingReportPreview(job, previous = {}) {
+  if (!job || job.kind !== "upcoming-report") return;
+  const progress = job.progress || {};
+  const preview = progress.preview_report || {};
+  const signature = progress.preview_signature || "";
+  if (!signature || !Object.keys(preview).length) {
+    job.previewRenderedSignature = previous.previewRenderedSignature || "";
+    return;
+  }
+  if (signature === previous.previewRenderedSignature) {
+    job.previewRenderedSignature = previous.previewRenderedSignature;
+    return;
+  }
+  renderUpcomingReport(preview);
+  job.previewRenderedSignature = signature;
 }
 
 function worldcupJobProgressSignature(job) {
@@ -3006,6 +3083,8 @@ function worldcupJobProgressSignature(job) {
     progress.score_backend ?? "",
     progress.actual_device ?? "",
     progress.iterations_per_second ?? "",
+    progress.preview_signature ?? "",
+    progress.preview_stage ?? "",
     job.updated_at || "",
   ].join("|");
 }
@@ -3045,6 +3124,7 @@ async function handleWorldcupJobComplete(job) {
   setWorldcupJobBusy(job.kind, false);
   renderWorldcupJobProgress(job.kind);
   if (job.status === "failed") {
+    maybeRenderUpcomingReportPreview(job);
     showError(job.error || "Proceso fallido");
     return;
   }

@@ -732,6 +732,23 @@ def test_alternatives_benchmark_report_returns_predictions_backtest_and_no_conse
         progress_callback=progress.append,
     )
 
+    preview_events = [(index, item) for index, item in enumerate(progress) if item.get("preview_report")]
+    assert preview_events
+    first_backtest_index = next(index for index, item in enumerate(progress) if item.get("stage") == "backtesting")
+    preview_index, preview_event = preview_events[0]
+    assert preview_index < first_backtest_index
+    assert preview_event["preview_stage"] == "predictions_ready"
+    assert preview_event["preview_signature"]
+    preview = preview_event["preview_report"]
+    assert preview["summary"]["preview"] is True
+    assert preview["summary"]["backtest_status"] == "running"
+    assert preview["downloads"] == {}
+    assert preview["model_backtests"] == []
+    assert len(preview["fixture_reports"]) == 1
+    assert [model["model_key"] for model in preview["fixture_reports"][0]["models"]] == services.BENCHMARK_SCORE_MODEL_SEQUENCE
+    assert preview["fixture_reports"][0]["primary_model"]["model_key"] == services.BENCHMARK_SCORE_MODEL_SEQUENCE[0]
+    assert preview["table"]["total"] == 1
+
     assert result["summary"]["pipeline_mode"] == "alternatives_benchmark"
     assert result["summary"]["pipeline_label"] == "Benchmark alternativas"
     assert result["summary"]["evidence_policy"] == "local_backtest_vs_poisson"

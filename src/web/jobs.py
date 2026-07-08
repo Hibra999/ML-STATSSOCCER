@@ -112,6 +112,11 @@ class JobManager:
             if result is not None:
                 job.result = result
             if progress is not None:
+                if isinstance(progress, dict) and isinstance(job.progress, dict):
+                    progress = dict(progress)
+                    for key in ("preview_report", "preview_signature", "preview_stage"):
+                        if key not in progress and key in job.progress:
+                            progress[key] = job.progress[key]
                 job.progress = progress
             if error is not None:
                 job.error = error
