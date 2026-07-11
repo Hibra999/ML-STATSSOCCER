@@ -13,13 +13,20 @@ def _patch_worldcup_results_file(monkeypatch, tmp_path):
     import src.worldcup.data as worldcup_data
 
     results_path = tmp_path / "worldcup_2026_results.csv"
+    overlay_path = tmp_path / "worldcup_2026_fixture_overlay.csv"
     original_load = worldcup_data.load_worldcup_results_override
+    original_overlay_load = worldcup_data.load_worldcup_fixture_overlay
 
     def load_override(path=None):
         return original_load(path or results_path)
 
+    def load_overlay(path=None):
+        return original_overlay_load(path or overlay_path)
+
     monkeypatch.setattr(worldcup_data, "WORLD_CUP_2026_RESULTS_FILE", results_path)
+    monkeypatch.setattr(worldcup_data, "WORLD_CUP_2026_FIXTURE_OVERLAY_FILE", overlay_path)
     monkeypatch.setattr(worldcup_data, "load_worldcup_results_override", load_override)
+    monkeypatch.setattr(worldcup_data, "load_worldcup_fixture_overlay", load_overlay)
     return worldcup_data, results_path
 
 
@@ -1806,6 +1813,37 @@ def test_upcoming_fixture_rows_includes_real_knockouts_and_skips_finished_or_pla
     ]
 
 
+def test_results_refresh_resolves_unresolved_knockout_overlay_from_fotmob(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+    import src.worldcup.fotmob_provider as fotmob_provider
+
+    worldcup_data, _ = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc))
+    tournament = {
+        "matches": [
+            {"num": 99, "date": "2026-07-11", "time": "12:00 UTC+0", "round": "Quarter-final", "team1": "W91", "team2": "W92"},
+        ],
+    }
+    monkeypatch.setattr(
+        fotmob_provider,
+        "fotmob_get_json",
+        lambda url, params=None: {"matches": [_fotmob_event(9901, "Argentina", "France", 0, 0, finished=False)]},
+    )
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_fixture_overlay_rows", lambda unresolved, warnings: [])
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", lambda working, warnings: [])
+
+    refresh = worldcup_data.refresh_worldcup_2026_results(tournament, refresh=True)
+    fixture_df = worldcup_data.tournament_fixtures_dataframe(tournament)
+    upcoming = services.upcoming_fixture_rows(tournament)
+
+    assert refresh["fixture_overlay_rows"] == 1
+    assert refresh["unresolved_fixture_rows"] == 1
+    assert fixture_df.iloc[0]["Equipo 1"] == "Argentina"
+    assert fixture_df.iloc[0]["Equipo 2"] == "France"
+    assert upcoming.iloc[0]["Equipo 1"] == "Argentina"
+    assert upcoming.iloc[0]["Equipo 2"] == "France"
+
+
 def test_confirmed_backtest_rows_include_scored_knockout_without_group(monkeypatch):
     from src.web import mundial_services as services
     import src.worldcup.data as worldcup_data
@@ -2178,6 +2216,35 @@ def test_worldcup_results_refresh_updates_conflicting_local_result(tmp_path, mon
     assert int(stored["away_goals"]) == 2
 
 
+def test_worldcup_results_refresh_preserves_manual_csv_conflict(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+    import src.worldcup.fotmob_provider as fotmob_provider
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    _freeze_worldcup_now(monkeypatch, services, worldcup_data, datetime(2026, 6, 14, 23, 0, tzinfo=timezone.utc))
+    pd.DataFrame([
+        {"date": "2026-06-14", "home": "England", "away": "Argentina", "home_goals": 2, "away_goals": 0, "status": "final", "source": "manual", "updated_at": "2026-06-14T22:00:00+00:00"},
+    ], columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+    tournament = {
+        "matches": [
+            {"num": 1, "date": "2026-06-14", "time": "12:00 UTC+0", "team1": "England", "team2": "Argentina", "group": "Group A"},
+        ],
+    }
+    monkeypatch.setattr(
+        fotmob_provider,
+        "fotmob_get_json",
+        lambda url, params=None: {"matches": [_fotmob_event(401, "England", "Argentina", 0, 2)]},
+    )
+    monkeypatch.setattr(worldcup_data, "fetch_sofascore_worldcup_result_rows", lambda working, warnings: [])
+
+    refresh = worldcup_data.refresh_worldcup_2026_results(tournament, refresh=True)
+    stored = pd.read_csv(results_path).iloc[0]
+
+    assert refresh["conflicts"][0]["resolved_source"] == "manual"
+    assert int(stored["home_goals"]) == 2
+    assert int(stored["away_goals"]) == 0
+
+
 def test_verified_local_rows_wait_until_result_is_available(tmp_path, monkeypatch):
     from src.web import mundial_services as services
 
@@ -2378,6 +2445,34 @@ def test_recent_matches_for_fixture_uses_international_results_when_provided(mon
     assert "Torneo" in html
     assert "Peso" in html
     assert "Oficial" in html
+
+
+def test_recent_context_matches_adds_confirmed_2026_rows_without_leakage(tmp_path, monkeypatch):
+    from src.web import mundial_services as services
+    from src.worldcup.international_provider import normalize_international_matches
+
+    worldcup_data, results_path = _patch_worldcup_results_file(monkeypatch, tmp_path)
+    pd.DataFrame([
+        {"date": "2026-06-11", "home": "Mexico", "away": "Canada", "home_goals": 1, "away_goals": 0, "status": "final", "source": "manual", "updated_at": "2026-06-11T23:00:00+00:00"},
+        {"date": "2026-06-12", "home": "Mexico", "away": "USA", "home_goals": 2, "away_goals": 1, "status": "final", "source": "manual", "updated_at": "2026-06-12T23:00:00+00:00"},
+        {"date": "2026-06-13", "home": "Brazil", "away": "Mexico", "home_goals": 0, "away_goals": 3, "status": "final", "source": "manual", "updated_at": "2026-06-13T23:00:00+00:00"},
+    ], columns=worldcup_data.RESULT_OVERRIDE_COLUMNS).to_csv(results_path, index=False)
+    base = normalize_international_matches(pd.DataFrame([
+        {"date": "2026-06-01", "home_team": "Mexico", "away_team": "Japan", "home_score": 1, "away_score": 1, "tournament": "Friendly", "neutral": True},
+        {"date": "2026-06-02", "home_team": "Mexico", "away_team": "France", "home_score": 0, "away_score": 2, "tournament": "Friendly", "neutral": True},
+    ]))
+
+    mixed = services.recent_context_matches_for_tournament({"matches": []}, base_matches=base)
+    future_fixture = pd.Series({"Fecha": "2026-06-14", "Equipo 1": "Mexico", "Equipo 2": "USA"})
+    backtest_fixture = pd.Series({"Fecha": "2026-06-12", "Equipo 1": "Mexico", "Equipo 2": "USA"})
+
+    future_recent = services.recent_matches_for_fixture(pd.DataFrame(), future_fixture, limit=3, international_matches=mixed)
+    backtest_recent = services.recent_matches_for_fixture(pd.DataFrame(), backtest_fixture, limit=5, international_matches=mixed)
+
+    assert mixed.attrs["worldcup_2026_context_rows"] == 3
+    assert [row["date"] for row in future_recent["home"]] == ["2026-06-13", "2026-06-12", "2026-06-11"]
+    assert all(row["date"] < "2026-06-12" for row in backtest_recent["home"])
+    assert [row["date"] for row in backtest_recent["home"]] == ["2026-06-11", "2026-06-02", "2026-06-01"]
 
 
 def test_benchmark_feature_context_uses_only_pre_match_history(monkeypatch):

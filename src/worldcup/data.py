@@ -22,10 +22,12 @@ HISTORY_YEARS = (
 )
 CACHE_ROOT = Path("storage") / "worldcup" / "cache"
 WORLD_CUP_2026_RESULTS_FILE = CACHE_ROOT / "worldcup_2026_results.csv"
+WORLD_CUP_2026_FIXTURE_OVERLAY_FILE = CACHE_ROOT / "worldcup_2026_fixture_overlay.csv"
 PLAYERS_LOCAL_FILE = Path("storage") / "worldcup" / "players_2026.csv"
 PLAYERS_CACHE_FILE = CACHE_ROOT / "players_2026.csv"
 WIKIPEDIA_SQUADS_URL = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup_squads"
 RESULT_OVERRIDE_COLUMNS = ["date", "home", "away", "home_goals", "away_goals", "status", "source", "updated_at"]
+FIXTURE_OVERLAY_COLUMNS = ["num", "date", "home", "away", "source", "updated_at"]
 RESULT_REFRESH_PARTIAL_WARNING = "backtest parcial por fuente no disponible"
 UNRESOLVED_FIXTURE_TEAM_RE = re.compile(r"^(?:[123][A-Z](?:/[A-Z])*|[WL]\d+)$")
 TEAM_NAME_ALIASES = {
@@ -285,6 +287,34 @@ def load_worldcup_results_override(path: Path = WORLD_CUP_2026_RESULTS_FILE) -> 
     return output[RESULT_OVERRIDE_COLUMNS].reset_index(drop=True)
 
 
+def load_worldcup_fixture_overlay(path: Path = WORLD_CUP_2026_FIXTURE_OVERLAY_FILE) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=FIXTURE_OVERLAY_COLUMNS)
+    try:
+        frame = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame(columns=FIXTURE_OVERLAY_COLUMNS)
+    if frame.empty:
+        return pd.DataFrame(columns=FIXTURE_OVERLAY_COLUMNS)
+    output = frame.copy()
+    for column in FIXTURE_OVERLAY_COLUMNS:
+        if column not in output.columns:
+            output[column] = ""
+    output["num"] = output["num"].astype(str).str.strip()
+    output["date"] = pd.to_datetime(output["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    output["home"] = output["home"].map(clean_team_name)
+    output["away"] = output["away"].map(clean_team_name)
+    output = output[
+        output["num"].astype(str).str.len().gt(0)
+        & output["date"].notna()
+        & output["home"].astype(str).str.len().gt(1)
+        & output["away"].astype(str).str.len().gt(1)
+        & ~output["home"].map(is_unresolved_fixture_team)
+        & ~output["away"].map(is_unresolved_fixture_team)
+    ].copy()
+    return output[FIXTURE_OVERLAY_COLUMNS].reset_index(drop=True)
+
+
 def fixture_results_status(fixture_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
     overrides = load_worldcup_results_override()
     confirmed = 0
@@ -313,7 +343,8 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
     """Refresh final 2026 World Cup scores, preserving valid local rows."""
 
     existing = load_worldcup_results_override()
-    status = fixture_results_status(tournament_fixtures_dataframe(tournament))
+    fixture_df = tournament_fixtures_dataframe(tournament)
+    status = fixture_results_status(fixture_df)
     if not refresh:
         return {
             **status,
@@ -328,10 +359,20 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
             "warnings": [],
             "provider_warnings": [],
             "missing_result_fixtures": [],
+            "fixture_overlay_rows": int(load_worldcup_fixture_overlay().shape[0]),
+            "unresolved_fixture_rows": int(unresolved_worldcup_2026_fixture_rows(fixture_df).shape[0]),
         }
 
     provider_warnings: List[str] = []
+    now = _worldcup_now_utc()
+    overlay_summary = refresh_worldcup_2026_fixture_overlay(
+        fixture_df,
+        existing_results=existing,
+        provider_warnings=provider_warnings,
+        now=now,
+    )
     fixture_df = tournament_fixtures_dataframe(tournament)
+    status = fixture_results_status(fixture_df)
     if fixture_df.empty:
         return {
             **status,
@@ -346,9 +387,9 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
             "warnings": ["No hay fixtures 2026 para refrescar resultados."],
             "provider_warnings": [],
             "missing_result_fixtures": [],
+            **overlay_summary,
         }
 
-    now = _worldcup_now_utc()
     working = finalizable_worldcup_2026_fixtures(fixture_df, now=now)
     fotmob_rows = fetch_fotmob_worldcup_result_rows(working, provider_warnings)
     sofascore_rows = fetch_sofascore_worldcup_result_rows(working, provider_warnings)
@@ -390,6 +431,192 @@ def refresh_worldcup_2026_results(tournament: Dict[str, Any], refresh: bool = Fa
         "warnings": list(dict.fromkeys(warnings)),
         "provider_warnings": list(dict.fromkeys(provider_warnings)),
         "missing_result_fixtures": missing_result_fixtures,
+        **overlay_summary,
+    }
+
+
+def refresh_worldcup_2026_fixture_overlay(
+        fixture_df: pd.DataFrame,
+        existing_results: pd.DataFrame,
+        provider_warnings: List[str],
+        now: Any | None = None,
+) -> Dict[str, Any]:
+    existing = load_worldcup_fixture_overlay()
+    unresolved = unresolved_worldcup_2026_fixture_rows(fixture_df, now=now)
+    fetched = fixture_overlay_rows_from_results(unresolved, existing_results)
+    fetched.extend(fetch_fotmob_worldcup_fixture_overlay_rows(unresolved, provider_warnings))
+    fetched.extend(fetch_sofascore_worldcup_fixture_overlay_rows(unresolved, provider_warnings))
+    merge = _merge_fixture_overlay_rows(existing, fetched)
+    merged_rows = merge["rows"]
+    if fetched and merged_rows:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(merged_rows, columns=FIXTURE_OVERLAY_COLUMNS).to_csv(WORLD_CUP_2026_FIXTURE_OVERLAY_FILE, index=False)
+    overlay_count = int(len(merged_rows) if fetched else existing.shape[0])
+    return {
+        "fixture_overlay_rows": overlay_count,
+        "fixture_overlay_added": int(merge["added"]),
+        "fixture_overlay_updated": int(merge["updated"]),
+        "unresolved_fixture_rows": int(unresolved.shape[0]),
+    }
+
+
+def unresolved_worldcup_2026_fixture_rows(fixture_df: pd.DataFrame, now: Any | None = None) -> pd.DataFrame:
+    if fixture_df is None or fixture_df.empty:
+        return pd.DataFrame()
+    working = fixture_df.copy()
+    working["_date"] = pd.to_datetime(working.get("Fecha"), utc=True, errors="coerce")
+    now_ts = _worldcup_now_utc(now)
+    max_date = (pd.Timestamp(now_ts).tz_convert(timezone.utc) + pd.Timedelta(days=7)).normalize()
+    unresolved = (
+        working["Equipo 1"].map(is_unresolved_fixture_team)
+        | working["Equipo 2"].map(is_unresolved_fixture_team)
+    )
+    return working[
+        unresolved
+        & working["_date"].notna()
+        & (working["_date"] <= max_date)
+    ].sort_values(["_date", "No."], kind="stable").copy()
+
+
+def fixture_overlay_rows_from_results(unresolved: pd.DataFrame, results: pd.DataFrame) -> List[Dict[str, Any]]:
+    if unresolved is None or unresolved.empty or results is None or results.empty:
+        return []
+    results_by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for _, row in results.iterrows():
+        if not _result_override_row_is_valid(row.to_dict()):
+            continue
+        date_key = _worldcup_fixture_overlay_key("", row.get("date"))[1]
+        home = clean_team_name(row.get("home"))
+        away = clean_team_name(row.get("away"))
+        if not date_key or is_unresolved_fixture_team(home) or is_unresolved_fixture_team(away):
+            continue
+        results_by_date.setdefault(date_key, []).append(row.to_dict())
+    output: List[Dict[str, Any]] = []
+    used: set[Tuple[str, int]] = set()
+    for _, fixture in unresolved.iterrows():
+        date_key = _worldcup_fixture_overlay_key(fixture.get("No."), fixture.get("Fecha"))[1]
+        candidates = results_by_date.get(date_key, [])
+        for index, row in enumerate(candidates):
+            used_key = (date_key, index)
+            if used_key in used:
+                continue
+            used.add(used_key)
+            output.append(fixture_overlay_payload(
+                fixture,
+                home=row.get("home"),
+                away=row.get("away"),
+                source=f"local_results_csv:{row.get('source') or 'manual'}",
+            ))
+            break
+    return output
+
+
+def fetch_fotmob_worldcup_fixture_overlay_rows(unresolved: pd.DataFrame, warnings: List[str]) -> List[Dict[str, Any]]:
+    if unresolved is None or unresolved.empty:
+        return []
+    try:
+        from src.worldcup.fotmob_provider import (  # pylint: disable=import-outside-toplevel
+            FOTMOB_MATCHES_URL,
+            extract_fotmob_matches,
+            fotmob_get_json,
+            fotmob_team_name,
+        )
+    except Exception as exc:
+        warnings.append(f"FotMob fixture overlay no disponible: {exc.__class__.__name__}.")
+        return []
+    events_by_date: Dict[str, List[Tuple[str, str, str]]] = {}
+    for date_key in sorted({str(value.date()) for value in unresolved["_date"].dropna()}):
+        try:
+            payload = fotmob_get_json(FOTMOB_MATCHES_URL, params={"date": date_key.replace("-", "")})
+            events = extract_fotmob_matches(payload)
+            pairs = []
+            for event in events:
+                home = clean_team_name(fotmob_team_name(event.get("home")))
+                away = clean_team_name(fotmob_team_name(event.get("away")))
+                if fixture_overlay_pair_is_valid(home, away):
+                    pairs.append((home, away, f"fotmob:{event.get('id') or event.get('matchId') or ''}"))
+            events_by_date[date_key] = pairs
+        except Exception as exc:
+            warnings.append(f"FotMob fixture overlay {date_key}: {exc.__class__.__name__}.")
+            events_by_date[date_key] = []
+    return assign_fixture_overlay_events(unresolved, events_by_date)
+
+
+def fetch_sofascore_worldcup_fixture_overlay_rows(unresolved: pd.DataFrame, warnings: List[str]) -> List[Dict[str, Any]]:
+    if unresolved is None or unresolved.empty:
+        return []
+    try:
+        from src.worldcup.lanus_provider import event_team_name, import_lanusstats  # pylint: disable=import-outside-toplevel
+    except Exception as exc:
+        warnings.append(f"SofaScore fixture overlay no disponible: {exc.__class__.__name__}.")
+        return []
+    try:
+        lanus = import_lanusstats()
+    except Exception as exc:
+        warnings.append(f"SofaScore fixture overlay no disponible: {exc.__class__.__name__}.")
+        return []
+    events_by_date: Dict[str, List[Tuple[str, str, str]]] = {}
+    for date_key in sorted({str(value.date()) for value in unresolved["_date"].dropna()}):
+        sofascore = lanus.SofaScore()
+        try:
+            payload = sofascore.sofascore_request(f"api/v1/sport/football/scheduled-events/{date_key}")
+            events = payload.get("events", []) if isinstance(payload, dict) else []
+            pairs = []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                home = clean_team_name(event_team_name(event, "home"))
+                away = clean_team_name(event_team_name(event, "away"))
+                if fixture_overlay_pair_is_valid(home, away):
+                    pairs.append((home, away, f"sofascore:{event.get('id') or ''}"))
+            events_by_date[date_key] = pairs
+        except Exception as exc:
+            warnings.append(f"SofaScore fixture overlay {date_key}: {exc.__class__.__name__}.")
+            events_by_date[date_key] = []
+        finally:
+            close = getattr(sofascore, "close", None)
+            if callable(close):
+                close()
+    return assign_fixture_overlay_events(unresolved, events_by_date)
+
+
+def assign_fixture_overlay_events(
+        unresolved: pd.DataFrame,
+        events_by_date: Dict[str, List[Tuple[str, str, str]]],
+) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    used: set[Tuple[str, int]] = set()
+    for _, fixture in unresolved.iterrows():
+        date_key = _worldcup_fixture_overlay_key(fixture.get("No."), fixture.get("Fecha"))[1]
+        for index, (home, away, source) in enumerate(events_by_date.get(date_key, [])):
+            used_key = (date_key, index)
+            if used_key in used:
+                continue
+            used.add(used_key)
+            output.append(fixture_overlay_payload(fixture, home=home, away=away, source=source))
+            break
+    return output
+
+
+def fixture_overlay_pair_is_valid(home: Any, away: Any) -> bool:
+    home_name = clean_team_name(home)
+    away_name = clean_team_name(away)
+    return bool(
+        home_name
+        and away_name
+        and not is_unresolved_fixture_team(home_name)
+        and not is_unresolved_fixture_team(away_name)
+    )
+
+
+def fixture_overlay_payload(fixture: pd.Series, home: Any, away: Any, source: str) -> Dict[str, Any]:
+    return {
+        "num": str(fixture.get("No.", "")).strip(),
+        "date": str(fixture.get("Fecha", ""))[:10],
+        "home": clean_team_name(home),
+        "away": clean_team_name(away),
+        "source": source,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -702,19 +929,59 @@ def _merge_result_override_rows(existing: pd.DataFrame, fetched: List[Dict[str, 
     return {"rows": ordered, "added": added, "updated": updated, "conflicts": conflicts}
 
 
+def _merge_fixture_overlay_rows(existing: pd.DataFrame, fetched: List[Dict[str, Any]]) -> Dict[str, Any]:
+    rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    original_keys = set()
+    for _, row in existing.iterrows():
+        payload = {column: row.get(column, "") for column in FIXTURE_OVERLAY_COLUMNS}
+        key = _worldcup_fixture_overlay_key(payload.get("num"), payload.get("date"))
+        if key[0] and key[1]:
+            rows[key] = payload
+            original_keys.add(key)
+    added = 0
+    updated = 0
+    for row in fetched:
+        incoming = {column: row.get(column, "") for column in FIXTURE_OVERLAY_COLUMNS}
+        key = _worldcup_fixture_overlay_key(incoming.get("num"), incoming.get("date"))
+        if not key[0] or not key[1] or not fixture_overlay_pair_is_valid(incoming.get("home"), incoming.get("away")):
+            continue
+        existing_row = rows.get(key)
+        if not existing_row:
+            rows[key] = incoming
+            added += int(key not in original_keys)
+            continue
+        should_replace = _fixture_overlay_source_priority(incoming.get("source")) > _fixture_overlay_source_priority(existing_row.get("source"))
+        if should_replace:
+            rows[key] = incoming
+            updated += 1
+    ordered = sorted(rows.values(), key=lambda item: (_worldcup_fixture_overlay_key(item.get("num"), item.get("date"))))
+    return {"rows": ordered, "added": added, "updated": updated}
+
+
+def _fixture_overlay_source_priority(source: Any) -> int:
+    text = str(source or "").strip().lower()
+    if text.startswith("local_results_csv:") or text in {"manual", "local_csv", "csv"}:
+        return 50
+    if text.startswith("fotmob:") or text.startswith("sofascore:"):
+        return 30
+    return 10
+
+
 def _result_score_pair(row: Dict[str, Any]) -> Optional[Tuple[int, int]]:
     return _score_pair_from_values(row.get("home_goals"), row.get("away_goals"))
 
 
 def _result_source_priority(source: Any) -> int:
     text = str(source or "").strip().lower()
+    if text in {"manual", "local_csv", "csv"}:
+        return 50
     if text.startswith("fotmob:") or text.startswith("sofascore:"):
         return 40
     if text.startswith("verified:"):
         return 30
     if text.startswith("guardian:"):
         return 20
-    if text in {"manual", "guardian", "local_csv", "csv"}:
+    if text == "guardian":
         return 10
     return 5
 
@@ -934,15 +1201,23 @@ def groups_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
 
 def tournament_fixtures_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
     result_overrides = _worldcup_result_overrides_by_key()
+    fixture_overrides = _worldcup_fixture_overlays_by_key()
     rows = []
     for index, match in enumerate(tournament.get("matches", []), start=1):
         score = match.get("score") or {}
         ft = score.get("ft") if isinstance(score, dict) else None
         goals_1 = ft[0] if isinstance(ft, list) and len(ft) == 2 else ""
         goals_2 = ft[1] if isinstance(ft, list) and len(ft) == 2 else ""
+        match_num = match.get("num") or index
         home = clean_team_name(match.get("team1"))
         away = clean_team_name(match.get("team2"))
         date_value = match.get("date", "")
+        fixture_overlay_source = ""
+        fixture_overlay = fixture_overrides.get(_worldcup_fixture_overlay_key(match_num, date_value))
+        if fixture_overlay and (is_unresolved_fixture_team(home) or is_unresolved_fixture_team(away)):
+            home = str(fixture_overlay.get("home") or home)
+            away = str(fixture_overlay.get("away") or away)
+            fixture_overlay_source = str(fixture_overlay.get("source") or "")
         result_source = "fixture-cache" if goals_1 != "" and goals_2 != "" else ""
         result_updated = ""
         result_override = "No"
@@ -954,7 +1229,7 @@ def tournament_fixtures_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
             result_updated = str(override.get("updated_at") or "")
             result_override = "Si"
         rows.append({
-            "No.": match.get("num") or index,
+            "No.": match_num,
             "Fecha": date_value,
             "Hora": match.get("time", ""),
             "Ronda": match.get("round", ""),
@@ -968,10 +1243,12 @@ def tournament_fixtures_dataframe(tournament: Dict[str, Any]) -> pd.DataFrame:
             "Fuente Resultado": result_source,
             "Resultado Actualizado": result_updated,
             "Resultado Override": result_override,
+            "Fixture Overlay": fixture_overlay_source,
         })
     return pd.DataFrame(rows, columns=[
         "No.", "Fecha", "Hora", "Ronda", "Grupo", "Equipo 1", "Equipo 2", "Sede",
         "Goles 1", "Goles 2", "Finalizado", "Fuente Resultado", "Resultado Actualizado", "Resultado Override",
+        "Fixture Overlay",
     ])
 
 
@@ -987,6 +1264,24 @@ def _worldcup_result_overrides_by_key() -> Dict[Tuple[str, str, str], Dict[str, 
         if key[0] and key[1] and key[2]:
             result[key] = row.to_dict()
     return result
+
+
+def _worldcup_fixture_overlays_by_key() -> Dict[Tuple[str, str], Dict[str, Any]]:
+    overlays = load_worldcup_fixture_overlay()
+    if overlays.empty:
+        return {}
+    result: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for _, row in overlays.iterrows():
+        key = _worldcup_fixture_overlay_key(row.get("num"), row.get("date"))
+        if key[0] and key[1]:
+            result[key] = row.to_dict()
+    return result
+
+
+def _worldcup_fixture_overlay_key(num: Any, date_value: Any) -> Tuple[str, str]:
+    timestamp = pd.to_datetime(date_value, errors="coerce")
+    date_key = str(timestamp.date()) if pd.notna(timestamp) else str(date_value or "")[:10]
+    return str(num or "").strip(), date_key
 
 
 def _worldcup_result_key(date_value: Any, home: Any, away: Any) -> Tuple[str, str, str]:

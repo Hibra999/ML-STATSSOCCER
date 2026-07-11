@@ -82,6 +82,7 @@ from src.worldcup.international_provider import (
     international_results_status,
     is_friendly_tournament,
     load_international_matches,
+    normalize_international_matches,
     recent15_feature_table,
     recent_match_importance_label,
     recent_match_recency_weight,
@@ -203,11 +204,11 @@ _MONTE_CARLO_CUDA_BACKEND: Tuple[str, str] | None = None
 
 
 class RecentPoissonWorldCupModel:
-    def __init__(self, base_model: WorldCupModel, recent_match_limit: int = 15):
+    def __init__(self, base_model: WorldCupModel, recent_match_limit: int = 15, matches: pd.DataFrame | None = None):
         self.base_model = base_model
         self.recent_match_limit = int(min(50, max(3, int(recent_match_limit or 15))))
         self.max_goals = int(getattr(base_model, "max_goals", DEFAULT_CONFIG["max_goals"]))
-        self.matches = load_international_matches(required=False)
+        self.matches = matches if matches is not None else load_international_matches(required=False)
 
     def profile(self, team: str):
         return self.base_model.profile(team)
@@ -216,6 +217,7 @@ class RecentPoissonWorldCupModel:
         return RecentPoissonWorldCupModel(
             base_model=self.base_model.adjusted(rating_adjustments),
             recent_match_limit=self.recent_match_limit,
+            matches=self.matches,
         )
 
     def expected_goals(self, team1: str, team2: str):
@@ -285,7 +287,90 @@ def apply_recent_context_model(model: Any, config: Dict[str, Any]) -> Any:
     return RecentPoissonWorldCupModel(
         base_model=model,
         recent_match_limit=int(config.get("poisson_recent_matches") or DEFAULT_CONFIG["poisson_recent_matches"]),
+        matches=config.get("_recent_context_matches") if isinstance(config.get("_recent_context_matches"), pd.DataFrame) else None,
     )
+
+
+def attach_recent_context_matches(config: Dict[str, Any], tournament: Dict[str, Any]) -> pd.DataFrame:
+    matches = recent_context_matches_for_tournament(tournament)
+    config["_recent_context_matches"] = matches
+    return matches
+
+
+def recent_context_matches_for_tournament(
+        tournament: Dict[str, Any],
+        base_matches: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    base = load_international_matches(required=False) if base_matches is None else base_matches
+    worldcup_rows = confirmed_worldcup_2026_international_rows(tournament)
+    frames = []
+    if base is not None and not base.empty:
+        frames.append(base.copy())
+    if not worldcup_rows.empty:
+        frames.append(worldcup_rows.copy())
+    if not frames:
+        return base if isinstance(base, pd.DataFrame) else pd.DataFrame()
+    mixed = pd.concat(frames, ignore_index=True)
+    mixed = dedupe_recent_context_matches(mixed)
+    source_path = str(getattr(base, "attrs", {}).get("source_path") or INTERNATIONAL_ROOT / "all_matches.csv")
+    mixed.attrs.update(getattr(base, "attrs", {}))
+    mixed.attrs["source_path"] = f"{source_path}+worldcup_2026_results.csv"
+    mixed.attrs["worldcup_2026_context_rows"] = int(worldcup_rows.shape[0])
+    mixed.attrs["base_rows"] = int(base.shape[0]) if isinstance(base, pd.DataFrame) else 0
+    return mixed
+
+
+def confirmed_worldcup_2026_international_rows(tournament: Dict[str, Any]) -> pd.DataFrame:
+    from src.worldcup import data as worldcup_data  # pylint: disable=import-outside-toplevel
+
+    records: List[Dict[str, Any]] = []
+    confirmed = confirmed_worldcup_2026_backtest_rows(tournament)
+    for _, row in confirmed.iterrows():
+        records.append({
+            "date": row.get("Date", ""),
+            "home_team": row.get("Team 1", ""),
+            "away_team": row.get("Team 2", ""),
+            "home_score": row.get("G1", ""),
+            "away_score": row.get("G2", ""),
+            "tournament": row.get("Round", "") or "FIFA World Cup",
+            "country": "World Cup 2026",
+            "neutral": True,
+        })
+    overrides = worldcup_data.load_worldcup_results_override()
+    for _, row in overrides.iterrows():
+        if str(row.get("status", "")).strip().lower() not in {"final", "finished", "si", "sí"}:
+            continue
+        records.append({
+            "date": row.get("date", ""),
+            "home_team": row.get("home", ""),
+            "away_team": row.get("away", ""),
+            "home_score": row.get("home_goals", ""),
+            "away_score": row.get("away_goals", ""),
+            "tournament": "FIFA World Cup",
+            "country": "World Cup 2026",
+            "neutral": True,
+        })
+    if not records:
+        return pd.DataFrame(columns=["date", "home_team", "away_team", "home_score", "away_score", "tournament", "country", "neutral"])
+    return normalize_international_matches(pd.DataFrame(records))
+
+
+def dedupe_recent_context_matches(matches: pd.DataFrame) -> pd.DataFrame:
+    if matches is None or matches.empty:
+        return matches
+    working = matches.copy()
+    working["_date_key"] = pd.to_datetime(working["date"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    working["_home_key"] = working["home_team"].map(team_name_key)
+    working["_away_key"] = working["away_team"].map(team_name_key)
+    working = working.drop_duplicates(subset=["_date_key", "_home_key", "_away_key"], keep="last")
+    working = working.drop(columns=["_date_key", "_home_key", "_away_key"], errors="ignore")
+    return working.sort_values("date", kind="stable").reset_index(drop=True)
+
+
+def recent_context_autorefresh_summary(summary: Dict[str, Any], matches: pd.DataFrame) -> Dict[str, Any]:
+    output = dict(summary or {})
+    output["recent_context_worldcup_rows"] = int(getattr(matches, "attrs", {}).get("worldcup_2026_context_rows", 0) or 0)
+    return output
 
 
 def _match_before_date(match: Dict[str, Any] | None) -> Any:
@@ -378,7 +463,7 @@ class BenchmarkFeatureSource:
         except Exception as exc:
             self.warnings.append(f"API-Football cache no disponible para features ({exc.__class__.__name__}).")
         try:
-            self.international_matches = load_international_matches(required=False)
+            self.international_matches = recent_context_matches_for_tournament(self.tournament)
             scope_teams = [team for group_teams in groups_from_tournament(self.tournament).values() for team in group_teams]
             self.international_matches = filter_training_scope_sources(
                 self.international_matches,
@@ -1016,7 +1101,7 @@ def overview(refresh: bool = False) -> Dict[str, Any]:
     tournament, fixture_source = load_tournament_2026(refresh=bool(refresh))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
     groups = groups_from_tournament(tournament)
-    fixture_df = tournament_fixtures_dataframe(tournament)
+    fixture_df = visible_fixture_results_dataframe(tournament_fixtures_dataframe(tournament))
     players_df, players_source = load_players(refresh=False)
     fixture_summary = fixture_overview_payload(fixture_df)
     standings = group_standings_payload(groups, fixture_df)
@@ -1061,7 +1146,7 @@ def groups(refresh: bool = False) -> Dict[str, Any]:
     tournament, source = load_tournament_2026(refresh=bool(refresh))
     ensure_worldcup_results_autorefreshed_once(tournament)
     group_map = groups_from_tournament(tournament)
-    fixture_df = tournament_fixtures_dataframe(tournament)
+    fixture_df = visible_fixture_results_dataframe(tournament_fixtures_dataframe(tournament))
     results_status = fixture_results_status(fixture_df)
     items = []
     for group_name, team_names in group_map.items():
@@ -1092,7 +1177,7 @@ def groups(refresh: bool = False) -> Dict[str, Any]:
 def fixtures(refresh: bool = False) -> Dict[str, Any]:
     tournament, source = load_tournament_2026(refresh=bool(refresh))
     ensure_worldcup_results_autorefreshed_once(tournament)
-    df = tournament_fixtures_dataframe(tournament)
+    df = visible_fixture_results_dataframe(tournament_fixtures_dataframe(tournament))
     results_status = fixture_results_status(df)
     rows = []
     for _, row in df.iterrows():
@@ -1301,6 +1386,8 @@ def predict_match(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     config = simulation_config(payload)
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
+    recent_context_matches = attach_recent_context_matches(config, tournament)
+    results_autorefresh = recent_context_autorefresh_summary(results_autorefresh, recent_context_matches)
     model, history_source = build_model(tournament, config)
     model = apply_configured_score_model(model, tournament, config)
     result = poisson_match_payload(
@@ -1324,6 +1411,8 @@ def predict_upcoming(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     config = simulation_config(payload)
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
+    recent_context_matches = attach_recent_context_matches(config, tournament)
+    results_autorefresh = recent_context_autorefresh_summary(results_autorefresh, recent_context_matches)
     model, history_source = build_model(tournament, config)
     model = apply_configured_score_model(model, tournament, config)
 
@@ -1365,9 +1454,10 @@ def predict_upcoming_monte_carlo(payload: Dict[str, Any] | None = None) -> Dict[
     config["iterations"] = monte_carlo_match_iterations(payload.get("iterations", DEFAULT_CONFIG["iterations"]))
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
+    international_matches = attach_recent_context_matches(config, tournament)
+    results_autorefresh = recent_context_autorefresh_summary(results_autorefresh, international_matches)
     model, history_source = build_model(tournament, config)
     model = apply_configured_score_model(model, tournament, config)
-    international_matches = load_international_matches(required=False)
     limit = int(_clamp_int(payload.get("limit", 8), 1, 72))
     group_filter = str(payload.get("group") or "").strip()
     fixture_df = upcoming_fixture_rows(tournament, group_filter=group_filter)
@@ -1445,6 +1535,7 @@ def poisson_match_payload(
         base_model=base_model,
         before_date=fixture.get("Fecha", ""),
         max_goals=int(config.get("max_goals") or DEFAULT_CONFIG["max_goals"]),
+        matches=config.get("_recent_context_matches") if isinstance(config.get("_recent_context_matches"), pd.DataFrame) else None,
         limit=int(poisson_recent_matches),
     )
     context_warnings = context.get("warnings", [])
@@ -1898,6 +1989,8 @@ def predict_upcoming_report(payload: Dict[str, Any] | None = None, progress_call
         )
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
+    recent_context_matches = attach_recent_context_matches(config, tournament)
+    results_autorefresh = recent_context_autorefresh_summary(results_autorefresh, recent_context_matches)
     base_model, history_source = build_model(tournament, config)
     feature_history_df, _ = score_history_for_tournament(tournament, config)
     feature_source = benchmark_feature_source(tournament, feature_history_df, config)
@@ -2090,6 +2183,8 @@ def xg_lightgbm_report(
     model_id, model_meta, model_warnings = resolve_xg_lightgbm_model(payload)
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
+    recent_context_matches = attach_recent_context_matches(config, tournament)
+    results_autorefresh = recent_context_autorefresh_summary(results_autorefresh, recent_context_matches)
     base_model, history_source = build_model(tournament, config)
     base_model = apply_recent_context_model(base_model, config)
     history_df, _ = score_history_for_tournament(tournament, config)
@@ -2363,6 +2458,8 @@ def advanced_models_report(
 ) -> Dict[str, Any]:
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
+    recent_context_matches = attach_recent_context_matches(config, tournament)
+    results_autorefresh = recent_context_autorefresh_summary(results_autorefresh, recent_context_matches)
     history_df, history_source = score_history_for_tournament(tournament, config)
     feature_source = benchmark_feature_source(tournament, history_df, config)
     data_status = config.get("_advanced_data_status") if isinstance(config.get("_advanced_data_status"), dict) else advanced_data_status()
@@ -3033,6 +3130,8 @@ def alternatives_benchmark_report(
     tournament, fixture_source = load_tournament_2026(refresh=refresh_fixtures)
     ensure_worldcup_results_autorefreshed_once(tournament)
     results_refresh = refresh_worldcup_2026_results(tournament, refresh=True)
+    recent_context_matches = attach_recent_context_matches(config, tournament)
+    results_refresh = recent_context_autorefresh_summary(results_refresh, recent_context_matches)
     history_df, history_source = score_history_for_tournament(tournament, config)
     feature_source = benchmark_feature_source(tournament, history_df, config)
     model_sequence = list(config.get("selected_score_models") or BENCHMARK_SCORE_MODEL_SEQUENCE)
@@ -3706,6 +3805,8 @@ def evaluate_xg_lightgbm_walk_forward_2026(
     warnings: List[str] = [str(item) for item in meta_warnings if str(item)]
     model_available = bool(model_meta.get("trained") or model_meta.get("bundle") or model_meta.get("model_id"))
     prefix_df = pre_eval_confirmed_df if pre_eval_confirmed_df is not None else pd.DataFrame()
+    walk_forward_recent_matches = recent_context_matches_for_tournament(tournament)
+    walk_forward_config = {**config, "_recent_context_matches": walk_forward_recent_matches}
     for fixture_index, (_, eval_row) in enumerate(confirmed_df.iterrows(), start=1):
         emit_report_progress(
             progress_callback,
@@ -3742,23 +3843,28 @@ def evaluate_xg_lightgbm_walk_forward_2026(
         try:
             prediction = predict_match_payload(
                 tournament,
-                apply_recent_context_model(baseline_model, config),
+                apply_recent_context_model(baseline_model, walk_forward_config),
                 fixture_id=eval_row.get("No.", ""),
                 home=str(eval_row.get("Team 1", "")),
                 away=str(eval_row.get("Team 2", "")),
                 use_ml_model=True,
                 ml_weight=1.0,
                 model_id=model_id,
-                poisson_recent_matches=int(config.get("poisson_recent_matches") or DEFAULT_CONFIG["poisson_recent_matches"]),
+                poisson_recent_matches=int(walk_forward_config.get("poisson_recent_matches") or DEFAULT_CONFIG["poisson_recent_matches"]),
             )
         except Exception as exc:
             model_available = False
             warnings.append(f"Backtest xG omitio {eval_row.get('Team 1', '')} vs {eval_row.get('Team 2', '')}: {exc.__class__.__name__}.")
             continue
-        row_metrics = xg_lightgbm_backtest_prediction(prediction, eval_row, config)
+        row_metrics = xg_lightgbm_backtest_prediction(prediction, eval_row, walk_forward_config)
         if not row_metrics:
             continue
-        row_metrics["sample"]["recent_matches_15"] = recent_matches_for_fixture(train_df, eval_row, limit=15)
+        row_metrics["sample"]["recent_matches_15"] = recent_matches_for_fixture(
+            train_df,
+            eval_row,
+            limit=15,
+            international_matches=walk_forward_recent_matches,
+        )
         accumulate_backtest_totals(totals, row_metrics)
         match_rows.append(row_metrics["sample"])
         if len(sample_rows) < 8:
@@ -4164,6 +4270,12 @@ def evaluate_score_model_walk_forward_2026(
     warnings: List[str] = []
     model_available = True
     international_status = international_results_status() if feature_source is not None else None
+    walk_forward_recent_matches = (
+        feature_source.international_matches
+        if feature_source is not None and isinstance(feature_source.international_matches, pd.DataFrame)
+        else recent_context_matches_for_tournament(tournament)
+    )
+    walk_forward_config = {**config, "_recent_context_matches": walk_forward_recent_matches}
     prefix_df = pre_eval_confirmed_df if pre_eval_confirmed_df is not None else pd.DataFrame()
     for fixture_index, (_, eval_row) in enumerate(confirmed_df.iterrows(), start=1):
         progress_message = f"Backtest {score_model_display_label(model_key)}: {eval_row.get('Team 1', '')} vs {eval_row.get('Team 2', '')}"
@@ -4239,10 +4351,10 @@ def evaluate_score_model_walk_forward_2026(
                     "params": {},
                     "warnings": [warning],
                 }
-        prediction_model = apply_recent_context_model(model, config)
+        prediction_model = apply_recent_context_model(model, walk_forward_config)
         prediction_model = apply_benchmark_feature_model(prediction_model, model_key, feature_source, history_df=train_df)
         row_metrics = run_report_step_with_heartbeat(
-            lambda: score_model_backtest_prediction(prediction_model, eval_row, config),
+            lambda: score_model_backtest_prediction(prediction_model, eval_row, walk_forward_config),
             progress_callback=progress_callback,
             stage="backtesting",
             start_time=start_time,
@@ -4260,7 +4372,7 @@ def evaluate_score_model_walk_forward_2026(
             train_df,
             eval_row,
             limit=15,
-            international_matches=feature_source.international_matches if feature_source is not None else None,
+            international_matches=walk_forward_recent_matches,
             international_status=international_status,
         )
         accumulate_backtest_totals(totals, row_metrics)
@@ -5389,6 +5501,13 @@ def upcoming_sota_fixture_reports(
         feature_source: BenchmarkFeatureSource | None = None,
         progress_callback=None,
 ) -> List[Dict[str, Any]]:
+    report_international_matches = (
+        getattr(feature_source, "international_matches")
+        if feature_source is not None and isinstance(getattr(feature_source, "international_matches", None), pd.DataFrame)
+        else config.get("_recent_context_matches")
+        if isinstance(config.get("_recent_context_matches"), pd.DataFrame)
+        else None
+    )
     fixture_reports = [
         {
             "fixture": report_fixture_payload({
@@ -5408,6 +5527,7 @@ def upcoming_sota_fixture_reports(
                 base_model=base_model,
                 before_date=fixture.get("Fecha", ""),
                 max_goals=int(config["max_goals"]),
+                matches=report_international_matches,
                 limit=int(config["poisson_recent_matches"]),
             ),
             "models": [],
@@ -5418,7 +5538,7 @@ def upcoming_sota_fixture_reports(
     team_names = [team for group_teams in group_map.values() for team in group_teams]
     if history_df is None or history_df.empty:
         history_df, _ = score_history_for_tournament(tournament, config)
-    international_matches = load_international_matches(required=False)
+    international_matches = report_international_matches if isinstance(report_international_matches, pd.DataFrame) else load_international_matches(required=False)
     international_status = international_results_status()
     for report, fixture in zip(fixture_reports, fixtures):
         report["recent_matches_15"] = recent_matches_for_fixture(
@@ -7570,7 +7690,7 @@ def _pct_count(count: int, total: int) -> float:
 
 
 def upcoming_fixture_rows(tournament: Dict[str, Any], group_filter: str = "") -> pd.DataFrame:
-    df = tournament_fixtures_dataframe(tournament)
+    df = visible_fixture_results_dataframe(tournament_fixtures_dataframe(tournament))
     if group_filter:
         df = df[df["Grupo"].astype(str) == group_filter]
     df = df[
@@ -7581,7 +7701,39 @@ def upcoming_fixture_rows(tournament: Dict[str, Any], group_filter: str = "") ->
     ].copy()
     df = attach_fixture_schedule(df)
     upcoming = future_fixture_rows(df)
+    if upcoming.empty:
+        upcoming = pending_unscored_fixture_rows(df)
     return drop_internal_fixture_columns(upcoming.sort_values(["_sort_time", "No."], kind="stable"))
+
+
+def visible_fixture_results_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    working = attach_fixture_schedule(df)
+    now = _utcify_datetime(_now_utc())
+    today = pd.Timestamp(now).tz_convert(timezone.utc).normalize()
+    has_time = working["_has_kickoff_time"].astype(bool)
+    future_by_time = has_time & working["_kickoff"].notna() & (working["_kickoff"] > now)
+    future_by_date = ~has_time & working["_date"].notna() & (working["_date"] >= today)
+    future = future_by_time | future_by_date
+    if not future.any():
+        return drop_internal_fixture_columns(working)
+    visible = working.copy()
+    visible.loc[future, ["Goles 1", "Goles 2"]] = ""
+    visible.loc[future, "Finalizado"] = "No"
+    for column in ("Fuente Resultado", "Resultado Actualizado", "Resultado Override"):
+        if column in visible.columns:
+            visible.loc[future, column] = ""
+    return drop_internal_fixture_columns(visible)
+
+
+def pending_unscored_fixture_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    finished = pd.Series(False, index=df.index)
+    if "Finalizado" in df.columns:
+        finished = df["Finalizado"].astype(str).str.strip().str.lower().isin({"si", "sí", "yes", "true", "1"})
+    return df[~finished].sort_values(["_sort_time", "No."], kind="stable").copy()
 
 
 def upcoming_prediction_row(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -7638,12 +7790,18 @@ def simulate(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     emit_job_progress(progress_callback, "preparing", 0, 100, "Preparando Monte Carlo")
     tournament, fixture_source = load_tournament_2026(refresh=bool(config["refresh"]))
     results_autorefresh = ensure_worldcup_results_autorefreshed_once(tournament)
+    recent_context_matches = attach_recent_context_matches(config, tournament)
+    results_autorefresh = recent_context_autorefresh_summary(results_autorefresh, recent_context_matches)
     model, history_source = build_model(tournament, config)
     poisson_layers = ["Poisson base"]
     if config["include_confirmed_results"]:
         poisson_layers.append("resultados confirmados")
     if config["mode"] == "poisson_live":
-        model = RecentPoissonWorldCupModel(model, recent_match_limit=int(config["poisson_recent_matches"]))
+        model = RecentPoissonWorldCupModel(
+            model,
+            recent_match_limit=int(config["poisson_recent_matches"]),
+            matches=recent_context_matches,
+        )
         poisson_layers.append(f"Poisson ultimos {config['poisson_recent_matches']}")
     model = apply_configured_score_model(model, tournament, config)
     score_metadata = score_model_metadata(model)
@@ -7877,7 +8035,7 @@ def simulation_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def confirmed_group_results(tournament: Dict[str, Any]) -> List[Dict[str, Any]]:
-    fixture_df = tournament_fixtures_dataframe(tournament)
+    fixture_df = visible_fixture_results_dataframe(tournament_fixtures_dataframe(tournament))
     if fixture_df.empty or not {"Goles 1", "Goles 2"}.issubset(fixture_df.columns):
         return []
     working = fixture_df.copy()
@@ -8218,7 +8376,7 @@ def attach_fixture_schedule(df: pd.DataFrame) -> pd.DataFrame:
     scheduled["_kickoff"] = pd.to_datetime(kickoff_values, utc=True, errors="coerce")
     scheduled["_has_kickoff_time"] = has_kickoff_time
     date_sort = pd.to_datetime(scheduled["Fecha"], utc=True, errors="coerce")
-    scheduled["_sort_time"] = scheduled["_kickoff"].where(scheduled["_kickoff"].notna(), date_sort)
+    scheduled["_sort_time"] = scheduled["_kickoff"].where(scheduled["_kickoff"].notna(), date_sort + pd.Timedelta(hours=23, minutes=59))
     return scheduled
 
 
